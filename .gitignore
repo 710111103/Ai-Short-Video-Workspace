@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+.runtime312/
 
 # Local secrets and machine state
 .env
@@ -47,6 +48,7 @@ verify-*
 volc_tts_doc*.html
 
 # Logs and process files
+logs/
 *.log
 *.pid
 *.out

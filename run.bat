@@ -6,9 +6,9 @@ set "ROOT=%~dp0"
 set "PYTHON=%ROOT%..\.venv\Scripts\python.exe"
 set "HEALTH_URL=http://127.0.0.1:8765/"
 set "APP_URL=http://127.0.0.1:8765/studio/"
-set "OUT_LOG=%ROOT%server.out.log"
-set "ERR_LOG=%ROOT%server.err.log"
-set "PID_FILE=%ROOT%server.pid"
+set "OUT_LOG=%ROOT%logs\server.out.log"
+set "ERR_LOG=%ROOT%logs\server.err.log"
+set "PID_FILE=%ROOT%logs\server.pid"
 
 if not exist "%PYTHON%" (
   echo [ERROR] Python virtual environment not found:
