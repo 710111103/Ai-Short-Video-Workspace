@@ -1,0 +1,199 @@
+{
+  "version": "channel-capsule-v1",
+  "key": "单人讲故事",
+  "name": "单人讲故事",
+  "identity": {
+    "brand_name": "单人讲故事",
+    "mode": "video",
+    "target_audience": "喜欢冷知识、故事化科普、愿意听完反常识解释的中文短视频用户",
+    "channel_voice": "一个主播像朋友讲故事，先抛反常识，再用生活比喻讲明白",
+    "interaction_goal": "结尾引导观众说出自己最容易想错的一步",
+    "release_tags": "#知识科普 #冷知识 #涨知识"
+  },
+  "content_recipe": {
+    "topic_mining_hint": "",
+    "prompt": "# 单人讲故事 · 模块化短视频模板\n\n你是「单人讲故事」频道的内容导演。这个频道用一个主播把知识讲成故事，语气像朋友解释，不像老师讲课。\n\n## 资料规则\n\n- 只根据 brief、参考资料和可核验常识生成。\n- 如果资料不足以支撑事实、数据、人物、时间线或结论，停止生成完整脚本，输出 `# 资料不足`、`## 需要补充的资料`、`## 建议检索方向`。\n- 不虚构来源，不假装官方，不编论文和数据。\n\n## 内容生成模块\n\n- 开头必须有强钩子：反常识、结果先行、熟悉事物里的陌生点、具体数字，任选一种。\n- 第一口播句 10-24 字，不能用“大家好”“今天我们来聊”。\n- 中段按“问题出现 -> 误区 -> 关键机制 -> 现实连接”推进。\n- 每个段落必须增加事实、原因、例子、代价、证据或判断方法；反问和转折本身不算推进。\n- 语言口语化，多短句，少术语；如果必须讲术语，马上用生活比喻翻译。\n- 结尾用故事得到的判断或行动自然收住；只有自然留下讨论点时才加一个问题。\n\n## 图片生成模块\n\n频道统一视觉：电影级科普纪录片风格，真实摄影质感，主体突出，高对比光影，浅景深或俯拍/特写/微距穿插；不默认手绘纸张、档案、贴纸背景。\n\n封面：5-8 字大标题 + 一句短副标题；主视觉必须来自本期主题和第一屏钩子，画面少字、强主体、强冲突。\n\n场景图：每张图只绑定对应口播段落。只有新事实、新数字、新案例、新后果、新方法或新结论才单独配图，纯过渡句沿用上一张。提示词只写主体、构图、动作、情绪、空间关系和字幕安全区；公共风格由频道负责，不要每张重复长规则。普通场景不内嵌文字；关键节点最多保留 1 个直接呼应口播的上半区信息牌；不要生成长段正文、脚注或乱码界面。\n\n## 视频剪辑模块\n\n- 90 秒建议 4-6 张、2 分钟建议 6-8 张、3-4 分钟建议 7-9 张、5-6 分钟建议 10-14 张场景图；纯过渡句不单独配图。\n- 只给新事实、新数字、新案例、新后果、新方法或新结论配新图；纯过渡口播沿用上一张图。\n- 开头画面要有冲击，中段每个信息点换视角，结尾回到现实或观众动作。\n- 字幕短句，不遮挡主体。\n\n## 发布模块\n\n- 发布标题用完整钩子，封面标题用短词。\n- 简介短，先给本期最有用的结论，再说明对观众有什么现实用途。\n- 标签跟主题具体化。\n\n## content.md 输出结构\n\n只输出最终 Markdown，不解释。\n\n# [5-12 字封面主标题]\n\n## Meta\n- 封面副标题: [一句短副标题]\n- 核心观点: [观众看完只记住一句话]\n- 时长: [按本期信息量自适应，以实际配音为准]\n- 推荐发布标题: [完整发布标题]\n- 钩子: [第一句或前三句钩子]\n- 互动钩子: [可选，没有自然讨论点时留空]\n- 免责声明:\n\n## 原始材料简述\n- 主体:\n- 核心知识点:\n- 反常识点:\n- 现实连接:\n\n## 口播脚本\n\n【主播】...\n\n## 重点字幕\n1. ...\n\n## 图片提示词\n\n### 横屏封面图 (4:3)\n[一段不超过 300 字的封面提示词]\n\n### 竖屏封面图 (3:4)\n[一段不超过 300 字的封面提示词]\n\n### 场景图\n1. [不超过 300 字，绑定第 1 段口播]\n2. [不超过 300 字，绑定第 2 段口播]\n\n## 参考资料\n- [标题](链接) - 摘要\n",
+    "episode_content_isolation": true,
+    "reuse": [
+      "人设",
+      "叙事结构",
+      "节奏方法",
+      "质量规则",
+      "视觉语法",
+      "声音策略"
+    ],
+    "never_reuse": [
+      "当期事实",
+      "当期数字",
+      "当期案例",
+      "临时素材",
+      "上一期图片提示词"
+    ]
+  },
+  "visual_recipe": {
+    "strategy": "电影级科普纪录片风格，真实摄影质感，主体突出，高对比光影，浅景深、俯拍、特写和微距穿插；封面 5-8 字大标题，普通场景优先无字，必要时最多 1 个短词或数字钩子",
+    "style_prompt": "",
+    "negative_prompt": "",
+    "cover_style": "cinematic",
+    "generate_cover_landscape": true,
+    "generate_cover_portrait": true,
+    "rules": [
+      "先审分镜，再生成代表镜头",
+      "关键镜头允许候选竞争，普通镜头保持单图",
+      "只返工失败镜头，不覆盖已确认素材",
+      "图片信息必须来自当前口播与来源证据"
+    ]
+  },
+  "voice_recipe": {
+    "mode": "single",
+    "speaker_1": "zh_female_cancan_uranus_bigtts",
+    "speaker_2": "",
+    "random_order": false,
+    "speech_rate": 1.0
+  },
+  "quality_contract": {
+    "forbidden_rules": "不要固定成旧纸、档案、胶带、手账背景；不要输出 HKR、评分、情绪曲线等分析字段；资料不足时停止生成",
+    "required_gates": [
+      "来源时效与事实一致",
+      "文案无重复且画面提示不进入口播",
+      "配音角色与字幕逐句一致",
+      "图片与当前口播语义一致",
+      "封面标题完整可读",
+      "成片画幅、黑帧、静帧、响度、字幕安全区通过"
+    ],
+    "repair_scope": {
+      "cta_change": [
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "fact_change": [
+        "affected_scenes",
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "topic_change": [
+        "all"
+      ],
+      "single_visual_issue": [
+        "affected_scene",
+        "video"
+      ]
+    }
+  },
+  "research_policy": {
+    "version": "multi-source-research-v1",
+    "topic": "单人讲故事",
+    "current_news_mode": false,
+    "routes": [
+      {
+        "priority": 1,
+        "provider": "tavily",
+        "label": "Tavily",
+        "reason": "保留公开网页、发布日期和可追溯链接",
+        "strengths": [
+          "公开网页",
+          "新闻发现",
+          "来源链接"
+        ],
+        "mode": "api"
+      },
+      {
+        "priority": 2,
+        "provider": "yuanbao",
+        "label": "元宝",
+        "reason": "补充微信生态和中文来源交叉验证",
+        "strengths": [
+          "公众号",
+          "微信生态",
+          "中文信源补充"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 3,
+        "provider": "kimi",
+        "label": "Kimi",
+        "reason": "负责长文整理、来源归纳和冲突信息比对",
+        "strengths": [
+          "长文阅读",
+          "文档理解",
+          "研究资料整理"
+        ],
+        "mode": "browser_or_api"
+      }
+    ],
+    "query_variants": [
+      "单人讲故事",
+      "单人讲故事 最新进展 事件发生时间 官方来源",
+      "单人讲故事 核心数据 原始报告 反方证据",
+      "单人讲故事 普通用户真实影响 使用场景"
+    ],
+    "evidence_contract": {
+      "required_fields": [
+        "claim",
+        "source_title",
+        "source_url",
+        "published_at",
+        "event_at",
+        "source_type",
+        "confidence",
+        "scene_usage"
+      ],
+      "rules": [
+        "区分网页发布时间和事件发生时间",
+        "数字进入口播或图片前至少绑定一个来源",
+        "重大结论保留支持证据与反方证据",
+        "来源图片只作为证据素材，不把无关网图当装饰"
+      ]
+    },
+    "generated_at": 1786609087.3161972
+  },
+  "learning_policy": {
+    "capture_candidate_pairs": true,
+    "capture_manual_edits": true,
+    "capture_release_metrics": true,
+    "ranking_targets": [
+      "topic",
+      "hook",
+      "visual",
+      "pacing"
+    ],
+    "minimum_samples": {
+      "recipe_retrieval": 1,
+      "heuristic_ranking": 20,
+      "statistical_ranking": 200,
+      "preference_model": 1000
+    }
+  },
+  "validated_experience": {
+    "sample_count": 0,
+    "top_projects": [],
+    "learned_rules": [
+      "只从真实发布表现较好的项目提炼方法",
+      "保留结构、节奏和视觉策略，不复制当期事实与素材",
+      "每次新增表现数据后重新排序，旧经验保留版本指纹"
+    ],
+    "memory_fingerprint": "4f53cda18c2baa0c"
+  },
+  "performance_memory": {
+    "version": "channel-performance-memory-v3",
+    "template_key": "单人讲故事",
+    "sample_count": 0,
+    "samples": [],
+    "active_rules": [],
+    "positive_rules": [],
+    "repair_rules": [],
+    "policy": {
+      "method": "带样本置信度与时间衰减的增量频道记忆",
+      "rule_activation_threshold": 0.25,
+      "max_prompt_rules": 8,
+      "note": "单期表现只形成带权证据，不会永久写死频道；后续样本会继续增强、削弱或替换规则。"
+    },
+    "updated_at": 1786609087.313197,
+    "fingerprint": "599064541a42849b"
+  },
+  "generated_at": 1786609087.3161972,
+  "fingerprint": "51d226a20f39f553"
+}

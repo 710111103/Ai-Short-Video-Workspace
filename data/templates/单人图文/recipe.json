@@ -1,0 +1,199 @@
+{
+  "version": "channel-capsule-v1",
+  "key": "单人图文",
+  "name": "单人图文",
+  "identity": {
+    "brand_name": "单人图文",
+    "mode": "article",
+    "target_audience": "喜欢短图文、观点清楚、愿意收藏转发的中文读者",
+    "channel_voice": "清楚、克制、像编辑写给普通读者，不堆术语",
+    "interaction_goal": "结尾引导读者补充经历、观点或收藏转发",
+    "release_tags": "图文"
+  },
+  "content_recipe": {
+    "topic_mining_hint": "",
+    "prompt": "# 单人图文 · 模块化图文模板\n\n你是「单人图文」频道的图文编辑。目标是把一个主题写成可直接发布的中文图文稿，结构清楚、观点明确、图片可生成。\n\n## 资料规则\n\n- 只根据 brief、参考资料和可核验常识生成。\n- 涉及事实、新闻、数据、专业判断时，资料不足就停止生成完整稿件，输出 `# 资料不足`、`## 需要补充的资料`、`## 建议检索方向`。\n- 不编造来源，不把猜测写成事实。\n\n## 内容生成模块\n\n- 开头先给反差、痛点或问题，不写空泛导语。\n- 正文按“小标题 + 短段落 + 配图占位”推进。\n- 每个小标题只讲一个观点，每 2-4 段给一个具体例子或现实连接。\n- 结尾总结核心观点并给出现实判断或行动；开放问题可有可无。\n\n## 图片生成模块\n\n频道统一视觉：现代杂志/纪录片头图质感，真实摄影或编辑型视觉，主体突出，高对比光影，画面干净。不要固定成旧纸、档案、手账、胶带风。\n\n头图：5-8 字大标题 + 一句短副标题，主视觉来自本期核心冲突或第一段钩子。\n\n正文配图：每张只服务对应段落，不超过 300 字；只有新的事实、案例、结论或方法才单独配图，纯过渡段不新增图片。写清主体、构图、动作、情绪、空间关系。关键段落最多保留 1 个直接呼应原文的上半区信息牌；不生成长段正文、脚注或乱码界面。\n\n## 发布模块\n\n- 标题短而清楚，不标题党。\n- 摘要第一句给核心观点，第二句说明现实用途或判断方法。\n- 标签跟主题具体化。\n\n## content.md 输出结构\n\n只输出最终 Markdown，不解释。\n\n# [文章标题]\n\n## Meta\n- 封面副标题: [一句短副标题]\n- 核心观点: [读者看完只记住一句话]\n- 推荐发布标题: [完整发布标题]\n- 钩子: [开头导语钩子]\n- 互动钩子: [可选，没有自然讨论点时留空]\n- 免责声明:\n\n## 正文\n\n[开头导语]\n\n### [小标题1]\n\n[正文]\n\n[配图1]\n\n### [小标题2]\n\n[正文]\n\n[配图2]\n\n### 写在最后\n\n[总结核心观点 + 现实判断或行动]\n\n## 图片提示词\n\n### 横屏封面图（头图，16:9 横屏）\n[一段不超过 300 字的头图提示词]\n\n### 场景图（正文配图，全部 16:9 横屏）\n1. [不超过 300 字，对应配图1]\n2. [不超过 300 字，对应配图2]\n\n## 参考资料\n- [标题](链接) - 摘要\n",
+    "episode_content_isolation": true,
+    "reuse": [
+      "人设",
+      "叙事结构",
+      "节奏方法",
+      "质量规则",
+      "视觉语法",
+      "声音策略"
+    ],
+    "never_reuse": [
+      "当期事实",
+      "当期数字",
+      "当期案例",
+      "临时素材",
+      "上一期图片提示词"
+    ]
+  },
+  "visual_recipe": {
+    "strategy": "现代杂志/纪录片头图质感，真实摄影或编辑型视觉，主体突出，高对比光影，画面干净；头图 5-8 字大标题，正文配图可用 1-2 个短词或数据钩子",
+    "style_prompt": "",
+    "negative_prompt": "",
+    "cover_style": "editorial",
+    "generate_cover_landscape": true,
+    "generate_cover_portrait": true,
+    "rules": [
+      "先审分镜，再生成代表镜头",
+      "关键镜头允许候选竞争，普通镜头保持单图",
+      "只返工失败镜头，不覆盖已确认素材",
+      "图片信息必须来自当前口播与来源证据"
+    ]
+  },
+  "voice_recipe": {
+    "mode": "single",
+    "speaker_1": "",
+    "speaker_2": "",
+    "random_order": false,
+    "speech_rate": 1.0
+  },
+  "quality_contract": {
+    "forbidden_rules": "不要固定成旧纸、档案、手账、胶带风；不要输出 HKR、评分、说服策略等分析字段；资料不足时停止生成",
+    "required_gates": [
+      "来源时效与事实一致",
+      "文案无重复且画面提示不进入口播",
+      "配音角色与字幕逐句一致",
+      "图片与当前口播语义一致",
+      "封面标题完整可读",
+      "成片画幅、黑帧、静帧、响度、字幕安全区通过"
+    ],
+    "repair_scope": {
+      "cta_change": [
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "fact_change": [
+        "affected_scenes",
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "topic_change": [
+        "all"
+      ],
+      "single_visual_issue": [
+        "affected_scene",
+        "video"
+      ]
+    }
+  },
+  "research_policy": {
+    "version": "multi-source-research-v1",
+    "topic": "单人图文",
+    "current_news_mode": false,
+    "routes": [
+      {
+        "priority": 1,
+        "provider": "tavily",
+        "label": "Tavily",
+        "reason": "保留公开网页、发布日期和可追溯链接",
+        "strengths": [
+          "公开网页",
+          "新闻发现",
+          "来源链接"
+        ],
+        "mode": "api"
+      },
+      {
+        "priority": 2,
+        "provider": "yuanbao",
+        "label": "元宝",
+        "reason": "补充微信生态和中文来源交叉验证",
+        "strengths": [
+          "公众号",
+          "微信生态",
+          "中文信源补充"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 3,
+        "provider": "kimi",
+        "label": "Kimi",
+        "reason": "负责长文整理、来源归纳和冲突信息比对",
+        "strengths": [
+          "长文阅读",
+          "文档理解",
+          "研究资料整理"
+        ],
+        "mode": "browser_or_api"
+      }
+    ],
+    "query_variants": [
+      "单人图文",
+      "单人图文 最新进展 事件发生时间 官方来源",
+      "单人图文 核心数据 原始报告 反方证据",
+      "单人图文 普通用户真实影响 使用场景"
+    ],
+    "evidence_contract": {
+      "required_fields": [
+        "claim",
+        "source_title",
+        "source_url",
+        "published_at",
+        "event_at",
+        "source_type",
+        "confidence",
+        "scene_usage"
+      ],
+      "rules": [
+        "区分网页发布时间和事件发生时间",
+        "数字进入口播或图片前至少绑定一个来源",
+        "重大结论保留支持证据与反方证据",
+        "来源图片只作为证据素材，不把无关网图当装饰"
+      ]
+    },
+    "generated_at": 1786609087.232964
+  },
+  "learning_policy": {
+    "capture_candidate_pairs": true,
+    "capture_manual_edits": true,
+    "capture_release_metrics": true,
+    "ranking_targets": [
+      "topic",
+      "hook",
+      "visual",
+      "pacing"
+    ],
+    "minimum_samples": {
+      "recipe_retrieval": 1,
+      "heuristic_ranking": 20,
+      "statistical_ranking": 200,
+      "preference_model": 1000
+    }
+  },
+  "validated_experience": {
+    "sample_count": 0,
+    "top_projects": [],
+    "learned_rules": [
+      "只从真实发布表现较好的项目提炼方法",
+      "保留结构、节奏和视觉策略，不复制当期事实与素材",
+      "每次新增表现数据后重新排序，旧经验保留版本指纹"
+    ],
+    "memory_fingerprint": "4f53cda18c2baa0c"
+  },
+  "performance_memory": {
+    "version": "channel-performance-memory-v3",
+    "template_key": "单人图文",
+    "sample_count": 0,
+    "samples": [],
+    "active_rules": [],
+    "positive_rules": [],
+    "repair_rules": [],
+    "policy": {
+      "method": "带样本置信度与时间衰减的增量频道记忆",
+      "rule_activation_threshold": 0.25,
+      "max_prompt_rules": 8,
+      "note": "单期表现只形成带权证据，不会永久写死频道；后续样本会继续增强、削弱或替换规则。"
+    },
+    "updated_at": 1786609087.2304583,
+    "fingerprint": "599064541a42849b"
+  },
+  "generated_at": 1786609087.232964,
+  "fingerprint": "6be09bbbefeb3435"
+}

@@ -1,0 +1,38 @@
+{
+  "name": "科技情报站",
+  "brand_name": "科技情报站",
+  "mode": "video",
+  "target_audience": "20-50",
+  "channel_voice": "犀利但客观，像懂技术的朋友聊天。先讲结论，再解释原因，节奏快、有轻松吐槽，但不夸张，不制造焦虑，每条内容都给观众一个能理解、能判断、能行动的建议。",
+  "visual_strategy": "主结论、证据数字和箭头批注形成清楚的信息层级，但不堆成长文。每镜以当前口播的一个具体因果为中心，用2-4个关键物件与一条动作或因果关系组织画面。主体、动作和证据共同铺满画面，底部保留字幕安全区；相邻镜头更换主体关系、景别或信息组织方式。",
+  "forbidden_rules": "禁止出现品牌Logo、水印、二维码、平台UI截图。\n不伪造新闻截图。\n不虚构数据、实验结果和专家观点。\n不出现违反医学、金融、法律等领域事实的内容。",
+  "visual_palette": {
+    "background": "暖米白纸张 #F4E9D4",
+    "ink": "炭黑线稿 #24211D",
+    "accents": [
+      "砖红 #B94A3E",
+      "靛蓝 #405A93",
+      "芥末黄 #C99A26"
+    ],
+    "rule": "背景以暖米白纸纹为频道识别；人物、设备、图表以炭黑线稿为骨架；强调色只标记当前口播重点、对比或动作方向。"
+  },
+  "image_style_prompt": "成熟的纸张线稿科技编辑卡通，暖米白纸纤维背景，炭黑手绘轮廓线，轻微印刷网点与铅笔阴影。人物、设备、屏幕和图表保持真实结构与正确操作关系，用少量砖红、靛蓝和芥末黄平涂标记当前口播重点。每镜围绕当前口播的一个具体因果，用2-4个关键物件、一条箭头或轨迹和必要的可追溯信息点组成杂志跨页式信息插画；画面充实并留出字幕安全区。",
+  "image_negative_prompt": "写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+  "interaction_goal": "引导观众分享自己的真实体验、使用习惯、踩坑经历或不同观点，鼓励留言讨论，并提出下一期想看的科技话题。",
+  "topic_mining_hint": "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。",
+  "default_disclaimer": "内容基于公开资料整理，仅作知识科普，不构成投资、法律或安全建议；本视频由 AI 辅助生成。",
+  "release_tags": "#AI #人工智能 #科技 #数码 #智能硬件 #科技情报站",
+  "cover_footnote_line_1": "",
+  "cover_footnote_line_2": "",
+  "cover_style": "doodle",
+  "voice_mode": "dual",
+  "tts_speaker_1": "zh_male_dayixiansheng_v2_saturn_bigtts",
+  "tts_speaker_2": "zh_female_mizaitongxue_v2_saturn_bigtts",
+  "tts_random_order": false,
+  "tts_action": 3,
+  "tts_speech_rate": 0.9,
+  "generate_cover_landscape": true,
+  "generate_cover_portrait": true,
+  "builtin_locked": false,
+  "version": ""
+}

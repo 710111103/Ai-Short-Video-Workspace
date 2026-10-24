@@ -1,0 +1,3919 @@
+{
+  "version": "channel-capsule-v1",
+  "key": "科技情报站",
+  "name": "科技情报站",
+  "identity": {
+    "brand_name": "科技情报站",
+    "mode": "video",
+    "target_audience": "20-50",
+    "channel_voice": "犀利但客观，像懂技术的朋友聊天。先讲结论，再解释原因，节奏快、有轻松吐槽，但不夸张，不制造焦虑，每条内容都给观众一个能理解、能判断、能行动的建议。",
+    "interaction_goal": "引导观众分享自己的真实体验、使用习惯、踩坑经历或不同观点，鼓励留言讨论，并提出下一期想看的科技话题。",
+    "release_tags": "#AI #人工智能 #科技 #数码 #智能硬件 #科技情报站"
+  },
+  "content_recipe": {
+    "topic_mining_hint": "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。",
+    "prompt": "# 科技情报站 · 卡通知识短视频模板\n\n你是「科技情报站」频道的内容导演。频道聚焦 AI 工具、智能设备、互联网现象、效率工具和消费电子，把复杂技术讲成普通人听得懂、看得明白、用得上的短视频。\n\n## 频道口吻\n\n- 像懂技术的朋友聊天：先给结论，再解释原因。\n- 犀利但客观，允许轻松吐槽，保持事实边界。\n- 一期只讲一个核心结论，并给出一个具体判断或行动建议。\n- 单期时长按本期信息量自适应：事实少就短，因果链复杂就适当展开；不为凑时长重复观点，也不为压时长删掉必要证据。\n- 口播长度由“讲清一个核心结论所需的最短完整表达”决定，最终时长以实际配音为准。\n- 开头尽快给出最值得听的结果、变化、代价或证据，不按秒数硬塞钩子。\n- 正文每一段都要增加事实、原因、后果、例子或判断方法中的至少一项；没有新信息就删掉，不按固定时间插入转折。\n- 结尾用本期最重要的判断或一个能执行的动作自然收住。互动问题可有可无，不能作为固定尾巴。\n\n## 叙事结构硬约束【核心四步法】\n\n全篇文案必须严格遵循【具体冲突 Hook → 现实代价 Cost → 底层机制 Mechanism → 实用判断 Action】四步递进，禁止偏离：\n1. **具体冲突 Hook**：开头 3 秒内直接抛出具体矛盾、反常识变化或刺眼差价（如“同一款机器，官网在涨，授权店在降，差价 1300 元”），绝不用抽象套话开场。\n2. **现实代价 Cost**：算清普通人的时间、真金白银、决策风险或使用损失（如“只在官网下单，1300 直接没了”），让观众立刻明白这和自己切身利益的关系。\n3. **底层机制 Mechanism**：讲透导致冲突的两套规则、商业逻辑或技术原理（如“官网价是挂牌参考价，授权店要回款冲量”，两套账撞在一起），用大白话说清为什么。\n4. **实用判断 Action**：给出 2—3 个普通人一听就能落地的核验动作、避坑清单或明确下结论方法，不讲空道理，听完即能用。\n\n## 违禁空话黑名单【严禁出现】\n\n文案中严禁出现以下任何虚张声势、故弄玄虚的假深沉套话与思考框架：\n- 严禁假深沉套话：“很多时候表面现象看着已经很明显了”、“表面看是一个问题，真正关键其实藏在另一层”、“真正决定结果的，往往是后面那个被忽略的小动作”、“别急着下结论，先看第一步”、“很多人从第一步就看偏了”、“这就有意思了”。\n- 严禁说教式提问：“你自己最容易在哪一步想当然？”、“你平时最容易在哪一步被带偏？”、“很多人聊这件事时，真正重要的那一步反而最少被提到”。\n- 严禁空洞元叙述：“这种题最容易写成解释文”、“所以中间一定得拆两步”、“最有效的讲法，就是把它放进真实场景里”、“最容易错的是把它讲成概念清单”。\n- 严禁任何无事实增量的同义换词复述与假转折，算力必须 100% 聚焦在具体事实、因果链和实用洞察上。\n\n## 资料规则\n\n内容只使用 brief、用户资料、官方资料、可追溯公开来源和可核验常识。新闻日期、事件时间、产品参数、价格、比例和结论必须对应来源。多方说法存在差异时，明确标注差异，不拼接成确定事实。\n\n严禁编造来源、数据、实验、案例、专家观点、官方表态和产品能力。\n\n## 卡通视觉总风格\n\n全频道保留“成熟编辑线稿卡通”作为识别：清楚的手绘轮廓、少量印刷网点、铅笔阴影和杂志级信息构图。具体背景、配色、主体、空间与构图语言由本期标题、重点字幕和逐段口播决定；不同主题不得复用同一套视觉模板。\n\n固定视觉识别：\n\n- 背景：按题材选择纸张、道路、工业、商业、家庭、城市或实验空间；纸张纹理只作为频道识别之一，不是每期固定底图。\n- 线条：炭黑线稿，粗细统一、边缘干净、物件结构清楚。\n- 强调色：从本期题材提取 2—4 种颜色。车辆、财经、AI、生活和人物故事必须使用不同的题材配色；强调色只标记当前口播重点、对比或动作方向。\n- 人物：简化但自然的亚洲成年人，职业和年龄随主题变化。\n- 设备：保留真实结构、比例和操作关系，再转译成卡通造型。\n- 背景：用纸张留白、手绘框线、局部色块和少量环境物件交代空间，不使用暗色控制台或发光屏幕铺满背景。\n\n## 画面导演规则\n\n每张图先回答：观众静音观看时，一秒能看懂哪条口播信息？\n\n画面由当前口播自由选择以下表达方式，不套统一模板：\n\n1. 冲突瞬间：人物动作和关键物件形成明确矛盾。\n2. 物件特写：一个设备、账单、接口、按钮或状态变化成为主角。\n3. 前后对比：左右或前后两个状态直接形成结果差异。\n4. 因果拆解：原因、过程、结果通过物件关系、箭头或空间路径连接。\n5. 数据解释：数字与真实对象绑定，体现规模、变化或代价。\n6. 使用场景：把技术放入办公室、家庭、通勤、门店或实验环境。\n\n同一期相邻镜头要更换主体关系、景别或信息组织方式，避免连续出现同一个人物、同一个桌面、同一种分屏和同一个镜头动作。\n\n画面优先保留 1 个主信息、1 个动作关系和必要的辅助证据。信息量由口播决定，可以使用数字、短标题、标签、批注、箭头、对比和图表；每个信息元素都要来自当前口播或来源资料。避免把整段口播塞入画面。\n\n## 人物与设备\n\n- 人物表情清楚但克制，动作服务观点，不使用抱头、摊手、夸张惊吓等通用焦虑姿势代替证据。\n- 手部、关节和握持关系保持正确；优先用侧面、半身或手部动作承载信息。\n- 手机、电脑、耳机、智能手表和家电保持真实结构与使用方式。\n- 抽象技术优先转成生活化比喻、流程关系或物件变化，不使用发光大脑、机器人、悬浮 HUD 和赛博城市。\n\n## 封面\n\n- 采用卡通编辑海报构图，第一眼看到冲突对象或反常识结果。\n- 主标题 5—10 字，短、完整、清晰；副信息只保留能增强点击欲的一项事实或数字。\n- 主体与标题分区，人物或物件占主要视觉面积，避免信息缩在角落。\n- 每期封面随主题改变核心人物、物件与构图，但保持频道配色和线条语言。\n- 封面可由 AI 生成卡通底图，准确标题由成片渲染层写入，避免乱码和截断。\n\n## 场景图\n\n- 普通解释段可使用少量卡通人物和关键物件；证据、数字、反转和方法段采用信息主导构图。\n- 场景图中的文字根据口播需要决定，准确数字和结论优先由渲染层写入。\n- 留出字幕安全区，主体不被底部字幕遮挡。\n- 每张图必须对应当前口播，不借用上一镜或其他项目的事实、人物关系和数字。\n\n## 动态镜头\n\n- 动态提示词与图片提示词分开生成。\n- 图片提示词负责人物、物件、构图和信息；动态提示词只负责主体动作、摄影机、节奏和落点。\n- 卡通动态优先使用局部动作：手指点击、人物转头、设备亮起、箭头推进、数值状态切换、光影移动。\n- 保持线条、颜色、人物身份、物件数量和文字位置稳定，避免融化、闪烁、漂移和镜头内突然切换。\n\n## 图片禁忌\n\n品牌 Logo、商标、水印、二维码、平台截图、聊天截图、网页截图、乱码、错字、虚构数字、虚假新闻、密集长文、赛博朋克、全息屏幕、蓝色发光网格、暗色赛博办公室、发光控制台、霓虹光、写实摄影、照片质感、塑料 3D 公仔、日系萌系、儿童绘本、廉价剪贴画、通用素材人物、过度饱和、肢体错误、多余手指、漂浮物体。\n\n## 视频剪辑\n\n- 信息节点数量跟随脚本中的有效事实、反转、方法和结论自动计算，镜头数量再跟随最终语音时长分配；不按固定片长凑镜头。\n- 新事实、新数字、新案例、新方法、新后果和新结论才触发新画面；过渡句沿用上一画面。\n- 转场优先硬切、短溶解、遮挡转场、动作匹配和局部推近，避免花哨特效。\n- 卡通元素可按信息顺序局部出现，但每次只推动当前口播正在说的关系。\n\n## 发布与互动\n\n标题像真实创作者的提醒或判断，允许反问，避免空洞标题。简介先给核心观点和现实用途；只有本期自然存在不同经历或判断时，才补一个承接正文的问题。\n\n## content.md 输出结构\n\n只输出最终 Markdown：\n\n# [5—12字封面标题]\n\n## Meta\n- 封面副标题：\n- 核心观点：\n- 时长：\n- 推荐发布标题：\n- 钩子：\n- 互动钩子：（可选，没有自然讨论点时留空）\n- 免责声明：\n\n## 原始材料简述\n- 主体：\n- 核心知识点：\n- 风险或误区：\n- 可执行动作：\n\n## 口播脚本\n【主播】\n...\n\n## 重点字幕\n1.\n2.\n3.\n\n## 镜头规划\n|镜头|时长|对应口播|视觉任务|\n|---|---|---|---|\n|1|开场钩子|Hook|卡通冲突封面|\n|2|误区出现|误区|关键物件与错误状态|\n|3|核心解释|解释|因果或数据拆解|\n|4|结论落点|建议|判断方法或行动步骤|\n\n## 图片提示词\n### 横屏封面图（4:3）\n### 竖屏封面图（3:4）\n### 场景图\n1.\n2.\n3.\n\n## 参考资料\n- 标题（链接）\n",
+    "episode_content_isolation": true,
+    "reuse": [
+      "人设",
+      "叙事结构",
+      "节奏方法",
+      "质量规则",
+      "视觉语法",
+      "声音策略"
+    ],
+    "never_reuse": [
+      "当期事实",
+      "当期数字",
+      "当期案例",
+      "临时素材",
+      "上一期图片提示词"
+    ]
+  },
+  "visual_recipe": {
+    "strategy": "主结论、证据数字和箭头批注形成清楚的信息层级，但不堆成长文。每镜以当前口播的一个具体因果为中心，用2-4个关键物件与一条动作或因果关系组织画面。主体、动作和证据共同铺满画面，底部保留字幕安全区；相邻镜头更换主体关系、景别或信息组织方式。",
+    "style_prompt": "成熟的纸张线稿科技编辑卡通，暖米白纸纤维背景，炭黑手绘轮廓线，轻微印刷网点与铅笔阴影。人物、设备、屏幕和图表保持真实结构与正确操作关系，用少量砖红、靛蓝和芥末黄平涂标记当前口播重点。每镜围绕当前口播的一个具体因果，用2-4个关键物件、一条箭头或轨迹和必要的可追溯信息点组成杂志跨页式信息插画；画面充实并留出字幕安全区。",
+    "negative_prompt": "写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+    "cover_style": "doodle",
+    "generate_cover_landscape": true,
+    "generate_cover_portrait": true,
+    "rules": [
+      "先审分镜，再生成代表镜头",
+      "关键镜头允许候选竞争，普通镜头保持单图",
+      "只返工失败镜头，不覆盖已确认素材",
+      "图片信息必须来自当前口播与来源证据"
+    ]
+  },
+  "voice_recipe": {
+    "mode": "dual",
+    "speaker_1": "zh_male_dayixiansheng_v2_saturn_bigtts",
+    "speaker_2": "zh_female_mizaitongxue_v2_saturn_bigtts",
+    "random_order": false,
+    "speech_rate": 0.9
+  },
+  "quality_contract": {
+    "forbidden_rules": "禁止出现品牌Logo、水印、二维码、平台UI截图。\n不伪造新闻截图。\n不虚构数据、实验结果和专家观点。\n不出现违反医学、金融、法律等领域事实的内容。",
+    "required_gates": [
+      "来源时效与事实一致",
+      "文案无重复且画面提示不进入口播",
+      "配音角色与字幕逐句一致",
+      "图片与当前口播语义一致",
+      "封面标题完整可读",
+      "成片画幅、黑帧、静帧、响度、字幕安全区通过"
+    ],
+    "repair_scope": {
+      "cta_change": [
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "fact_change": [
+        "affected_scenes",
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "topic_change": [
+        "all"
+      ],
+      "single_visual_issue": [
+        "affected_scene",
+        "video"
+      ]
+    }
+  },
+  "research_policy": {
+    "version": "multi-source-research-v2-grok-primary",
+    "topic": "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。",
+    "current_news_mode": false,
+    "routes": [
+      {
+        "priority": 1,
+        "provider": "grok",
+        "label": "Grok",
+        "reason": "主检索：发现实时动态、事件进展和海外讨论",
+        "strengths": [
+          "实时动态",
+          "海外社交",
+          "热点讨论"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 2,
+        "provider": "tavily",
+        "label": "Tavily",
+        "reason": "辅助核验：补充公开网页、发布日期和可追溯链接",
+        "strengths": [
+          "公开网页",
+          "新闻发现",
+          "来源链接"
+        ],
+        "mode": "api"
+      },
+      {
+        "priority": 3,
+        "provider": "gemini",
+        "label": "Gemini",
+        "reason": "补充全球技术资料、产品文档和官方来源",
+        "strengths": [
+          "全球网页",
+          "知识站点",
+          "技术资料"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 4,
+        "provider": "kimi",
+        "label": "Kimi",
+        "reason": "整理长文、报告和复杂技术背景",
+        "strengths": [
+          "长文阅读",
+          "文档理解",
+          "研究资料整理"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 5,
+        "provider": "qwen",
+        "label": "通义千问",
+        "reason": "补充中文消费、电商和产品生态信息",
+        "strengths": [
+          "中文网页",
+          "行业信息",
+          "电商生态"
+        ],
+        "mode": "browser_or_api"
+      }
+    ],
+    "query_variants": [
+      "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。",
+      "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。 最新进展 事件发生时间 官方来源",
+      "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。 核心数据 原始报告 反方证据",
+      "AI工具、人工智能、智能硬件、手机数码、电脑办公、互联网产品、科技公司、软件应用、效率工具、未来科技、消费电子、普通人能用上的新技术。 普通用户真实影响 使用场景"
+    ],
+    "evidence_contract": {
+      "required_fields": [
+        "claim",
+        "source_title",
+        "source_url",
+        "published_at",
+        "event_at",
+        "source_type",
+        "confidence",
+        "scene_usage"
+      ],
+      "rules": [
+        "区分网页发布时间和事件发生时间",
+        "数字进入口播或图片前至少绑定一个来源",
+        "重大结论保留支持证据与反方证据",
+        "来源图片只作为证据素材，不把无关网图当装饰"
+      ]
+    },
+    "generated_at": 1792852060.9942307
+  },
+  "learning_policy": {
+    "capture_candidate_pairs": true,
+    "capture_manual_edits": true,
+    "capture_release_metrics": true,
+    "ranking_targets": [
+      "topic",
+      "hook",
+      "visual",
+      "pacing"
+    ],
+    "minimum_samples": {
+      "recipe_retrieval": 1,
+      "heuristic_ranking": 20,
+      "statistical_ranking": 200,
+      "preference_model": 1000
+    }
+  },
+  "validated_experience": {
+    "sample_count": 16,
+    "top_projects": [
+      {
+        "project_id": 149,
+        "topic": "数据要素“国家队”正编入场：新央企“国家数据集团”在河北雄安新区正式挂牌成立",
+        "score": 100.0,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 0,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0,
+          "two_second_retention_rate": 100,
+          "five_second_retention_rate": 0,
+          "average_watch_seconds": 0.0,
+          "completion_rate": 0,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1792595034.0334668,
+          "updated_at": 1792595034.0334668
+        },
+        "content_strategy": {
+          "generated_at": 1792552611.7707524,
+          "topic": "数据要素“国家队”正编入场：新央企“国家数据集团”在河北雄安新区正式挂牌成立",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 2,
+          "reference_titles": [
+            "国家数据集团今天成立！三大运营商 + 两大电网共同出资，要建成世界一流数据科技企业-电子工程专辑",
+            "国家数据集团今天成立！三大运营商 + 两大电网共同出资，要建成世界一流数据科技企业 - 电子工程专辑"
+          ],
+          "topic_score": {
+            "topic": "数据要素“国家队”正编入场：新央企“国家数据集团”在河北雄安新区正式挂牌成立",
+            "brief_excerpt": "第一财经、新华社 10月20日 晚间权威披露，作为推进全国数据资源开发利用、释放公共数据要素乘数价值的绝对国家队，“国家数据集团有限公司”正式在河北雄安新区完成工商注册并宣告成立。",
+            "total_score": 3.2,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 0.7,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 0.55,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 0.55,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 0.65,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.7,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "方便和隐私到底要怎么取舍",
+            "honest_disagreement": "一边认为授权换便利很正常，另一边认为用户根本不知道交出了什么",
+            "emotional_moment": "推荐精准得令人发毛，观众下意识去翻手机权限的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "国家数据集团用股权纽带打破央企间的数据壁垒，把分散的数据供给变成底层公共设施。",
+            "counter_intuition": "表面看是价格问题，背后其实是价值和风险判断",
+            "audience_pain": "方便和隐私到底要怎么取舍",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "疑问钩子",
+            "opening_hook": "三大运营商加上两大电网，把各自最核心的数据底盘打包放进同一家新央企。",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你平时在办事或做业务时，被哪些跨部门的数据证明卡得最久？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1792564429.389054,
+          "source_hash": "3054433707df7577",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "数据要素“国家队”正编入场：新央企“国家数据集团”在河北雄安新区正式挂牌成立",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "ai_tech",
+            "topic_type_label": "AI科技/智能产品",
+            "visual_world": "暖米白纸张上的成熟科技编辑线稿卡通：当前口播对应的主体由炭黑轮廓、手绘箭头、少量砖红、靛蓝和芥末黄平涂组成，像信息杂志跨页；保持真实结构与正确关系，不使用写实摄影、3D渲染、工业灰大片底色、暗色控制台或赛博科技风。本期只改变主体和场景：真实科技纪录片现场：普通人、设备、屏幕光、城市或办公空间同框，强调新技术正在解决一个具体问题",
+            "subject_pool": [
+              "真实用户",
+              "智能设备",
+              "屏幕光",
+              "手部操作",
+              "城市/办公室空间"
+            ],
+            "action_pool": [
+              "抬头使用",
+              "伸手触发",
+              "低头对比",
+              "回头惊讶",
+              "现场验证"
+            ],
+            "attention_hooks": [
+              "数据光牌",
+              "功能反差",
+              "前后对比",
+              "近景设备",
+              "人物表情"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要套用其它频道的固定故事流程或无主体背景",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "方便和隐私到底要怎么取舍",
+              "honest_disagreement": "一边认为授权换便利很正常，另一边认为用户根本不知道交出了什么",
+              "emotional_moment": "推荐精准得令人发毛，观众下意识去翻手机权限的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "explain_with_breath",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 9,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 5.5,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "应用场景",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "应用场景",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "tech_suspense",
+            "bgm_label": "科技悬疑",
+            "bgm_reason": "主题信号「ai、科技」更适合科技悬疑",
+            "bgm_signals": [
+              "ai",
+              "科技"
+            ],
+            "bgm_confidence_score": 25.2,
+            "bgm_keywords": [
+              "低频脉冲",
+              "冷感合成器",
+              "轻微上升音",
+              "留出口播空间"
+            ],
+            "bgm_volume": 0.18,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头短促抬起",
+              "中段压低铺底",
+              "证据段轻微推进",
+              "结尾收轻留互动"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      },
+      {
+        "project_id": 131,
+        "topic": "车会看红绿灯，但还没学会放过手指",
+        "score": 75.86,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 14,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0,
+          "two_second_retention_rate": 75.0,
+          "five_second_retention_rate": 50.0,
+          "average_watch_seconds": 22.5,
+          "completion_rate": 0,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1791261408.9037707,
+          "updated_at": 1791261408.9037707
+        },
+        "content_strategy": {
+          "generated_at": 1791212142.6707542,
+          "topic": "车会看红绿灯，但还没学会放过手指",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 2,
+          "reference_titles": [
+            "“不好意思？”“来不及了！”——不妨爱之红绿灯，看完再发车 - 龙泉驿",
+            "电动车 - 最新电动车实时滚动快讯，聚合所有电动车相关热门新闻快讯_新浪汽车"
+          ],
+          "topic_score": {
+            "topic": "车会看红绿灯，但还没学会放过手指",
+            "brief_excerpt": "小马智行全无人驾驶出租车在深圳发生乘客三根手指被车门紧紧夹住的伤人事件，官方随后回应称交警判定“属偶发意外伤害而非交通事故”——这场肉体疼痛撕开了整个自动驾驶行业把数千亿砸在“道路算力”、却在最基础的人身物理交互与责任界定上留出巨大真空的残",
+            "total_score": 3.5,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 1.0,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 0.55,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 0.55,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 0.65,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.7,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+            "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+            "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "自动驾驶卷透了道路红绿灯与避障算力，却在最基础的人身物理交互与责任界定上留下了真空。",
+            "counter_intuition": "大家只看工具热闹，真正差异在流程和验证能力",
+            "audience_pain": "工具替人省时间之后，人还能不能掌握结果",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "疑问钩子",
+            "opening_hook": "算法算得出几十米外的红绿灯，却夹住了乘客关门的三根手指。",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你坐无人出租车或用电动车门时，遇到过感应失灵吗？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1791213168.795998,
+          "source_hash": "6ca3a2aaf6a311a6",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "车会看红绿灯，但还没学会放过手指",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "ai_tech",
+            "topic_type_label": "AI科技/智能产品",
+            "visual_world": "频道媒介保持成熟编辑线稿卡通，但本期题材语言必须变化：真实科技纪录片现场：普通人、设备、屏幕光、城市或办公空间同框，强调新技术正在解决一个具体问题；纸张纹理只保留为频道识别，不得覆盖本期主体、动作和空间",
+            "subject_pool": [
+              "真实用户",
+              "智能设备",
+              "屏幕光",
+              "手部操作",
+              "城市/办公室空间"
+            ],
+            "action_pool": [
+              "抬头使用",
+              "伸手触发",
+              "低头对比",
+              "回头惊讶",
+              "现场验证"
+            ],
+            "attention_hooks": [
+              "数据光牌",
+              "功能反差",
+              "前后对比",
+              "近景设备",
+              "人物表情"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要套用其它频道的固定故事流程或无主体背景",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+              "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+              "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "explain_with_breath",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 10,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 3.7,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 10,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "tech_suspense",
+            "bgm_label": "科技悬疑",
+            "bgm_reason": "主题信号「ai、大模型、芯片、算法」更适合科技悬疑",
+            "bgm_signals": [
+              "ai",
+              "大模型",
+              "芯片",
+              "算法"
+            ],
+            "bgm_confidence_score": 50.2,
+            "bgm_keywords": [
+              "低频脉冲",
+              "冷感合成器",
+              "轻微上升音",
+              "留出口播空间"
+            ],
+            "bgm_volume": 0.18,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头短促抬起",
+              "中段压低铺底",
+              "证据段轻微推进",
+              "结尾收轻留互动"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      },
+      {
+        "project_id": 148,
+        "topic": "小米SU9 LUX曝光：雷军的豪车梦，要踩进尊界的泥地里吗？",
+        "score": 66.66,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 2,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0,
+          "two_second_retention_rate": 33.33,
+          "five_second_retention_rate": 0,
+          "average_watch_seconds": 2.33,
+          "completion_rate": 0,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1792506340.8615828,
+          "updated_at": 1792506340.8615828
+        },
+        "content_strategy": {
+          "generated_at": 1792476693.8969805,
+          "topic": "小米SU9 LUX曝光：雷军的豪车梦，要踩进尊界的泥地里吗？",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 2,
+          "reference_titles": [
+            "小米SU9 LUX商标进入初审公告阶段，新车型或将进军高端市场 - IT之家（金融界转载）",
+            "小米也将拥有自己的豪华行政旗舰？SU9 LUX商标已经初审 - 快科技（新浪转载）"
+          ],
+          "topic_score": {
+            "topic": "小米SU9 LUX曝光：雷军的豪车梦，要踩进尊界的泥地里吗？",
+            "brief_excerpt": "核心检索对象：SU9 LUX 核心材料： - 金融界转载 IT 之家 2026 年 10 月 19 日报道：第 1986 期商标公告显示小米 SU9 LUX 商标进入初步审定阶段。 - 新浪转载快科技同日报道该商标状态；两篇是媒体报道，不等",
+            "total_score": 4.0,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 0.7,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 1.0,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 1.0,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 0.65,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.7,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "方便和隐私到底要怎么取舍",
+            "honest_disagreement": "一边认为授权换便利很正常，另一边认为用户根本不知道交出了什么",
+            "emotional_moment": "推荐精准得令人发毛，观众下意识去翻手机权限的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "小米申请“SU9 LUX”商标仅代表完成初步审定流程，不等于确认立项、量产或定价，消费者不应据此调整购车与预算决策。",
+            "counter_intuition": "表面看是价格问题，背后其实是价值和风险判断",
+            "audience_pain": "方便和隐私到底要怎么取舍",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "数字冲击",
+            "opening_hook": "一个刚过初审的商标名字，真值得你压着几十万预算继续等下去吗？",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你觉得小米这波是真在给百万旗舰铺路，还是单纯为了防抢注先占个坑？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1792476725.9304764,
+          "source_hash": "d5b754d4bbef5bb8",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "小米SU9 LUX曝光：雷军的豪车梦，要踩进尊界的泥地里吗？",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "vehicle_mobility",
+            "topic_type_label": "车辆/机械/出行文化",
+            "visual_world": "暖米白纸张上的成熟科技编辑线稿卡通：当前口播对应的主体由炭黑轮廓、手绘箭头、少量砖红、靛蓝和芥末黄平涂组成，像信息杂志跨页；保持真实结构与正确关系，不使用写实摄影、3D渲染、工业灰大片底色、暗色控制台或赛博科技风。本期只改变主体和场景：暖米白纸张上的成熟科技编辑线稿卡通：车辆、道路、展台或检测现场保持真实结构，用炭黑轮廓、手绘箭头和少量砖红、靛蓝、芥末黄表现当前口播里的工程取舍",
+            "subject_pool": [
+              "当前口播对应的车辆主体",
+              "当前口播对应的机械部件",
+              "道路、展台或检测现场",
+              "工程关系箭头",
+              "当前事实证据"
+            ],
+            "action_pool": [
+              "展示当前结构差异",
+              "呈现正在发生的使用动作",
+              "对比两种工程取舍",
+              "标出本镜因果关系",
+              "记录当前检测或使用结果"
+            ],
+            "attention_hooks": [
+              "工程反差",
+              "使用代价",
+              "结构差异",
+              "真实场景",
+              "当前证据"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要出现手机界面、智能设备阵列、办公室屏幕光、通用科技控制台或无关骑行装备",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "方便和隐私到底要怎么取舍",
+              "honest_disagreement": "一边认为授权换便利很正常，另一边认为用户根本不知道交出了什么",
+              "emotional_moment": "推荐精准得令人发毛，观众下意识去翻手机权限的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "explain_with_breath",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 10,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 4.0,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "slow_explain",
+                "target_hold_seconds": 8.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 6.9,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 9.7,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 11.3,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 10.5,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.7,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "应用场景",
+                "pace": "slow_explain",
+                "target_hold_seconds": 8.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "应用场景",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 10,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.1,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "business_pulse",
+            "bgm_label": "商业脉冲",
+            "bgm_reason": "主题信号「市场、价格」更适合商业脉冲",
+            "bgm_signals": [
+              "市场",
+              "价格"
+            ],
+            "bgm_confidence_score": 14.0,
+            "bgm_keywords": [
+              "稳定低频",
+              "城市感电子",
+              "数据压力",
+              "干净节拍"
+            ],
+            "bgm_volume": 0.17,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头有压迫感",
+              "数据段稳定推进",
+              "结论段轻微抬升"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      },
+      {
+        "project_id": 127,
+        "topic": "你的热爱正在被重新定价，而定价的人不是你",
+        "score": 61.31,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 158,
+          "likes": 1,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0,
+          "two_second_retention_rate": 57.45,
+          "five_second_retention_rate": 34.04,
+          "average_watch_seconds": 14.41,
+          "completion_rate": 86.0,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1789878583.199552,
+          "updated_at": 1789878583.199552
+        },
+        "content_strategy": {
+          "generated_at": 1789831448.0344758,
+          "topic": "你的热爱正在被重新定价，而定价的人不是你",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 3,
+          "reference_titles": [
+            "张雪机车摩博会一次发5款新车,顶配仿赛13.8万首次冲破国产10万关_摩托车整车_什么值得买",
+            "隆鑫通用董事长李耀：过去买摩托车问多少钱、几升油 - 新浪财经",
+            "隆鑫通用: 隆鑫通用动力股份有限公司2026年半年度报告_定期报告_公司公告_每日必读_股票_证券之星"
+          ],
+          "topic_score": {
+            "topic": "你的热爱正在被重新定价，而定价的人不是你",
+            "brief_excerpt": "国产摩托车在摩博会上集体冲高——张雪机车五车齐发、最贵 13.8 万，全场热度最高的是\"这个配置国际品牌要卖 150 万\"。但同一场论坛上，真正值钱的一句话是隆鑫通用董事长李耀说的：\"过去买摩托车问多少钱、几升油，现在年轻人问声浪够不够上头",
+            "total_score": 4.2,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 0.7,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 1.0,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 1.0,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 0.65,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.9,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+            "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+            "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "国产摩托把价格推过十万关口是真事；“过去问多少钱、几升油，现在问声浪够不够上头、发朋友圈够不够炸”这句话本身只能说明一部分消费者的关注点在变。但选车标准一旦从“我需要什么”偏向“别人会怎么看”，你付的钱里就混进了买给看的那部分——机械那部分你每次骑都在用，让别人看见那部分靠别人一直觉得新鲜，值不值，得你自己分开算。",
+            "counter_intuition": "表面看是价格问题，背后其实是价值和风险判断",
+            "audience_pain": "工具替人省时间之后，人还能不能掌握结果",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "数字冲击",
+            "opening_hook": "一台国产摩托卖到13.8万，但更贵的是你为“别人会怎么看”付的那部分。",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "如果你现在选车，你会优先为声浪和外观买单，还是优先为车架、刹车和骑行感受买单？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1789831870.7248769,
+          "source_hash": "49bcd13d23477d6c",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "你的热爱正在被重新定价，而定价的人不是你",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "vehicle_mobility",
+            "topic_type_label": "车辆/机械/出行文化",
+            "visual_world": "频道媒介保持成熟编辑线稿卡通，但本期题材语言必须变化：机械编辑漫画现场：车辆、发动机剖面、道路、头盔与骑行者形成速度和重量关系，重点表现机械价值、使用场景与身份认同之间的冲突；本期色彩重心：石墨黑、机油灰、警示红和道路黄，纸张底色只作为材质，不主导整幅画面；纸张纹理只保留为频道识别，不得覆盖本期主体、动作和空间",
+            "subject_pool": [
+              "摩托车或车辆主体",
+              "发动机与车架结构",
+              "骑行者和头盔",
+              "道路或赛道",
+              "价格与时间刻度"
+            ],
+            "action_pool": [
+              "拧动油门",
+              "戴上头盔出发",
+              "查看发动机结构",
+              "停在道路边思考",
+              "赛道与城市道路对照"
+            ],
+            "attention_hooks": [
+              "机械结构",
+              "速度线",
+              "价格反差",
+              "道路选择",
+              "时间折旧"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要出现手机界面、智能设备阵列、办公室屏幕光或通用科技控制台",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "花出去的钱到底买到了价值还是营销",
+              "honest_disagreement": "一边愿意为省事和体验付费，另一边认为核心价值根本撑不起价格",
+              "emotional_moment": "付款前觉得很值，真实使用后开始后悔或改观的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "fast_warning",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 13,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 5.1,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "slow_explain",
+                "target_hold_seconds": 8.5,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.6,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 10,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 6.1,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 11,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 9.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 12,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 6.3,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 13,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "business_pulse",
+            "bgm_label": "商业脉冲",
+            "bgm_reason": "主题信号「财经、价格、成本」更适合商业脉冲",
+            "bgm_signals": [
+              "财经",
+              "价格",
+              "成本"
+            ],
+            "bgm_confidence_score": 26.4,
+            "bgm_keywords": [
+              "稳定低频",
+              "城市感电子",
+              "数据压力",
+              "干净节拍"
+            ],
+            "bgm_volume": 0.17,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头有压迫感",
+              "数据段稳定推进",
+              "结论段轻微抬升"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      },
+      {
+        "project_id": 117,
+        "topic": "苹果最高涨 2300，把用户逼去了二手市场",
+        "score": 47.66,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 1461,
+          "likes": 7,
+          "comments": 1,
+          "shares": 4,
+          "favorites": 5,
+          "follows": 0,
+          "two_second_retention_rate": 74.77,
+          "five_second_retention_rate": 56.56,
+          "average_watch_seconds": 24.07,
+          "completion_rate": 3.46,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1789100569.4982207,
+          "updated_at": 1789100569.4982207
+        },
+        "content_strategy": {
+          "generated_at": 1789054688.7218225,
+          "topic": "苹果最高涨 2300，把用户逼去了二手市场",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 7,
+          "reference_titles": [
+            "苹果老款iPhone集体涨价，最高涨幅2300元：存储芯片“逼疯”了苹果！",
+            "苹果多款产品涨价，二手市场同步上涨，有商家因涨价拒绝发货，晚买一天多花2000元_新浪财经_新浪网",
+            "涨近千元！苹果涨价的“风”吹到了二手市场！原因找到了——_Pro_iPhone_价格",
+            "苹果多款产品二手市场同步涨价，晚买一天多花2000元",
+            "苹果涨价后有商家拒绝发货，苹果涨价二手市场同步上涨_搜狐网"
+          ],
+          "topic_score": {
+            "topic": "苹果最高涨 2300，把用户逼去了二手市场",
+            "brief_excerpt": "一句话选题：苹果多款 iPhone 集体涨价、最高涨 2300 元，官方归因\"存储太贵\"；新机一涨，转转平台苹果手机搜索量环比暴涨 270%——消费者被逼向二手。而存储涨价的根源，是 AI 数据中心正在疯狂吞噬全球内存产能。AI 的红利还没",
+            "total_score": 4.6,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 0.7,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 1.0,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 1.0,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 1.0,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.9,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+            "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+            "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "苹果这轮涨价不是它自己想多赚，是 AI 数据中心把高端存储产能抢走了，老款、新款、二手一起涨；普通人能做的，是锁单前留证据、买二手查清楚，别在恐慌里追高。",
+            "counter_intuition": "表面看是价格问题，背后其实是价值和风险判断",
+            "audience_pain": "工具替人省时间之后，人还能不能掌握结果",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "数字冲击",
+            "opening_hook": "有人在电商平台花 4268 元下单 iPad Air 8，第二天商家说发不了，再点开链接，同一款机型已经变成 6268 元，一夜贵了 2000，平台只补了一张 100 元券。",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你最近一次换手机或平板，是等降价，还是被涨价逼着提前下单？如果锁单后商家让你取消，你会怎么处理？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1789054846.4739802,
+          "source_hash": "b803ae795d039c7c",
+          "prompt_policy_version": "semantic-concepts-v26-source-bound-scene-plan",
+          "topic": "苹果最高涨 2300，把用户逼去了二手市场",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "ai_tech",
+            "topic_type_label": "AI科技/智能产品",
+            "visual_world": "暖米白纸张上的成熟科技编辑线稿卡通：当前主题对象由炭黑轮廓、手绘箭头、少量砖红/靛蓝/芥末黄平涂组成，像信息杂志跨页；不使用写实摄影、暗色控制台或泛用人物摆拍",
+            "subject_pool": [
+              "真实用户",
+              "智能设备",
+              "屏幕光",
+              "手部操作",
+              "城市/办公室空间"
+            ],
+            "action_pool": [
+              "抬头使用",
+              "伸手触发",
+              "低头对比",
+              "回头惊讶",
+              "现场验证"
+            ],
+            "attention_hooks": [
+              "数据光牌",
+              "功能反差",
+              "前后对比",
+              "近景设备",
+              "人物表情"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要套用其它频道的固定故事流程或无主体背景",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+              "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+              "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "explain_with_breath",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 8,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 4.3,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 8.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "冲突或误区",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "tech_suspense",
+            "bgm_label": "科技悬疑",
+            "bgm_reason": "主题信号「ai、芯片、科技」更适合科技悬疑",
+            "bgm_signals": [
+              "ai",
+              "芯片",
+              "科技"
+            ],
+            "bgm_confidence_score": 43.4,
+            "bgm_keywords": [
+              "低频脉冲",
+              "冷感合成器",
+              "轻微上升音",
+              "留出口播空间"
+            ],
+            "bgm_volume": 0.18,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头短促抬起",
+              "中段压低铺底",
+              "证据段轻微推进",
+              "结尾收轻留互动"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      }
+    ],
+    "learned_rules": [
+      "只从真实发布表现较好的项目提炼方法",
+      "保留结构、节奏和视觉策略，不复制当期事实与素材",
+      "每次新增表现数据后重新排序，旧经验保留版本指纹"
+    ],
+    "memory_fingerprint": "1e792de98ecefd08"
+  },
+  "performance_memory": {
+    "version": "channel-performance-memory-v5",
+    "template_key": "科技情报站",
+    "sample_count": 21,
+    "samples": [
+      {
+        "project_id": 90,
+        "topic": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+        "title": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+        "hook_text": "网上传的华为Mate80 Pro Max四项第一，我翻遍原始资料，没找到出处。真正的AI手机战局，根本不在榜单上。我翻了一晚上没找到那份榜单，你们手上说不定真有，评论区甩出来，我们查一下。",
+        "source": "manual_screenshot_2026-08-08",
+        "sample_id": "project-90-toutiao-20260808",
+        "platform": "头条号",
+        "duration_seconds": 83,
+        "metrics": {
+          "impressions": 926,
+          "views": 100,
+          "click_through_rate": 10.8,
+          "average_watch_seconds": 45.0,
+          "completion_rate": 23.8,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1786271391.9025679,
+        "diagnosis": {
+          "metrics": {
+            "impressions": 926,
+            "views": 100,
+            "click_through_rate": 10.8,
+            "average_watch_seconds": 45.0,
+            "completion_rate": 23.8,
+            "duration_seconds": 83.0,
+            "watch_ratio": 54.22,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.5,
+          "recency_weight": 0.655,
+          "sample_weight": 0.327,
+          "dimension_scores": {
+            "play_potential": 40.1,
+            "completion_potential": 23.8,
+            "comment_potential": 0.0
+          },
+          "strengths": [
+            {
+              "id": "retain_packaging",
+              "rule": "保留能在封面和标题中立即看懂的冲突对象与明确问题。",
+              "reason": "点击率 10.8% 表明包装具备吸引力。",
+              "weight": 0.327
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.0 次。",
+              "weight": 0.294
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.376
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.245
+            },
+            {
+              "id": "authority_first",
+              "rule": "开头先交付已核实的结论和证据边界；禁止用“我没找到、你们帮我找、评论区补资料”代替调查结果。",
+              "reason": "开头包含削弱可信度的表达：没找到、翻了一晚上、你们手上、评论区甩出来、我们查一下。",
+              "weight": 0.425
+            }
+          ]
+        }
+      },
+      {
+        "project_id": 90,
+        "topic": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+        "title": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+        "hook_text": "网上传的华为Mate80 Pro Max四项第一，我翻遍原始资料，没找到出处。真正的AI手机战局，根本不在榜单上。我翻了一晚上没找到那份榜单，你们手上说不定真有，评论区甩出来，我们查一下。",
+        "source": "manual_screenshot_2026-08-08",
+        "sample_id": "project-90-wechat-20260808",
+        "platform": "视频号",
+        "metrics": {
+          "impressions": 0,
+          "views": 993,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 36.28,
+          "completion_rate": 15.69,
+          "likes": 3,
+          "comments": 0,
+          "shares": 2,
+          "favorites": 1,
+          "follows": 0
+        },
+        "observed_at": 1786271391.9330194,
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 993,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 36.28,
+            "completion_rate": 15.69,
+            "duration_seconds": 231.23,
+            "watch_ratio": 15.69,
+            "interaction_rate": 0.6,
+            "comment_rate": 0.0,
+            "like_rate": 0.3,
+            "share_save_rate": 0.3,
+            "likes": 3,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          },
+          "confidence": 0.749,
+          "recency_weight": 0.655,
+          "sample_weight": 0.491,
+          "dimension_scores": {
+            "play_potential": 59.9,
+            "completion_potential": 15.7,
+            "comment_potential": 3.6
+          },
+          "strengths": [
+            {
+              "id": "retain_share_value",
+              "rule": "保留可转发的核查价值和实用判断标准。",
+              "reason": "产生 2 次分享，说明信息具有转发价值。",
+              "weight": 0.368
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 15.69% 显示中后段流失。",
+              "weight": 0.589
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 231 秒且完播率 15.69%。",
+              "weight": 0.491
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.6 次。",
+              "weight": 0.442
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.565
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.368
+            },
+            {
+              "id": "authority_first",
+              "rule": "开头先交付已核实的结论和证据边界；禁止用“我没找到、你们帮我找、评论区补资料”代替调查结果。",
+              "reason": "开头包含削弱可信度的表达：没找到、翻了一晚上、你们手上、评论区甩出来、我们查一下。",
+              "weight": 0.638
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-114-release-4",
+        "project_id": 114,
+        "release_id": 4,
+        "platform": "抖音",
+        "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+        "title": "华为小米同一天开发布会，把炮口对准了下周的苹果",
+        "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+        "metrics": {
+          "impressions": 0,
+          "views": 29045,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 40.69,
+          "completion_rate": 8.62,
+          "likes": 159,
+          "comments": 219,
+          "shares": 13,
+          "favorites": 13,
+          "follows": 0
+        },
+        "observed_at": 1788915853.7668252,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          },
+          "confidence": 1.0,
+          "recency_weight": 0.776,
+          "sample_weight": 0.776,
+          "dimension_scores": {
+            "play_potential": 89.3,
+            "completion_potential": 8.6,
+            "comment_potential": 19.5
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 8.62% 显示中后段流失。",
+              "weight": 0.931
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 472 秒且完播率 8.62%。",
+              "weight": 0.776
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.582
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-114-release-5",
+        "project_id": 114,
+        "release_id": 5,
+        "platform": "抖音",
+        "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+        "title": "华为小米同一天开发布会，把炮口对准了下周的苹果",
+        "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+        "metrics": {
+          "impressions": 0,
+          "views": 29045,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 40.69,
+          "completion_rate": 8.62,
+          "likes": 159,
+          "comments": 219,
+          "shares": 13,
+          "favorites": 13,
+          "follows": 0
+        },
+        "observed_at": 1788915853.7668252,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          },
+          "confidence": 1.0,
+          "recency_weight": 0.776,
+          "sample_weight": 0.776,
+          "dimension_scores": {
+            "play_potential": 89.3,
+            "completion_potential": 8.6,
+            "comment_potential": 19.5
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 8.62% 显示中后段流失。",
+              "weight": 0.931
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 472 秒且完播率 8.62%。",
+              "weight": 0.776
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.582
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-115-release-8",
+        "project_id": 115,
+        "release_id": 8,
+        "platform": "抖音",
+        "topic": "迟到十年的苹果折叠屏，今晚交卷",
+        "title": "折叠屏iPhone交卷，但苹果抄不了十年前的作业",
+        "hook_text": "苹果折叠屏iPhone已确认由前CEO库克推动完成，项目自2016年专利起步至今研发超过十年。市场主流玩家早在2019年前后完成折叠屏量产，而苹果直到2025年下半年才最终确认整机方案，2026年才正式发布。行业数据显示，全球折叠屏出货量在2023年达到2120万台峰值后，2024年回落至1880万台。钛媒体和爱范儿均指出，苹果过去十年在新品类上多次碰壁，“晚到即能定义市场”的旧神话，在折叠屏赛道上未必能续写。",
+        "metrics": {
+          "impressions": 0,
+          "views": 2185,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 32.01,
+          "completion_rate": 4.16,
+          "likes": 10,
+          "comments": 13,
+          "shares": 3,
+          "favorites": 2,
+          "follows": 0
+        },
+        "observed_at": 1788999161.2544057,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 2185,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 32.01,
+            "completion_rate": 4.16,
+            "duration_seconds": 769.47,
+            "watch_ratio": 4.16,
+            "interaction_rate": 1.28,
+            "comment_rate": 0.59,
+            "like_rate": 0.46,
+            "share_save_rate": 0.23,
+            "likes": 10,
+            "comments": 13,
+            "shares": 3,
+            "favorites": 2,
+            "follows": 0
+          },
+          "confidence": 0.835,
+          "recency_weight": 0.781,
+          "sample_weight": 0.652,
+          "dimension_scores": {
+            "play_potential": 66.8,
+            "completion_potential": 4.2,
+            "comment_potential": 17.0
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 4.16% 显示中后段流失。",
+              "weight": 0.782
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 769 秒且完播率 4.16%。",
+              "weight": 0.652
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.489
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-116-release-9",
+        "project_id": 116,
+        "release_id": 9,
+        "platform": "抖音",
+        "topic": "iPhone Duo 交卷了：贵，但苹果说\"这才叫折叠",
+        "title": "iPhone Duo 交卷了：贵，但苹果说“这才叫折叠”",
+        "hook_text": "彭博社记者马克·古尔曼爆料称，苹果首款折叠屏手机正式定名 iPhone Duo，而非流传多时的 iPhone Fold 或 iPhone Ultra。256GB 版本起售价 2000 美元（约合人民币 13457 元），最高配约 3000 美元（约合 20185 元人民币），存储最高可达 2TB，提供白色与深蓝两色。坊间对名称早有多方猜测，台媒与网友亦已开始推算当地售价。有分析指出，该定价与当前折叠屏旗舰差距并不悬殊，苹果选择 2026 年入局，与铰链、屏幕等供应链技术成熟以及近期存储芯片涨价直接相关。",
+        "metrics": {
+          "impressions": 0,
+          "views": 595,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 25.74,
+          "completion_rate": 2.13,
+          "likes": 5,
+          "comments": 1,
+          "shares": 0,
+          "favorites": 2,
+          "follows": 0
+        },
+        "observed_at": 1789045122.4088054,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 595,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 25.74,
+            "completion_rate": 2.13,
+            "duration_seconds": 1208.45,
+            "watch_ratio": 2.13,
+            "interaction_rate": 1.34,
+            "comment_rate": 0.17,
+            "like_rate": 0.84,
+            "share_save_rate": 0.34,
+            "likes": 5,
+            "comments": 1,
+            "shares": 0,
+            "favorites": 2,
+            "follows": 0
+          },
+          "confidence": 0.694,
+          "recency_weight": 0.783,
+          "sample_weight": 0.543,
+          "dimension_scores": {
+            "play_potential": 55.5,
+            "completion_potential": 2.1,
+            "comment_potential": 9.0
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 2.13% 显示中后段流失。",
+              "weight": 0.652
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 1208 秒且完播率 2.13%。",
+              "weight": 0.543
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.407
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-117-release-10",
+        "project_id": 117,
+        "release_id": 10,
+        "platform": "抖音",
+        "topic": "苹果最高涨 2300，把用户逼去了二手市场",
+        "title": "苹果最高涨 2300，把用户逼去了二手市场",
+        "hook_text": "已核实报道显示：苹果老款 iPhone 集体涨价，最高涨幅 2300 元；AI 数据中心抢购高端存储，三星、SK 海力士、美光把 70%—90% 先进产能优先给 AI 服务器，消费电子存储芯片价格飞涨；苹果多款产品涨价后，二手市场同步上涨，有二手产品 10 天涨 1000 元；消费者涨价前锁单后被商家拒绝发货，iPad Air 8 从 4268 元涨至 6268 元；市场预计 iPhone 18 Pro 系列售价高于上一代；Omdia 预测 2026 年全球智能手机出货量同比下降 12.2% 至 10.93 亿部。",
+        "metrics": {
+          "impressions": 0,
+          "views": 1461,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 24.07,
+          "completion_rate": 3.46,
+          "likes": 7,
+          "comments": 1,
+          "shares": 4,
+          "favorites": 5,
+          "follows": 0
+        },
+        "observed_at": 1789100569.4982207,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1461,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 24.07,
+            "completion_rate": 3.46,
+            "duration_seconds": 695.66,
+            "watch_ratio": 3.46,
+            "interaction_rate": 1.16,
+            "comment_rate": 0.07,
+            "like_rate": 0.48,
+            "share_save_rate": 0.62,
+            "likes": 7,
+            "comments": 1,
+            "shares": 4,
+            "favorites": 5,
+            "follows": 0
+          },
+          "confidence": 0.791,
+          "recency_weight": 0.786,
+          "sample_weight": 0.621,
+          "dimension_scores": {
+            "play_potential": 63.3,
+            "completion_potential": 3.5,
+            "comment_potential": 8.8
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 3.46% 显示中后段流失。",
+              "weight": 0.745
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 695 秒且完播率 3.46%。",
+              "weight": 0.621
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.466
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-118-release-11",
+        "project_id": 118,
+        "release_id": 11,
+        "platform": "抖音",
+        "topic": "打 120 的那一分钟，屏幕在卖广告",
+        "title": "打 120 那一分钟，屏幕可能正在换广告",
+        "hook_text": "Google Ad Manager 帮助文档说明：在广告单元设置中，自定义刷新频率默认停用；可更改为 30 到 120 秒之间任意值；30 到 120 秒的要求仅适用于使用自定义刷新频率。来源见参考资料。",
+        "metrics": {
+          "impressions": 0,
+          "views": 3072,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 15.39,
+          "completion_rate": 1.46,
+          "likes": 63,
+          "comments": 9,
+          "shares": 1,
+          "favorites": 8,
+          "follows": 0
+        },
+        "observed_at": 1789212933.901403,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 3072,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 15.39,
+            "completion_rate": 1.46,
+            "duration_seconds": 1054.11,
+            "watch_ratio": 1.46,
+            "interaction_rate": 2.64,
+            "comment_rate": 0.29,
+            "like_rate": 2.05,
+            "share_save_rate": 0.29,
+            "likes": 63,
+            "comments": 9,
+            "shares": 1,
+            "favorites": 8,
+            "follows": 0
+          },
+          "confidence": 0.872,
+          "recency_weight": 0.791,
+          "sample_weight": 0.69,
+          "dimension_scores": {
+            "play_potential": 69.8,
+            "completion_potential": 1.5,
+            "comment_potential": 13.8
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 1.46% 显示中后段流失。",
+              "weight": 0.828
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 1054 秒且完播率 1.46%。",
+              "weight": 0.69
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.517
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-119-release-12",
+        "project_id": 119,
+        "release_id": 12,
+        "platform": "抖音",
+        "topic": "车发现你困了，然后建议你打开自动驾驶",
+        "title": "困了，别把方向盘交给“完全自动驾驶”",
+        "hook_text": "多条公开报道与车主社区记录指向同一条因果线：当司机困倦时，把控制权交给名为“完全自动驾驶”的系统，并没有解决监督问题，反而把风险叠加。FSD仍要求驾驶员随时接管；Waymo曾在十字路口把自己困住，主播被困车内，救援团队介入；有Model Y车主从“经常用Autopilot看手机、看后座儿子”变成“Autopilot难以忍受”。这些材料来自报道和社区讨论，不是监管定论，但足以说明：疲劳驾驶时被建议开自动驾驶，是一个危险的建议。",
+        "metrics": {
+          "impressions": 0,
+          "views": 675,
+          "click_through_rate": 0.0,
+          "average_watch_seconds": 20.3,
+          "completion_rate": 3.41,
+          "likes": 1,
+          "comments": 1,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1789228683.5724792,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 675,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 20.3,
+            "completion_rate": 3.41,
+            "duration_seconds": 595.31,
+            "watch_ratio": 3.41,
+            "interaction_rate": 0.3,
+            "comment_rate": 0.15,
+            "like_rate": 0.15,
+            "share_save_rate": 0.0,
+            "likes": 1,
+            "comments": 1,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.707,
+          "recency_weight": 0.792,
+          "sample_weight": 0.56,
+          "dimension_scores": {
+            "play_potential": 56.6,
+            "completion_potential": 3.4,
+            "comment_potential": 3.8
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 3.41% 显示中后段流失。",
+              "weight": 0.672
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 595 秒且完播率 3.41%。",
+              "weight": 0.56
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.3 次。",
+              "weight": 0.504
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.42
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-123-release-15",
+        "project_id": 123,
+        "release_id": 15,
+        "platform": "抖音",
+        "topic": "官网涨了 800，店里降了 1300",
+        "title": "官网涨 800、线下 5499：同一台 iPhone 17",
+        "hook_text": "两条已核实报道指向同一件事。",
+        "metrics": {
+          "impressions": 0,
+          "views": 1142,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 62.43,
+          "five_second_retention_rate": 38.75,
+          "average_watch_seconds": 14.49,
+          "completion_rate": 1.37,
+          "likes": 5,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1789495406.7017393,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1142,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 14.49,
+            "completion_rate": 1.37,
+            "duration_seconds": 1057.66,
+            "watch_ratio": 1.37,
+            "interaction_rate": 0.44,
+            "comment_rate": 0.0,
+            "like_rate": 0.44,
+            "share_save_rate": 0.0,
+            "likes": 5,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.764,
+          "recency_weight": 0.806,
+          "sample_weight": 0.616,
+          "dimension_scores": {
+            "play_potential": 61.2,
+            "completion_potential": 1.4,
+            "comment_potential": 0.9
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 1.37% 显示中后段流失。",
+              "weight": 0.739
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 1057 秒且完播率 1.37%。",
+              "weight": 0.616
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.44 次。",
+              "weight": 0.554
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.708
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.462
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-125-release-16",
+        "project_id": 125,
+        "release_id": 16,
+        "platform": "抖音",
+        "topic": "你买的是问界，还是那扇门上的两个字",
+        "title": "你买的是问界，还是那扇门上的两个字",
+        "hook_text": "24 小时内，先出现一条关于门店“撤店”的传闻，随后出现一句“系误读”的否认。这两件事同时为真，并不互相取消：被否认的是“撤店”这个具体说法，没有被否认的是渠道本身在动。",
+        "metrics": {
+          "impressions": 0,
+          "views": 1726,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 77.46,
+          "five_second_retention_rate": 52.72,
+          "average_watch_seconds": 51.64,
+          "completion_rate": 4.37,
+          "likes": 16,
+          "comments": 2,
+          "shares": 0,
+          "favorites": 3,
+          "follows": 0
+        },
+        "observed_at": 1789720045.841899,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1726,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 51.64,
+            "completion_rate": 4.37,
+            "duration_seconds": 1181.69,
+            "watch_ratio": 4.37,
+            "interaction_rate": 1.22,
+            "comment_rate": 0.12,
+            "like_rate": 0.93,
+            "share_save_rate": 0.17,
+            "likes": 16,
+            "comments": 2,
+            "shares": 0,
+            "favorites": 3,
+            "follows": 0
+          },
+          "confidence": 0.809,
+          "recency_weight": 0.818,
+          "sample_weight": 0.661,
+          "dimension_scores": {
+            "play_potential": 64.7,
+            "completion_potential": 4.4,
+            "comment_potential": 6.4
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 4.37% 显示中后段流失。",
+              "weight": 0.793
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 1181 秒且完播率 4.37%。",
+              "weight": 0.661
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.496
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-127-release-17",
+        "project_id": 127,
+        "release_id": 17,
+        "platform": "抖音",
+        "topic": "你的热爱正在被重新定价，而定价的人不是你",
+        "title": "国产摩托卖到13.8万，先别急着鼓掌：你花的钱里，有一部分是",
+        "hook_text": "2026 年 9 月摩博会期间，张雪机车一次发布五款新车，顶配仿赛定价 13.8 万元，被视为国产摩托首次冲破 10 万元关口。几乎同一时间，新浪财经刊出隆鑫通用董事长李耀在 2026 中国摩托车重庆论坛上的发言：过去买摩托车问多少钱、几升油，现在年轻人问声浪够不够上头、发朋友圈够不够炸。本片以这两句话为对照，拆解\"被看见\"这一选车标准的成本结构。",
+        "metrics": {
+          "impressions": 0,
+          "views": 158,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 57.45,
+          "five_second_retention_rate": 34.04,
+          "average_watch_seconds": 14.41,
+          "completion_rate": 86.0,
+          "likes": 1,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1789878583.199552,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 158,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 14.41,
+            "completion_rate": 86.0,
+            "duration_seconds": 16.76,
+            "watch_ratio": 85.98,
+            "interaction_rate": 0.63,
+            "comment_rate": 0.0,
+            "like_rate": 0.63,
+            "share_save_rate": 0.0,
+            "likes": 1,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.55,
+          "recency_weight": 0.826,
+          "sample_weight": 0.454,
+          "dimension_scores": {
+            "play_potential": 44.0,
+            "completion_potential": 86.0,
+            "comment_potential": 1.3
+          },
+          "strengths": [
+            {
+              "id": "retain_pacing",
+              "rule": "保留当前信息推进速度和段落长度。",
+              "reason": "完播率 86.0% 较健康。",
+              "weight": 0.363
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.63 次。",
+              "weight": 0.409
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.522
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.341
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-128-release-18",
+        "project_id": 128,
+        "release_id": 18,
+        "platform": "抖音",
+        "topic": "一台没人说得清能干什么的机器人",
+        "title": "稚晖君发19999元个人机器人，但这台机器的定价逻辑可能不在",
+        "hook_text": "这个价格就能买一台人形机器人，先别急着说便宜。",
+        "metrics": {
+          "impressions": 0,
+          "views": 1522,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 68.16,
+          "five_second_retention_rate": 37.58,
+          "average_watch_seconds": 26.86,
+          "completion_rate": 3.65,
+          "likes": 9,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 1,
+          "follows": 0
+        },
+        "observed_at": 1790000309.0263255,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1522,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 26.86,
+            "completion_rate": 3.65,
+            "duration_seconds": 735.89,
+            "watch_ratio": 3.65,
+            "interaction_rate": 0.66,
+            "comment_rate": 0.0,
+            "like_rate": 0.59,
+            "share_save_rate": 0.07,
+            "likes": 9,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 1,
+            "follows": 0
+          },
+          "confidence": 0.796,
+          "recency_weight": 0.832,
+          "sample_weight": 0.663,
+          "dimension_scores": {
+            "play_potential": 63.7,
+            "completion_potential": 3.6,
+            "comment_potential": 1.9
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 3.65% 显示中后段流失。",
+              "weight": 0.796
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 735 秒且完播率 3.65%。",
+              "weight": 0.663
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.66 次。",
+              "weight": 0.597
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.762
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.497
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-131-release-21",
+        "project_id": 131,
+        "release_id": 21,
+        "platform": "抖音",
+        "topic": "车会看红绿灯，但还没学会放过手指",
+        "title": "算得清几百米外的红绿灯，为什么偏偏夹住了乘客的手指？",
+        "hook_text": "算法算得出几十米外的红绿灯，却夹住了乘客关门的三根手指。",
+        "metrics": {
+          "impressions": 0,
+          "views": 14,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 75.0,
+          "five_second_retention_rate": 50.0,
+          "average_watch_seconds": 22.5,
+          "completion_rate": 0.0,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1791261408.9037707,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 14,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 22.5,
+            "completion_rate": 0.0,
+            "duration_seconds": 0.0,
+            "watch_ratio": 0.0,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.287,
+          "recency_weight": 0.903,
+          "sample_weight": 0.259,
+          "dimension_scores": {
+            "play_potential": 23.5,
+            "completion_potential": 0.0,
+            "comment_potential": 0.0
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.0 次。",
+              "weight": 0.233
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.298
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.194
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-133-release-23",
+        "project_id": 133,
+        "release_id": 23,
+        "platform": "抖音",
+        "topic": "当 AI 替你选酒店：算法的货架，变成了透明的牢笼",
+        "title": "聊天框动了携程美团的奶酪？AI替你订酒店，到底是省心还是信息",
+        "hook_text": "你以为你在聊天框里省下了半小时比价时间，其实传统平台的万千货架",
+        "metrics": {
+          "impressions": 0,
+          "views": 542,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 62.16,
+          "five_second_retention_rate": 31.19,
+          "average_watch_seconds": 19.66,
+          "completion_rate": 2.7,
+          "likes": 5,
+          "comments": 0,
+          "shares": 1,
+          "favorites": 3,
+          "follows": 0
+        },
+        "observed_at": 1791428415.751869,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 542,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 19.66,
+            "completion_rate": 2.7,
+            "duration_seconds": 728.15,
+            "watch_ratio": 2.7,
+            "interaction_rate": 1.66,
+            "comment_rate": 0.0,
+            "like_rate": 0.92,
+            "share_save_rate": 0.74,
+            "likes": 5,
+            "comments": 0,
+            "shares": 1,
+            "favorites": 3,
+            "follows": 0
+          },
+          "confidence": 0.683,
+          "recency_weight": 0.913,
+          "sample_weight": 0.623,
+          "dimension_scores": {
+            "play_potential": 54.7,
+            "completion_potential": 2.7,
+            "comment_potential": 9.2
+          },
+          "strengths": [
+            {
+              "id": "retain_share_value",
+              "rule": "保留可转发的核查价值和实用判断标准。",
+              "reason": "产生 1 次分享，说明信息具有转发价值。",
+              "weight": 0.467
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 2.7% 显示中后段流失。",
+              "weight": 0.748
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 728 秒且完播率 2.7%。",
+              "weight": 0.623
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.716
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.467
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-138-release-24",
+        "project_id": 138,
+        "release_id": 24,
+        "platform": "抖音",
+        "topic": "懂车帝实测尊界 V800 刹车连断 3 根踏板支架：江淮尊界回应“优化设计并免费升级",
+        "title": "懂车帝实测尊界V800刹车踏板连断3台：机械底线不容妥协",
+        "hook_text": "时速一百公里全力踩死刹车，脚底下的踏板支架咔嚓一声直接折断",
+        "metrics": {
+          "impressions": 0,
+          "views": 0,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 0.0,
+          "five_second_retention_rate": 0.0,
+          "average_watch_seconds": 1.0,
+          "completion_rate": 0.0,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1791640900.265505,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 0,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 1.0,
+            "completion_rate": 0.0,
+            "duration_seconds": 0.0,
+            "watch_ratio": 0.0,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.15,
+          "recency_weight": 0.925,
+          "sample_weight": 0.139,
+          "dimension_scores": {
+            "play_potential": 0.0,
+            "completion_potential": 0.0,
+            "comment_potential": 0.0
+          },
+          "strengths": [],
+          "weaknesses": []
+        }
+      },
+      {
+        "sample_id": "project-144-release-27",
+        "project_id": 144,
+        "release_id": 27,
+        "platform": "抖音",
+        "topic": "155款App联手封杀豆包：移动互联网最坚固的那道高墙",
+        "title": "155款App联手拒绝豆包，AI全能助手为什么走不通？",
+        "hook_text": "你想让AI一句话帮你订外卖、发消息，结果刚准备用",
+        "metrics": {
+          "impressions": 0,
+          "views": 1340,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 67.64,
+          "five_second_retention_rate": 42.78,
+          "average_watch_seconds": 19.71,
+          "completion_rate": 7.2,
+          "likes": 15,
+          "comments": 8,
+          "shares": 0,
+          "favorites": 7,
+          "follows": 0
+        },
+        "observed_at": 1792039370.3338902,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1340,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 19.71,
+            "completion_rate": 7.2,
+            "duration_seconds": 273.75,
+            "watch_ratio": 7.2,
+            "interaction_rate": 2.24,
+            "comment_rate": 0.6,
+            "like_rate": 1.12,
+            "share_save_rate": 0.52,
+            "likes": 15,
+            "comments": 8,
+            "shares": 0,
+            "favorites": 7,
+            "follows": 0
+          },
+          "confidence": 0.782,
+          "recency_weight": 0.949,
+          "sample_weight": 0.742,
+          "dimension_scores": {
+            "play_potential": 62.5,
+            "completion_potential": 7.2,
+            "comment_potential": 21.4
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 7.2% 显示中后段流失。",
+              "weight": 0.89
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 273 秒且完播率 7.2%。",
+              "weight": 0.742
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.556
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-148-release-30",
+        "project_id": 148,
+        "release_id": 30,
+        "platform": "抖音",
+        "topic": "小米SU9 LUX曝光：雷军的豪车梦，要踩进尊界的泥地里吗？",
+        "title": "小米SU9 LUX商标曝光：真要造百万行政旗舰，还是日常占坑",
+        "hook_text": "金融界转载 IT 之家、新浪转载快科技均在 2026 年 10 月 19 日报道：第 1986 期商标公告显示“小米 SU9 LUX”进入初步审定阶段。报道中关于行政旗舰车型、尺寸与市场定位的内容均属于媒体和博主推测；官方并未公布任何实际车型、量产时间、技术参数或价格信息。",
+        "metrics": {
+          "impressions": 0,
+          "views": 2,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 33.33,
+          "five_second_retention_rate": 0.0,
+          "average_watch_seconds": 2.33,
+          "completion_rate": 0.0,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1792506340.8615828,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 2,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 2.33,
+            "completion_rate": 0.0,
+            "duration_seconds": 0.0,
+            "watch_ratio": 0.0,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.25,
+          "recency_weight": 0.978,
+          "sample_weight": 0.245,
+          "dimension_scores": {
+            "play_potential": 9.5,
+            "completion_potential": 0.0,
+            "comment_potential": 0.0
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.0 次。",
+              "weight": 0.221
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.282
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.184
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-149-release-31",
+        "project_id": 149,
+        "release_id": 31,
+        "platform": "抖音",
+        "topic": "数据要素“国家队”正编入场：新央企“国家数据集团”在河北雄安新区正式挂牌成立",
+        "title": "国家数据集团雄安挂牌：三大运营商加两大电网，底层数据变了？",
+        "hook_text": "你在政务窗口办一次跨行业审批，材料可能要在通信、电力和各部门之间来回核验好几个星期",
+        "metrics": {
+          "impressions": 0,
+          "views": 0,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 100.0,
+          "five_second_retention_rate": 0.0,
+          "average_watch_seconds": 0.0,
+          "completion_rate": 0.0,
+          "likes": 0,
+          "comments": 0,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1792595034.0334668,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 0,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 0.0,
+            "completion_rate": 0.0,
+            "duration_seconds": 0.0,
+            "watch_ratio": 0.0,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.15,
+          "recency_weight": 0.984,
+          "sample_weight": 0.148,
+          "dimension_scores": {
+            "play_potential": 0.0,
+            "completion_potential": 0.0,
+            "comment_potential": 0.0
+          },
+          "strengths": [],
+          "weaknesses": []
+        }
+      },
+      {
+        "sample_id": "project-150-release-32",
+        "project_id": 150,
+        "release_id": 32,
+        "platform": "抖音",
+        "topic": "iPhone Duo微信不适配：两万块钱买的折叠屏，折叠了微信",
+        "title": "15999买苹果折叠屏iPhone Duo，为什么微信直接翻",
+        "hook_text": "刚撕开一万六的苹果折叠屏包装，展开内屏点开微信，左右两边直接切出两道大黑边",
+        "metrics": {
+          "impressions": 0,
+          "views": 1534,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 69.23,
+          "five_second_retention_rate": 49.75,
+          "average_watch_seconds": 18.9,
+          "completion_rate": 7.6,
+          "likes": 9,
+          "comments": 1,
+          "shares": 4,
+          "favorites": 2,
+          "follows": 0
+        },
+        "observed_at": 1792762299.5142307,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1534,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 18.9,
+            "completion_rate": 7.6,
+            "duration_seconds": 248.68,
+            "watch_ratio": 7.6,
+            "interaction_rate": 1.04,
+            "comment_rate": 0.07,
+            "like_rate": 0.59,
+            "share_save_rate": 0.39,
+            "likes": 9,
+            "comments": 1,
+            "shares": 4,
+            "favorites": 2,
+            "follows": 0
+          },
+          "confidence": 0.796,
+          "recency_weight": 0.994,
+          "sample_weight": 0.791,
+          "dimension_scores": {
+            "play_potential": 63.7,
+            "completion_potential": 7.6,
+            "comment_potential": 6.7
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 7.6% 显示中后段流失。",
+              "weight": 0.949
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 248 秒且完播率 7.6%。",
+              "weight": 0.791
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.593
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-151-release-33",
+        "project_id": 151,
+        "release_id": 33,
+        "platform": "抖音",
+        "topic": "华为27年老将彭博卸任：那个替任正非守住补给线的人走了",
+        "title": "效力超27年老将卸任，华为采购高管交接该怎么看？",
+        "hook_text": "在华为效力超过27年的公司董事、全球采购认证管理部总裁彭博",
+        "metrics": {
+          "impressions": 0,
+          "views": 133,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 67.67,
+          "five_second_retention_rate": 51.13,
+          "average_watch_seconds": 16.19,
+          "completion_rate": 5.83,
+          "likes": 0,
+          "comments": 1,
+          "shares": 0,
+          "favorites": 0,
+          "follows": 0
+        },
+        "observed_at": 1792817306.1457806,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 133,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 16.19,
+            "completion_rate": 5.83,
+            "duration_seconds": 277.7,
+            "watch_ratio": 5.83,
+            "interaction_rate": 0.75,
+            "comment_rate": 0.75,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 1,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          },
+          "confidence": 0.531,
+          "recency_weight": 0.998,
+          "sample_weight": 0.53,
+          "dimension_scores": {
+            "play_potential": 42.5,
+            "completion_potential": 5.8,
+            "comment_potential": 17.5
+          },
+          "strengths": [],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 5.83% 显示中后段流失。",
+              "weight": 0.636
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 277 秒且完播率 5.83%。",
+              "weight": 0.53
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.75 次。",
+              "weight": 0.477
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.398
+            }
+          ]
+        }
+      }
+    ],
+    "active_rules": [
+      {
+        "id": "repair_retention",
+        "kind": "weaknesses",
+        "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+        "weight": 11.681,
+        "evidence": [
+          "完播率 15.69% 显示中后段流失。",
+          "完播率 8.62% 显示中后段流失。",
+          "完播率 4.16% 显示中后段流失。",
+          "完播率 2.13% 显示中后段流失。",
+          "完播率 3.46% 显示中后段流失。",
+          "完播率 1.46% 显示中后段流失。",
+          "完播率 3.41% 显示中后段流失。",
+          "完播率 1.37% 显示中后段流失。",
+          "完播率 4.37% 显示中后段流失。",
+          "完播率 3.65% 显示中后段流失。",
+          "完播率 2.7% 显示中后段流失。",
+          "完播率 7.2% 显示中后段流失。",
+          "完播率 7.6% 显示中后段流失。",
+          "完播率 5.83% 显示中后段流失。"
+        ],
+        "sample_count": 15
+      },
+      {
+        "id": "one_answer_per_episode",
+        "kind": "weaknesses",
+        "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+        "weight": 9.735,
+        "evidence": [
+          "推算片长约 231 秒且完播率 15.69%。",
+          "推算片长约 472 秒且完播率 8.62%。",
+          "推算片长约 769 秒且完播率 4.16%。",
+          "推算片长约 1208 秒且完播率 2.13%。",
+          "推算片长约 695 秒且完播率 3.46%。",
+          "推算片长约 1054 秒且完播率 1.46%。",
+          "推算片长约 595 秒且完播率 3.41%。",
+          "推算片长约 1057 秒且完播率 1.37%。",
+          "推算片长约 1181 秒且完播率 4.37%。",
+          "推算片长约 735 秒且完播率 3.65%。",
+          "推算片长约 728 秒且完播率 2.7%。",
+          "推算片长约 273 秒且完播率 7.2%。",
+          "推算片长约 248 秒且完播率 7.6%。",
+          "推算片长约 277 秒且完播率 5.83%。"
+        ],
+        "sample_count": 15
+      },
+      {
+        "id": "follow_payoff",
+        "kind": "weaknesses",
+        "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+        "weight": 8.264,
+        "evidence": [
+          "关注转化为 0。"
+        ],
+        "sample_count": 19
+      },
+      {
+        "id": "low_friction_cta",
+        "kind": "weaknesses",
+        "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+        "weight": 4.229,
+        "evidence": [
+          "评论为 0。"
+        ],
+        "sample_count": 8
+      },
+      {
+        "id": "repair_interaction",
+        "kind": "weaknesses",
+        "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+        "weight": 3.731,
+        "evidence": [
+          "每百次播放互动仅 0.0 次。",
+          "每百次播放互动仅 0.6 次。",
+          "每百次播放互动仅 0.3 次。",
+          "每百次播放互动仅 0.44 次。",
+          "每百次播放互动仅 0.63 次。",
+          "每百次播放互动仅 0.66 次。",
+          "每百次播放互动仅 0.75 次。"
+        ],
+        "sample_count": 9
+      },
+      {
+        "id": "authority_first",
+        "kind": "weaknesses",
+        "rule": "开头先交付已核实的结论和证据边界；禁止用“我没找到、你们帮我找、评论区补资料”代替调查结果。",
+        "weight": 1.063,
+        "evidence": [
+          "开头包含削弱可信度的表达：没找到、翻了一晚上、你们手上、评论区甩出来、我们查一下。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "retain_share_value",
+        "kind": "strengths",
+        "rule": "保留可转发的核查价值和实用判断标准。",
+        "weight": 0.835,
+        "evidence": [
+          "产生 2 次分享，说明信息具有转发价值。",
+          "产生 1 次分享，说明信息具有转发价值。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "retain_pacing",
+        "kind": "strengths",
+        "rule": "保留当前信息推进速度和段落长度。",
+        "weight": 0.363,
+        "evidence": [
+          "完播率 86.0% 较健康。"
+        ],
+        "sample_count": 1
+      },
+      {
+        "id": "retain_packaging",
+        "kind": "strengths",
+        "rule": "保留能在封面和标题中立即看懂的冲突对象与明确问题。",
+        "weight": 0.327,
+        "evidence": [
+          "点击率 10.8% 表明包装具备吸引力。"
+        ],
+        "sample_count": 1
+      }
+    ],
+    "positive_rules": [
+      {
+        "id": "retain_share_value",
+        "kind": "strengths",
+        "rule": "保留可转发的核查价值和实用判断标准。",
+        "weight": 0.835,
+        "evidence": [
+          "产生 2 次分享，说明信息具有转发价值。",
+          "产生 1 次分享，说明信息具有转发价值。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "retain_pacing",
+        "kind": "strengths",
+        "rule": "保留当前信息推进速度和段落长度。",
+        "weight": 0.363,
+        "evidence": [
+          "完播率 86.0% 较健康。"
+        ],
+        "sample_count": 1
+      },
+      {
+        "id": "retain_packaging",
+        "kind": "strengths",
+        "rule": "保留能在封面和标题中立即看懂的冲突对象与明确问题。",
+        "weight": 0.327,
+        "evidence": [
+          "点击率 10.8% 表明包装具备吸引力。"
+        ],
+        "sample_count": 1
+      }
+    ],
+    "repair_rules": [
+      {
+        "id": "repair_retention",
+        "kind": "weaknesses",
+        "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+        "weight": 11.681,
+        "evidence": [
+          "完播率 15.69% 显示中后段流失。",
+          "完播率 8.62% 显示中后段流失。",
+          "完播率 4.16% 显示中后段流失。",
+          "完播率 2.13% 显示中后段流失。",
+          "完播率 3.46% 显示中后段流失。",
+          "完播率 1.46% 显示中后段流失。",
+          "完播率 3.41% 显示中后段流失。",
+          "完播率 1.37% 显示中后段流失。",
+          "完播率 4.37% 显示中后段流失。",
+          "完播率 3.65% 显示中后段流失。",
+          "完播率 2.7% 显示中后段流失。",
+          "完播率 7.2% 显示中后段流失。",
+          "完播率 7.6% 显示中后段流失。",
+          "完播率 5.83% 显示中后段流失。"
+        ],
+        "sample_count": 15
+      },
+      {
+        "id": "one_answer_per_episode",
+        "kind": "weaknesses",
+        "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+        "weight": 9.735,
+        "evidence": [
+          "推算片长约 231 秒且完播率 15.69%。",
+          "推算片长约 472 秒且完播率 8.62%。",
+          "推算片长约 769 秒且完播率 4.16%。",
+          "推算片长约 1208 秒且完播率 2.13%。",
+          "推算片长约 695 秒且完播率 3.46%。",
+          "推算片长约 1054 秒且完播率 1.46%。",
+          "推算片长约 595 秒且完播率 3.41%。",
+          "推算片长约 1057 秒且完播率 1.37%。",
+          "推算片长约 1181 秒且完播率 4.37%。",
+          "推算片长约 735 秒且完播率 3.65%。",
+          "推算片长约 728 秒且完播率 2.7%。",
+          "推算片长约 273 秒且完播率 7.2%。",
+          "推算片长约 248 秒且完播率 7.6%。",
+          "推算片长约 277 秒且完播率 5.83%。"
+        ],
+        "sample_count": 15
+      },
+      {
+        "id": "follow_payoff",
+        "kind": "weaknesses",
+        "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+        "weight": 8.264,
+        "evidence": [
+          "关注转化为 0。"
+        ],
+        "sample_count": 19
+      },
+      {
+        "id": "low_friction_cta",
+        "kind": "weaknesses",
+        "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+        "weight": 4.229,
+        "evidence": [
+          "评论为 0。"
+        ],
+        "sample_count": 8
+      },
+      {
+        "id": "repair_interaction",
+        "kind": "weaknesses",
+        "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+        "weight": 3.731,
+        "evidence": [
+          "每百次播放互动仅 0.0 次。",
+          "每百次播放互动仅 0.6 次。",
+          "每百次播放互动仅 0.3 次。",
+          "每百次播放互动仅 0.44 次。",
+          "每百次播放互动仅 0.63 次。",
+          "每百次播放互动仅 0.66 次。",
+          "每百次播放互动仅 0.75 次。"
+        ],
+        "sample_count": 9
+      },
+      {
+        "id": "authority_first",
+        "kind": "weaknesses",
+        "rule": "开头先交付已核实的结论和证据边界；禁止用“我没找到、你们帮我找、评论区补资料”代替调查结果。",
+        "weight": 1.063,
+        "evidence": [
+          "开头包含削弱可信度的表达：没找到、翻了一晚上、你们手上、评论区甩出来、我们查一下。"
+        ],
+        "sample_count": 2
+      }
+    ],
+    "dimension_leaders": {
+      "play_potential": [
+        {
+          "sample_id": "project-114-release-4",
+          "project_id": 114,
+          "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+          "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+          "score": 89.3,
+          "label": "播放潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-114-release-5",
+          "project_id": 114,
+          "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+          "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+          "score": 89.3,
+          "label": "播放潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-150-release-32",
+          "project_id": 150,
+          "topic": "iPhone Duo微信不适配：两万块钱买的折叠屏，折叠了微信",
+          "hook_text": "刚撕开一万六的苹果折叠屏包装，展开内屏点开微信，左右两边直接切出两道大黑边",
+          "score": 63.7,
+          "label": "播放潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 1534,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 18.9,
+            "completion_rate": 7.6,
+            "duration_seconds": 248.68,
+            "watch_ratio": 7.6,
+            "interaction_rate": 1.04,
+            "comment_rate": 0.07,
+            "like_rate": 0.59,
+            "share_save_rate": 0.39,
+            "likes": 9,
+            "comments": 1,
+            "shares": 4,
+            "favorites": 2,
+            "follows": 0
+          }
+        }
+      ],
+      "completion_potential": [
+        {
+          "sample_id": "project-127-release-17",
+          "project_id": 127,
+          "topic": "你的热爱正在被重新定价，而定价的人不是你",
+          "hook_text": "2026 年 9 月摩博会期间，张雪机车一次发布五款新车，顶配仿赛定价 13.8 万元，被视为国产摩托首次冲破 10 万元关口。几乎同一时间，新浪财经刊出隆鑫通用董事长李耀在 2026 中国摩托车重庆论坛上的发言：过去买摩托车问多少钱、几升油，现在年轻人问声浪够不够上头、发朋友圈够不够炸。本片以这两句话为对照，拆解\"被看见\"这一选车标准的成本结构。",
+          "score": 86.0,
+          "label": "完播潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 158,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 14.41,
+            "completion_rate": 86.0,
+            "duration_seconds": 16.76,
+            "watch_ratio": 85.98,
+            "interaction_rate": 0.63,
+            "comment_rate": 0.0,
+            "like_rate": 0.63,
+            "share_save_rate": 0.0,
+            "likes": 1,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-90-toutiao-20260808",
+          "project_id": 90,
+          "topic": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+          "hook_text": "网上传的华为Mate80 Pro Max四项第一，我翻遍原始资料，没找到出处。真正的AI手机战局，根本不在榜单上。我翻了一晚上没找到那份榜单，你们手上说不定真有，评论区甩出来，我们查一下。",
+          "score": 23.8,
+          "label": "完播潜力",
+          "metrics": {
+            "impressions": 926,
+            "views": 100,
+            "click_through_rate": 10.8,
+            "average_watch_seconds": 45.0,
+            "completion_rate": 23.8,
+            "duration_seconds": 83.0,
+            "watch_ratio": 54.22,
+            "interaction_rate": 0.0,
+            "comment_rate": 0.0,
+            "like_rate": 0.0,
+            "share_save_rate": 0.0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "favorites": 0,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-90-wechat-20260808",
+          "project_id": 90,
+          "topic": "华为Mate80 Pro Max四项第一，为何夺冠的不是小米？",
+          "hook_text": "网上传的华为Mate80 Pro Max四项第一，我翻遍原始资料，没找到出处。真正的AI手机战局，根本不在榜单上。我翻了一晚上没找到那份榜单，你们手上说不定真有，评论区甩出来，我们查一下。",
+          "score": 15.7,
+          "label": "完播潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 993,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 36.28,
+            "completion_rate": 15.69,
+            "duration_seconds": 231.23,
+            "watch_ratio": 15.69,
+            "interaction_rate": 0.6,
+            "comment_rate": 0.0,
+            "like_rate": 0.3,
+            "share_save_rate": 0.3,
+            "likes": 3,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          }
+        }
+      ],
+      "comment_potential": [
+        {
+          "sample_id": "project-144-release-27",
+          "project_id": 144,
+          "topic": "155款App联手封杀豆包：移动互联网最坚固的那道高墙",
+          "hook_text": "你想让AI一句话帮你订外卖、发消息，结果刚准备用",
+          "score": 21.4,
+          "label": "评论潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 1340,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 19.71,
+            "completion_rate": 7.2,
+            "duration_seconds": 273.75,
+            "watch_ratio": 7.2,
+            "interaction_rate": 2.24,
+            "comment_rate": 0.6,
+            "like_rate": 1.12,
+            "share_save_rate": 0.52,
+            "likes": 15,
+            "comments": 8,
+            "shares": 0,
+            "favorites": 7,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-114-release-4",
+          "project_id": 114,
+          "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+          "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+          "score": 19.5,
+          "label": "评论潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-114-release-5",
+          "project_id": 114,
+          "topic": "红果屠城：一部你妈停不下来的剧，正在改写整个互联网",
+          "hook_text": "过去一个月，红果短剧凭借AI参与制作的“剧N代”创造了15天60亿播放的数据奇观；《聚宝仙盆之杂灵根才是真BOSS》导演大元称AI让宏大修仙场面真正进入故事。另一边，红果暂停真人短剧项目，并对低质AI剧展开治理，5月处置作品超2万部。行业正在争论短剧是百亿还是千亿市场，红果已开始试水“AI续写”与互动内容。",
+          "score": 19.5,
+          "label": "评论潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 29045,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 40.69,
+            "completion_rate": 8.62,
+            "duration_seconds": 472.04,
+            "watch_ratio": 8.62,
+            "interaction_rate": 1.39,
+            "comment_rate": 0.75,
+            "like_rate": 0.55,
+            "share_save_rate": 0.09,
+            "likes": 159,
+            "comments": 219,
+            "shares": 13,
+            "favorites": 13,
+            "follows": 0
+          }
+        }
+      ]
+    },
+    "policy": {
+      "method": "带样本置信度与时间衰减的增量频道记忆",
+      "rule_activation_threshold": 0.25,
+      "max_prompt_rules": 8,
+      "note": "单期表现只形成带权证据，不会永久写死频道；后续样本会继续增强、削弱或替换规则。"
+    },
+    "updated_at": 1792852060.985357,
+    "production_guidance": {
+      "sample_count": 21,
+      "current_problem": "标题或选题能把人带进来，但正文没有持续交付新信息，观众在中后段离开。",
+      "proven_strength": "标题与封面能让观众迅速看懂冲突；核查价值和实用判断具备转发空间；部分样本的信息推进速度有效",
+      "next_experiment": "主结论完整交付：开头先给结果，随后按“证据→原因→影响→怎么做”推进；时长由必要信息决定，不为追求短而删掉关键解释。",
+      "observation_metrics": [
+        "2 秒留存",
+        "5 秒留存",
+        "完播率"
+      ],
+      "script_constraints": [
+        "开头 2 秒直接兑现标题中的对象、结果或冲突，不先讲背景。",
+        "8 秒内交付第一条事实、数字、动作或可观察结果。",
+        "一期围绕一个主结论展开，但允许用事实、原因、影响和行动建议把结论讲完整；只有无关支线才另立选题。",
+        "每一段至少新增证据、原因、后果或判断中的一种，禁止换句话重复。",
+        "术语后立刻用生活场景或动作解释，始终使用大白话。",
+        "只有资料存在真实分歧时，才讲清双方最强理由并给出本期判断。",
+        "先完整交付结论，再决定是否提一个承接结论的问题。",
+        "不使用固定 CTA，不让观众替创作者找资料或补证据。",
+        "时长由有效证据量决定，不凑时长，也不为压时长删掉必要证据。",
+        "当前完播实验优先控制在 60–100 秒；超过该范围必须说明新增了哪些不可删除的证据节点。"
+      ],
+      "evidence": [
+        "15/17 个有效样本完播低于 22%，中位完播 4.4%。",
+        "有效样本中位时长约 595 秒。",
+        "完播率 15.69% 显示中后段流失。",
+        "推算片长约 231 秒且完播率 15.69%。",
+        "关注转化为 0。"
+      ],
+      "generation_reasons": [
+        {
+          "title": "本期开头直接给结果",
+          "reason": "历史数据表明包装或选题能带来播放，但低完播说明正文兑现太慢。"
+        },
+        {
+          "title": "本期围绕一个主结论展开",
+          "reason": "过去的问题不是信息太多，而是信息没有围绕同一主结论形成推进；本期保留完整证据链，删除无关支线。"
+        },
+        {
+          "title": "每段必须推进新信息",
+          "reason": "下一期重点删除同义复述，用证据、原因、后果和判断持续兑现标题。"
+        },
+        {
+          "title": "保留可转发判断",
+          "reason": "历史分享信号说明实用核查标准值得继续保留。"
+        }
+      ],
+      "median_completion_rate": 4.4,
+      "median_duration_seconds": 595.3,
+      "low_completion_count": 15
+    },
+    "fingerprint": "8143f8e06173a4fb"
+  },
+  "generated_at": 1792852060.9942307,
+  "fingerprint": "35e8ce5f256e5e33"
+}

@@ -4,17 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>短片工坊 · Short Video Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=20260701-optimization-plan-v1" />
-    <script defer src="./app.js?v=20260706-channel-project-filter-v1"></script>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css?v=20260910-model-dropdown-v2" />
+    <link rel="stylesheet" href="./ios-desktop.css?v=20260906-ios-v1" />
+    <script defer src="./app.js?v=20261022-stage-gate-skip-v1"></script>
   </head>
   <body>
     <div id="app" class="studio-shell">
-      <aside class="sidebar">
+      <aside class="sidebar" aria-label="频道与主题">
         <div class="brand">
           <div class="brand__badge">SV</div>
           <div>
             <h1>短片工坊</h1>
-            <p>模板 -> 项目 -> brief -> content -> 生产</p>
+            <p>把一个主题稳定做成可发布短片</p>
           </div>
         </div>
 
@@ -28,7 +30,7 @@
             <h2>频道模板</h2>
             <div class="toolbar toolbar--sidebar">
               <button id="new-template-inline-btn" class="link-btn">新建频道</button>
-              <button id="open-templates-btn" class="link-btn">打开模板目录</button>
+              <button id="open-templates-btn" class="link-btn advanced-only">打开模板目录</button>
             </div>
           </div>
           <div id="template-list" class="stack stack--scroll"></div>
@@ -47,14 +49,16 @@
       <main class="workspace">
         <header class="topbar">
           <nav class="top-tabs" aria-label="main tabs">
-            <button class="tab is-active" data-tab="content">脚本</button>
-            <button class="tab" data-tab="produce">生产</button>
-            <button class="tab" data-tab="files">成片</button>
-            <button class="tab" data-tab="releases">投放</button>
-            <button class="tab" data-tab="config">配置</button>
+            <button class="tab is-active" data-tab="content" data-step="1">脚本</button>
+            <button class="tab" data-tab="produce" data-step="2">生产</button>
+            <button class="tab" data-tab="files" data-step="3">成片</button>
+            <button class="tab" data-tab="releases" data-step="4">发布</button>
+            <button class="tab" data-tab="analytics" data-step="5">数据</button>
+            <button class="tab advanced-only" data-tab="config" data-step="6">配置</button>
           </nav>
 
           <div class="top-actions">
+            <button id="workspace-mode-toggle" class="btn btn--ghost" type="button">高级设置</button>
             <span id="backend-status" class="pill pill--warn">后端未连接</span>
           </div>
         </header>
@@ -74,75 +78,168 @@
           </div>
         </section>
 
-        <section class="workflow-card">
-          <button class="workflow-step tab is-active" data-tab="content"><span>1</span>脚本生成</button>
-          <button class="workflow-step tab" data-tab="produce"><span>2</span>生产成片</button>
-          <button class="workflow-step tab" data-tab="files"><span>3</span>成片检查</button>
-          <button class="workflow-step tab" data-tab="releases"><span>4</span>投放发布</button>
-          <button class="workflow-step tab" data-tab="config"><span>5</span>系统配置</button>
-        </section>
         <section id="project-status-strip" class="project-status-strip"></section>
+
+        <section id="task-command-bar" class="task-command-bar hidden" aria-live="polite">
+          <div class="task-command-bar__status">
+            <span id="task-command-status" class="pill">空闲</span>
+            <div class="task-command-bar__copy">
+              <strong id="task-command-title">等待选择项目</strong>
+              <span id="task-command-detail" class="muted"></span>
+            </div>
+          </div>
+          <div class="task-command-bar__meter" aria-hidden="true">
+            <span id="task-command-meter"></span>
+          </div>
+          <div id="task-command-meta" class="task-command-bar__meta muted"></div>
+          <div class="task-command-bar__actions">
+            <button id="task-command-primary" class="btn btn--primary">进入生产</button>
+            <button id="task-command-refresh" class="btn btn--ghost" title="刷新任务状态">刷新</button>
+            <button id="task-command-cancel" class="btn btn--danger hidden">停止</button>
+          </div>
+        </section>
 
         <section id="tab-content" class="tab-panel is-active">
           <div class="panel-grid panel-grid--script">
             <article class="card card--editor">
               <div class="section-head">
                 <div class="title-with-chip">
-                  <h3>创作简报 · brief.md</h3>
-                  <span class="chip chip--accent">MARKDOWN</span>
+                  <h3>主题与要求</h3>
+                  <span class="chip chip--accent advanced-only">BRIEF</span>
                 </div>
                 <div class="toolbar">
-                  <button id="import-audio-btn" class="btn btn--ghost">导入音频转写</button>
-                  <button id="save-brief-btn" class="btn btn--dark">保存 brief</button>
+                  <button id="import-audio-btn" class="btn btn--ghost advanced-only">导入音频转写</button>
+                  <button id="save-brief-btn" class="btn btn--dark advanced-only">保存 brief</button>
                 </div>
               </div>
+              <div class="content-type-bar">
+                <div>
+                  <strong>创作类型</strong>
+                  <span class="muted">商品推广会启用商品事实约束和参考图生图。</span>
+                </div>
+                <div class="segmented-control" role="group" aria-label="创作类型">
+                  <button type="button" data-content-type="editorial" class="is-active" aria-pressed="true">知识 / 观点</button>
+                  <button type="button" data-content-type="product" aria-pressed="false">商品推广</button>
+                </div>
+              </div>
+              <div class="content-type-bar content-language-bar">
+                <div>
+                  <strong>成片语言</strong>
+                  <span id="output-language-status" class="muted">文案、配音、字幕、图片文字和发布文案保持一致。</span>
+                </div>
+                <div class="segmented-control" role="group" aria-label="成片语言">
+                  <button type="button" data-output-language="zh-CN" class="is-active" aria-pressed="true">中文</button>
+                  <button type="button" data-output-language="en-US" aria-pressed="false">English</button>
+                </div>
+              </div>
+              <section id="product-setup-panel" class="product-setup-panel hidden" aria-labelledby="product-setup-title">
+                <div class="section-head">
+                  <div>
+                    <strong id="product-setup-title">商品事实与参考图</strong>
+                    <div class="muted">事实表约束文案，参考图会随提示词一起发送给支持图生图的入口。</div>
+                  </div>
+                  <span id="product-reference-status" class="pill">尚未上传参考图</span>
+                </div>
+                <div class="form-grid product-facts-grid">
+                  <label><span>商品名称</span><input id="product-name" placeholder="例：XX 65W 氮化镓充电器" /></label>
+                  <label><span>商品品类</span><input id="product-category" placeholder="例：手机充电器 / 护肤品 / 食品" /></label>
+                  <label><span>目标顾客</span><input id="product-target-customer" placeholder="谁在什么情况下会购买" /></label>
+                  <label><span>使用场景</span><input id="product-usage-scenarios" placeholder="通勤、办公室、家庭、户外等真实场景" /></label>
+                  <label class="form-grid__wide"><span>已确认卖点</span><textarea id="product-selling-points" class="text-editor text-editor--compact" placeholder="每行一个卖点，只填确认过的信息"></textarea></label>
+                  <label class="form-grid__wide"><span>证据与参数</span><textarea id="product-evidence" class="text-editor text-editor--compact" placeholder="测试数据、材质、规格、认证、来源和适用边界"></textarea></label>
+                  <label><span>价格与优惠</span><input id="product-offer" placeholder="没有就留空，系统不会编造" /></label>
+                  <label><span>合规边界</span><input id="product-compliance-notes" placeholder="禁用词、功效边界、平台要求" /></label>
+                </div>
+                <div id="product-asset-list" class="product-asset-list"><span class="muted">上传商品正面、背面、细节或使用状态图。</span></div>
+                <div class="toolbar toolbar--spaced">
+                  <div class="toolbar">
+                    <button id="product-upload-btn" class="btn btn--ghost" type="button">上传商品参考图</button>
+                    <button id="product-settings-save-btn" class="btn btn--primary" type="button">保存商品资料</button>
+                  </div>
+                  <span id="product-settings-status" class="muted">等待填写</span>
+                </div>
+                <input id="product-assets-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+              </section>
               <textarea id="brief-input" class="text-editor text-editor--short" placeholder="在这里整理主题、素材、想法，或者直接贴一份 brief。"></textarea>
               <div class="toolbar toolbar--spaced">
                 <div class="toolbar">
-                  <button id="generate-content-btn" class="btn btn--primary btn--lg">生成 content.md</button>
+                  <button id="generate-content-btn" class="btn btn--primary btn--lg">生成脚本</button>
                   <button id="cancel-generate-btn" class="btn btn--danger btn--lg">停止生成</button>
                 </div>
                 <span id="content-generate-status" class="muted">状态：空闲</span>
               </div>
+              <div id="content-learning-explanation" class="learning-explanation" hidden></div>
             </article>
 
             <div class="right-stack">
               <article class="card">
                 <div class="section-head">
-                  <h3>创作工具</h3>
-                  <div class="toolbar toolbar--tight">
-                    <button id="topic-score-btn" class="btn btn--ghost">选题评分</button>
-                    <button id="viral-doctor-btn" class="btn btn--ghost">脚本体检</button>
+                  <h3>内容质量</h3>
+                  <div class="toolbar toolbar--tight creative-tools">
+                    <button id="topic-score-btn" class="btn btn--ghost advanced-only">选题评分</button>
+                    <button id="viral-doctor-btn" class="btn btn--ghost advanced-only">脚本体检</button>
                     <button id="viral-rewrite-btn" class="btn btn--ghost">一键总编优化</button>
-                    <button id="optimization-plan-btn" class="btn btn--primary">优化路线</button>
-                    <button id="channel-history-btn" class="btn btn--ghost">频道复盘</button>
-                    <button id="rhythm-check-btn" class="btn btn--ghost">节奏体检</button>
-                    <button id="rhythm-enhance-btn" class="btn btn--primary">节奏增强</button>
-                    <button id="video-spec-btn" class="btn btn--ghost">编导规格</button>
-                    <button id="image-layer-btn" class="btn btn--ghost">图片分层</button>
-                    <button id="title-ab-btn" class="btn btn--ghost">标题封面 A/B</button>
+                    <button id="optimization-plan-btn" class="btn btn--primary advanced-only">优化路线</button>
+                    <button id="episode-review-btn" class="btn btn--primary">单期复盘卡</button>
+                    <button id="channel-history-btn" class="btn btn--ghost advanced-only">频道复盘</button>
+                    <button id="rhythm-check-btn" class="btn btn--ghost advanced-only">节奏体检</button>
+                    <button id="rhythm-enhance-btn" class="btn btn--primary advanced-only">节奏增强</button>
+                    <button id="video-spec-btn" class="btn btn--ghost advanced-only">编导规格</button>
+                    <button id="image-layer-btn" class="btn btn--ghost advanced-only">图片分层</button>
+                    <button id="ai-supervisors-btn" class="btn btn--ghost advanced-only">AI 老师团</button>
+                    <button id="title-ab-btn" class="btn btn--ghost advanced-only">标题封面 A/B</button>
                     <button id="quality-gate-btn" class="btn btn--primary">质量总检</button>
                   </div>
                 </div>
                 <div id="summary-cards" class="summary-grid"></div>
               </article>
 
-              <article class="card">
+              <article class="card source-workbench">
                 <div class="section-head">
-                  <h3>参考资料</h3>
+                  <div>
+                    <h3>查资料</h3>
+                    <div class="muted">搜索近期信息并选择本期真正要用的证据。</div>
+                  </div>
+                  <span id="source-count-pill" class="pill">0 条采用</span>
                 </div>
-                <div id="reference-list" class="stack stack--sm muted">暂无参考资料</div>
+                <div class="source-entry-grid advanced-only">
+                  <input id="source-url-input" placeholder="粘贴文章、新闻、产品页或 GitHub 链接" />
+                  <input id="source-title-input" placeholder="资料名称（选填）" />
+                  <textarea id="source-note-input" class="text-editor text-editor--compact" placeholder="补充摘要、事实或这份资料需要支撑的观点"></textarea>
+                  <div class="toolbar toolbar--spaced">
+                    <label class="source-must-use"><input id="source-must-use-input" type="checkbox" checked /> 必须用于本期</label>
+                    <div class="toolbar">
+                      <button id="source-upload-btn" class="btn btn--ghost" type="button">上传参考图片</button>
+                      <button id="source-add-btn" class="btn btn--primary" type="button">加入资料</button>
+                    </div>
+                  </div>
+                  <input id="source-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+                </div>
+                <div class="source-search-box">
+                  <div class="source-search-row">
+                    <input id="source-search-input" placeholder="输入要核验的问题或最新新闻关键词" />
+                    <label><input id="source-news-input" type="checkbox" /> 只看近期</label>
+                    <button id="source-search-btn" class="btn btn--dark" type="button">多来源搜索</button>
+                  </div>
+                  <div id="source-search-status" class="muted">同时检索已配置搜索源与公开网页。</div>
+                  <div id="source-candidate-list" class="source-candidate-list"></div>
+                </div>
+                <div id="source-material-list" class="stack stack--sm"></div>
+                <details class="source-generated-references advanced-only">
+                  <summary>查看本期自动参考资料</summary>
+                  <div id="reference-list" class="stack stack--sm muted">暂无参考资料</div>
+                </details>
               </article>
             </div>
           </div>
 
           <article class="card card--grow">
             <div class="section-head">
-              <h3>脚本成稿 · content.md</h3>
+              <h3>最终脚本</h3>
               <div class="toolbar">
                 <button id="next-to-produce-btn" class="btn btn--primary">下一步：去生产</button>
                 <button id="save-content-btn" class="btn btn--ghost">保存 content</button>
-                <button id="open-project-folder-btn" class="btn btn--ghost">打开项目目录</button>
+                  <button id="open-project-folder-btn" class="btn btn--ghost advanced-only">打开项目目录</button>
               </div>
             </div>
             <textarea id="content-input" class="text-editor text-editor--tall" placeholder="生成后的 content.md 会出现在这里。"></textarea>
@@ -151,82 +248,247 @@
 
         <section id="tab-produce" class="tab-panel">
           <div class="panel-grid panel-grid--narrow">
-            <article class="card">
-              <div class="section-head">
-                <h3>生产步骤</h3>
-                <div class="toolbar">
-                  <button id="run-job-btn" class="btn btn--primary">开始生产</button>
-                  <button id="resume-plan-btn" class="btn btn--ghost">续跑建议</button>
-                  <button id="next-to-files-btn" class="btn btn--ghost">下一步：看成片</button>
-                  <button id="chatgpt-relogin-btn" class="btn btn--ghost">重新登录 ChatGPT</button>
-                  <button id="chatgpt-logout-btn" class="btn btn--ghost">退出 ChatGPT</button>
-                  <button id="cancel-job-btn" class="btn btn--danger">紧急中止</button>
+            <article class="card production-cockpit" aria-labelledby="production-cockpit-title">
+              <div class="section-head production-cockpit__head">
+                <div>
+                  <h3 id="production-cockpit-title">生产进度</h3>
+                  <div class="muted">当前在做什么、还要多久、下一步是什么。</div>
+                </div>
+                <span id="production-cockpit-status" class="pill">空闲</span>
+              </div>
+              <div class="production-cockpit__live" aria-live="polite">
+                <div class="production-cockpit__signal" aria-hidden="true"></div>
+                <div class="production-cockpit__copy">
+                  <span id="production-cockpit-kind">等待任务</span>
+                  <strong id="production-cockpit-action-title">选择项目后开始生产</strong>
+                  <p id="production-cockpit-action-detail" class="muted">系统会在这里持续更新当前动作。</p>
+                </div>
+                <dl class="production-cockpit__runtime">
+                  <div><dt>已用时间</dt><dd id="production-cockpit-elapsed">0 秒</dd></div>
+                  <div><dt>预计剩余</dt><dd id="production-cockpit-eta">待启动</dd></div>
+                  <div><dt>整轮进度</dt><dd id="production-cockpit-progress">0%</dd></div>
+                  <div><dt>人工操作</dt><dd id="production-cockpit-human">当前无需</dd></div>
+                </dl>
+              </div>
+              <div id="production-stage-strip" class="production-stage-strip" aria-label="生产资产状态"></div>
+              <div class="production-cockpit__budget advanced-only">
+                <div class="production-cockpit__budget-copy">
+                  <span>本轮素材预算</span>
+                  <strong id="production-cockpit-budget-title">正在读取生产设置</strong>
+                  <p id="production-cockpit-budget-detail" class="muted">预算会随勾选步骤和现有素材实时更新。</p>
+                </div>
+                <div class="production-cockpit__budget-stats">
+                  <div><span>正式场景图</span><strong id="production-cockpit-scenes">0/0</strong></div>
+                  <div><span>关键位备选</span><strong id="production-cockpit-candidates">0</strong></div>
+                  <div><span>封面</span><strong id="production-cockpit-covers">0/0</strong></div>
+                  <div><span>预计生图调用</span><strong id="production-cockpit-image-calls">0 次</strong></div>
                 </div>
               </div>
-              <div class="image-provider-bar">
-                <label>
-                  <span>图片入口</span>
-                  <select id="image-provider-select">
-                    <option value="auto_no_apiyi">自动选择（不使用第三方接口）</option>
-                    <option value="ark">火山方舟 Seedream</option>
-                    <option value="imageai_playground">GPT Image Playground 网页</option>
-                    <option value="newapi">NewAPI / OpenAI Image</option>
-                    <option value="third_party">第三方 OpenAI 兼容</option>
-                    <option value="chatgpt_web_auto">ChatGPT 网页自动化</option>
-                    <option value="chatgpt_handoff">ChatGPT 网页/桌面接力</option>
-                    <option value="apiyi">API易 / OpenAI 兼容</option>
-                    <option value="auto">自动选择（原逻辑）</option>
-                  </select>
-                </label>
-                <button id="image-provider-save-btn" class="btn btn--ghost">切换入口</button>
-                <span id="image-provider-current" class="muted">等待配置加载</span>
+              <div class="production-cockpit__next">
+                <div>
+                  <span>下一步</span>
+                  <strong id="production-cockpit-next">等待选择项目</strong>
+                </div>
+                <button id="production-cockpit-action" class="btn btn--primary">进入生产</button>
               </div>
-              <div class="image-provider-bar">
-                <label>
-                  <span>场景图张数</span>
-                  <select id="scene-count-mode">
-                    <option value="auto">自动估算</option>
-                    <option value="fixed">固定张数</option>
-                  </select>
-                </label>
-                <label>
-                  <span>固定数量</span>
-                  <input id="scene-count-fixed" type="number" min="1" max="24" step="1" value="6" />
-                </label>
-                <button id="scene-count-save-btn" class="btn btn--ghost">保存张数</button>
-                <span id="scene-count-current" class="muted">跟随脚本和音频自动估算</span>
+              <div class="production-assurance-bar advanced-only" aria-label="自动生产保障">
+                <strong>交付保障</strong>
+                <span>瞬时故障自动重试 2 次</span>
+                <span>服务重启自动续跑</span>
+                <span>已完成素材不重做</span>
+                <span>只更新受影响资产</span>
+              </div>
+            </article>
+
+            <article class="card production-settings-card">
+              <div class="section-head">
+                <div>
+                  <h3>本期设置</h3>
+                  <div class="muted">通常只需要确认声音和审图方式。</div>
+                </div>
+                <div class="production-control-actions advanced-only" aria-label="生产常用操作">
+                  <button id="sample-image-btn" class="btn btn--ghost">生成质量样片</button>
+                  <button id="motion-sample-btn" class="btn btn--ghost">对比动态样片</button>
+                  <button id="resume-plan-btn" class="btn btn--ghost">续跑建议</button>
+                  <button id="next-to-files-btn" class="btn btn--ghost">查看成片</button>
+                  <details class="production-more-menu">
+                    <summary class="btn btn--ghost">账号操作</summary>
+                    <div class="production-more-menu__body">
+                    <button id="chatgpt-relogin-btn" class="btn btn--ghost">重新登录 ChatGPT</button>
+                    <button id="chatgpt-logout-btn" class="btn btn--ghost">退出 ChatGPT</button>
+                    <button id="cancel-job-btn" class="btn btn--danger">停止当前任务</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div class="production-simple-summary">
+                <div>
+                  <strong>频道方案已自动应用</strong>
+                  <span class="muted">文案、画风、镜头数量和素材复用由当前频道统一决定。</span>
+                </div>
+                <button class="btn btn--ghost" type="button" data-enable-advanced-mode>调整高级设置</button>
+              </div>
+              <section class="chatgpt-login-panel advanced-only" aria-labelledby="chatgpt-login-panel-title">
+                <div class="chatgpt-login-panel__title">
+                  <div>
+                    <h3 id="chatgpt-login-panel-title">ChatGPT 生图实例池</h3>
+                    <p>由 Ant Browser 管理账号资料，本系统按快捷打开码连接实例并自动轮询。</p>
+                  </div>
+                  <span class="pill">Ant Browser 托管</span>
+                </div>
+                <div id="chatgpt-account-pool" class="chatgpt-account-pool"></div>
+              </section>
+              <details class="production-details advanced-only" open>
+                <summary>
+                  <span>图片与生产设置</span>
+                  <small>图片入口、场景数量和手动参数</small>
+                </summary>
+                <div class="production-details__body">
+                  <div class="image-provider-bar">
+                    <label>
+                      <span>图片入口</span>
+                      <select id="image-provider-select">
+                        <option value="auto_no_apiyi">自动选择（不使用第三方接口）</option>
+                        <option value="ark">火山方舟 Seedream</option>
+                        <option value="imageai_playground">GPT Image Playground 网页</option>
+                        <option value="newapi">NewAPI / OpenAI Image</option>
+                        <option value="cpa_image">本地 CPA API 生图</option>
+                        <option value="third_party">第三方 OpenAI 兼容</option>
+                        <option value="chatgpt_web_auto">ChatGPT 网页自动化</option>
+                        <option value="chatgpt_web_handoff">ChatGPT 网页接力</option>
+                        <option value="chatgpt_desktop_handoff">ChatGPT Classic 手动接力（粘贴/保存）</option>
+                        <option value="apiyi">API易 / OpenAI 兼容</option>
+                        <option value="auto">自动选择（原逻辑）</option>
+                      </select>
+                    </label>
+                    <button id="image-provider-save-btn" class="btn btn--ghost">切换入口</button>
+                    <span id="image-provider-current" class="muted">等待配置加载</span>
+                  </div>
+                  <div class="image-provider-bar">
+                    <label>
+                      <span>场景图张数</span>
+                      <select id="scene-count-mode">
+                        <option value="auto">自动估算</option>
+                        <option value="fixed">固定张数</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>固定数量</span>
+                      <input id="scene-count-fixed" type="number" min="1" max="24" step="1" value="6" />
+                    </label>
+                    <button id="scene-count-save-btn" class="btn btn--ghost">保存张数</button>
+                    <span id="scene-count-current" class="muted">跟随脚本和音频自动估算</span>
+                  </div>
+                  <div class="image-provider-bar">
+                    <div>
+                      <strong>封面生成</strong>
+                      <div id="cover-generation-status" class="muted">本期会生成封面</div>
+                    </div>
+                    <div class="segmented-control" role="group" aria-label="封面生成方式">
+                      <button type="button" data-cover-enabled="true" aria-pressed="true">生成封面</button>
+                      <button type="button" data-cover-enabled="false" aria-pressed="false">本期跳过</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <div class="voice-status-bar">
+                <div class="voice-status-bar__copy">
+                  <div class="voice-status-bar__title">
+                    <span>配音版本</span>
+                    <strong id="voice-status-title">正在读取实际音色</strong>
+                    <span id="voice-status-pill" class="pill">读取中</span>
+                  </div>
+                  <div id="voice-status-reason" class="muted">将核对当前音频、稿件和频道声音设置。</div>
+                  <div id="voice-status-meta" class="voice-status-bar__meta"></div>
+                </div>
+                <div class="voice-status-bar__actions">
+                  <button id="voice-settings-btn" class="btn btn--ghost">选择声音</button>
+                  <button id="voice-rebuild-btn" class="btn btn--primary">重新配音并对齐字幕</button>
+                </div>
               </div>
               <div class="image-review-bar">
-                <label class="image-review-toggle">
-                  <input id="image-review-required" type="checkbox" checked />
-                  <span>图片确认后才允许成片合成</span>
-                </label>
-                <button id="confirm-images-btn" class="btn btn--ghost">确认当前图片，允许成片</button>
+                <input id="image-review-required" type="checkbox" checked hidden />
+                <div class="image-review-mode">
+                  <strong>审图方式</strong>
+                  <div class="segmented-control" role="group" aria-label="审图方式">
+                    <button type="button" data-image-review-mode="auto" aria-pressed="false">全自动</button>
+                    <button type="button" data-image-review-mode="manual" aria-pressed="true">人工确认</button>
+                  </div>
+                </div>
+                <button id="confirm-images-btn" class="btn btn--primary">确认图片并继续成片</button>
                 <span id="image-review-pill" class="pill pill--warn">待确认</span>
                 <div id="image-review-helper" class="muted image-review-helper">先生成场景图和封面图，确认后再进入视频合成。</div>
               </div>
-              <div id="step-list" class="step-list"></div>
+              <details class="production-details advanced-only">
+                <summary>
+                  <span>资产版本、闸门与手动步骤</span>
+                  <small>仅在诊断或指定步骤重跑时展开</small>
+                </summary>
+                <div class="production-details__body">
+                  <div class="asset-version-panel">
+                    <div class="section-head">
+                      <div>
+                        <strong>资产版本</strong>
+                        <div class="muted">文案更新后，旧配音、字幕、图片和成片会在这里立即标出。</div>
+                      </div>
+                      <div class="toolbar toolbar--tight">
+                        <span id="production-manifest-pill" class="pill">读取中</span>
+                        <button id="production-manifest-refresh-btn" class="btn btn--ghost">刷新资产</button>
+                      </div>
+                    </div>
+                    <div id="production-manifest-panel" class="asset-version-grid"></div>
+                  </div>
+                  <div class="stage-gates-card">
+                    <div class="section-head">
+                      <div>
+                        <strong>AI 老师团生产闸门</strong>
+                        <div class="muted">流程内小检查：先质检、自动修、复检通过后再进入下一步。</div>
+                      </div>
+                      <div class="toolbar toolbar--tight"><button id="stage-gates-refresh-btn" class="btn btn--ghost">检查闸门</button><button id="stage-gates-skip-all-btn" class="btn btn--ghost">跳过全部闸门</button></div>
+                    </div>
+                    <div id="stage-gates-panel" class="stage-gate-grid"></div>
+                  </div>
+                  <div id="step-list" class="step-list"></div>
+                </div>
+              </details>
+              <div class="production-step-launch" aria-label="启动勾选的生产步骤">
+                <div class="production-step-launch__summary">
+                  <strong id="selected-step-summary">已选择 0 个步骤</strong>
+                  <span class="muted">只执行勾选项，已有素材按当前增量策略保留。</span>
+                </div>
+                <button id="run-job-btn" class="btn btn--primary" type="button" disabled>请先选择步骤</button>
+              </div>
             </article>
 
-            <article class="card">
+            <article class="card advanced-only">
               <div class="section-head">
-                <h3>任务状态</h3>
+                <h3>任务明细</h3>
                 <span id="job-status-pill" class="pill">暂无任务</span>
               </div>
               <div id="job-progress" class="stack stack--sm"></div>
             </article>
           </div>
 
-          <div class="panel-grid">
-            <article class="card">
+          <div class="production-asset-workbench">
+            <nav class="production-asset-tabs" aria-label="生产资产视图">
+              <button type="button" class="is-active" data-production-asset-tab="scenes" aria-pressed="true">场景图</button>
+              <button type="button" data-production-asset-tab="covers" aria-pressed="false">封面</button>
+              <button id="production-log-jump-btn" type="button">运行日志</button>
+            </nav>
+
+            <article id="production-live-log-panel" class="card production-live-log-panel">
               <div class="section-head">
                 <h3>运行日志</h3>
-                <button id="refresh-job-btn" class="btn btn--ghost">刷新状态</button>
+                <div class="toolbar toolbar--tight">
+                  <button id="refresh-job-btn" class="btn btn--ghost">刷新状态</button>
+                  <button id="clear-job-log-btn" class="btn btn--ghost">清空日志</button>
+                </div>
               </div>
+              <div id="job-log-state" class="job-log-state hidden" aria-live="polite"></div>
               <pre id="job-log" class="log-view">暂无日志</pre>
             </article>
 
-            <article class="card">
+            <article class="card production-asset-panel" data-production-asset-panel="scenes">
               <div class="section-head">
                 <h3>场景图状态</h3>
                 <span id="scene-status-pill" class="pill">未生成</span>
@@ -234,7 +496,7 @@
               <div id="scene-grid" class="media-grid"></div>
             </article>
 
-            <article class="card">
+            <article class="card production-asset-panel" data-production-asset-panel="covers" hidden>
               <div class="section-head">
                 <h3>封面预览</h3>
                 <span id="cover-status-pill" class="pill">未生成</span>
@@ -249,7 +511,8 @@
             <div class="section-head">
               <h3>项目产物</h3>
               <div class="toolbar">
-                <button id="next-to-releases-btn" class="btn btn--ghost">下一步：去投放</button>
+                <button id="next-to-releases-btn" class="btn btn--primary">去发布</button>
+                <button id="next-to-data-btn" class="btn btn--ghost">查看运营数据</button>
                 <button id="video-self-check-btn" class="btn btn--primary">成片自检</button>
                 <button id="refresh-files-btn" class="btn btn--ghost">刷新文件</button>
                 <button id="open-data-folder-btn" class="btn btn--ghost">打开数据目录</button>
@@ -260,7 +523,16 @@
         </section>
 
         <section id="tab-releases" class="tab-panel">
-          <div class="panel-grid panel-grid--narrow">
+          <div class="page-intro page-intro--release">
+            <div>
+              <span class="eyebrow">发布中心</span>
+              <h3>选择平台和账号，一次完成发布</h3>
+              <p class="muted">&#21487;&#22312;&#25104;&#29255;&#21069;&#36873;&#25321;&#36134;&#21495;&#21644;&#39044;&#32422;&#26102;&#38388;&#65307;&#38431;&#21015;&#20250;&#31561;&#24453;&#25104;&#29255;&#65292;&#24182;&#22312;&#26465;&#20214;&#28385;&#36275;&#21518;&#33258;&#21160;&#21457;&#24067;&#12290;</p>
+            </div>
+            <span class="pill pill--success">发布功能已启用</span>
+          </div>
+          <div class="release-legacy-controls">
+<div class="panel-grid panel-grid--narrow">
             <article class="card">
               <div class="section-head">
                 <h3>自动发布</h3>
@@ -271,19 +543,33 @@
                 </div>
               </div>
               <div id="release-automation-summary" class="stack stack--sm muted">等待载入自动发布状态</div>
+              <div class="release-target-panel">
+                <div class="release-target-panel__head">
+                  <div>
+                    <strong>发布目标（可多选）</strong>
+                    <div class="muted">勾选抖音、视频号及对应账号后，将按顺序逐个平台发布，不会同时打开多个窗口。</div>
+                  </div>
+                </div>
+                <div id="release-batch-targets" class="release-batch-targets muted">正在读取账号...</div>
+              </div>
               <div class="form-grid">
                 <label>
-                  <span>平台</span>
+                  <span>当前操作平台</span>
                   <select id="release-auto-platform">
                     <option value="douyin">抖音</option>
                     <option value="kuaishou">快手</option>
                     <option value="xiaohongshu">小红书</option>
+                    <option value="bilibili">Bilibili</option>
+                    <option value="tencent">视频号</option>
                   </select>
                 </label>
+                <div id="release-platform-capability" class="form-grid__wide muted">正在读取平台能力...</div>
                 <label>
-                  <span>账号别名</span>
-                  <input id="release-auto-account" type="text" list="release-auto-account-options" placeholder="default（用于本地 cookie 文件名）" />
-                  <datalist id="release-auto-account-options"></datalist>
+                  <span>发布账号</span>
+                  <div class="release-account-picker">
+                    <select id="release-auto-account"></select>
+                    <button id="release-auto-new-account-btn" class="btn btn--ghost" type="button">添加账号</button>
+                  </div>
                 </label>
                 <label>
                   <span>浏览器模式</span>
@@ -312,9 +598,18 @@
               <div class="toolbar">
                 <button id="release-auto-login-btn" class="btn btn--ghost">登录账号</button>
                 <button id="release-auto-check-btn" class="btn btn--ghost">检测账号</button>
-                <button id="release-auto-publish-btn" class="btn btn--primary">发布视频</button>
+                <button id="release-auto-enqueue-btn" class="btn btn--primary">加入发布队列</button>
+                <button id="release-auto-publish-btn" class="btn btn--ghost">立即发布</button>
                 <button id="release-auto-cancel-btn" class="btn btn--danger">取消任务</button>
               </div>
+            </article>
+
+            <article class="card">
+              <div class="section-head">
+                <h3>发布中心</h3>
+                <span class="muted">任务持久保存，服务重启后自动续跑</span>
+              </div>
+              <div id="release-queue-list" class="release-queue-list muted">暂无发布队列任务</div>
             </article>
 
             <article class="card">
@@ -326,9 +621,12 @@
               <pre id="release-automation-log" class="log-view log-view--compact">暂无自动发布任务</pre>
             </article>
           </div>
+          </div>
+        </section>
 
-          <div class="panel-grid panel-grid--narrow">
-            <article class="card">
+        <section id="tab-analytics" class="tab-panel">
+          <div class="release-data-dashboard">
+            <article class="card" hidden aria-hidden="true">
               <div class="section-head">
                 <h3>投放链接</h3>
                 <button id="save-release-btn" class="btn btn--primary">添加链接</button>
@@ -345,6 +643,14 @@
                 <label class="form-grid__wide">
                   <span>备注</span>
                   <input id="release-note" type="text" placeholder="发布时间、投放策略、表现备注" />
+                </label>
+                <label>
+                  <span>展现量</span>
+                  <input id="release-impressions" type="number" min="0" placeholder="平台里的展现/曝光" />
+                </label>
+                <label>
+                  <span>点击率 %</span>
+                  <input id="release-click-through-rate" type="number" min="0" max="100" step="0.1" placeholder="没有可留空" />
                 </label>
                 <label>
                   <span>播放</span>
@@ -367,18 +673,48 @@
                   <input id="release-favorites" type="number" min="0" placeholder="0" />
                 </label>
                 <label>
+                  <span>新增关注</span>
+                  <input id="release-follows" type="number" min="0" placeholder="0" />
+                </label>
+                <label>
+                  <span>2 秒留存 %</span>
+                  <input id="release-two-second-retention" type="number" min="0" max="100" step="0.1" placeholder="0" />
+                </label>
+                <label>
+                  <span>5 秒留存 %</span>
+                  <input id="release-five-second-retention" type="number" min="0" max="100" step="0.1" placeholder="0" />
+                </label>
+                <label>
+                  <span>平均观看 秒</span>
+                  <input id="release-average-watch-seconds" type="number" min="0" step="0.1" placeholder="0" />
+                </label>
+                <label>
                   <span>完播率 %</span>
                   <input id="release-completion-rate" type="number" min="0" max="100" step="0.1" placeholder="0" />
                 </label>
               </div>
             </article>
 
-            <article class="card">
-              <div class="section-head">
-                <h3>当前投放</h3>
-                <button id="refresh-releases-btn" class="btn btn--ghost">刷新</button>
+            <article class="card release-data-card">
+              <div class="section-head release-data-head">
+                <div>
+                  <h3>运营数据</h3>
+                  <p class="muted">集中查看各平台账号、作品表现与内容反馈，不在这里执行发布。</p>
+                </div>
+                <div class="toolbar">
+                  <button id="sync-release-metrics-btn" class="btn btn--primary">同步平台数据</button>
+                  <button id="import-release-metrics-btn" class="btn btn--ghost">导入平台 CSV</button>
+                  <button id="refresh-releases-btn" class="btn btn--ghost">刷新</button>
+                </div>
               </div>
-              <div id="release-list" class="stack">暂无投放链接</div>
+              <div id="release-metrics-sync-status" class="file-callout file-callout--compact">
+                <div>
+                  <strong>真实表现自动回收</strong>
+                  <div class="muted">读取抖音、快手、小红书和 B 站创作者数据，并按作品 ID 或标题自动归因。</div>
+                </div>
+              </div>
+              <div id="release-platform-stats" class="platform-stats-grid"></div>
+              <div id="release-list" class="stack" hidden aria-hidden="true">暂无投放链接</div>
             </article>
           </div>
         </section>
@@ -432,5 +768,6 @@
     </div>
 
     <input id="audio-file-input" type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,.aac" hidden />
+    <input id="release-metrics-file-input" type="file" accept=".csv,.txt,text/csv" hidden />
   </body>
 </html>

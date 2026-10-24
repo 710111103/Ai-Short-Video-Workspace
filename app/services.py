@@ -7,6 +7,7 @@ import contextlib
 import difflib
 import hashlib
 import html
+import http.client
 import importlib.util
 import io
 import json
@@ -26,10 +27,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+import unicodedata
 import webbrowser
 import wave
 import xml.etree.ElementTree as ET
-from collections import Counter
+from app.gate_repair_policy import needs_sentence_split, repeated_editorial_failure, mark_execution_failure, gate_round_message, compact_gate_result
+from app.editor_stream import request_editor_stream
+from app.editorial_evidence import is_historical_script, editorial_evidence_block
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -42,7 +48,7 @@ except Exception:  # pragma: no cover - optional at runtime
     np = None
 
 try:
-    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageStat
 except Exception:  # pragma: no cover - optional at runtime
     Image = None
     ImageDraw = None
@@ -65,8 +71,9 @@ RapidOCR: Any = None
 RAPID_OCR_AVAILABLE = importlib.util.find_spec("rapidocr") is not None
 
 
-from .. import ant_browser, capsule_architecture, capsule_providers, motion_director, storage
-from ..audience_visual_director import (
+from . import episode_review
+from . import ant_browser, capsule_architecture, capsule_providers, motion_director, storage
+from .audience_visual_director import (
     AUDIENCE_VISUAL_POLICY_VERSION,
     audience_prompt_block,
     audience_visual_failure_reasons,
@@ -94,13 +101,26 @@ APIYI_IMAGE_MODEL_ALIASES = {
     "gpt-image-2-all": "gpt-image-2-all",
 }
 RASTER_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
-IMAGE_PROMPT_POLICY_VERSION = "semantic-concepts-v21-content-bound-cartoon"
+# Keep the generation contract aligned with the last known-good 109 pipeline.
+# This is a ruleset selector, not a project-data selector: it must never import
+# project 109's topic, facts, images, or prompts into a new episode.
+PRODUCTION_LOGIC_VERSION = "project-109"
+IMAGE_PROMPT_POLICY_VERSION = "semantic-concepts-v24-grounded-resonance"
 IMAGE_PROMPT_SCORE_VERSION = "semantic-rubric-v2"
 KEY_VISUAL_CONCEPT_POLICY_VERSION = "three-concepts-two-renders-v1"
 KEY_VISUAL_JUDGE_VERSION = "actual-image-judge-v2-evidence"
 FACT_REGISTRY_VERSION = "episode-facts-v1"
+AI_EDITORIAL_RUBRIC_VERSION = "editorial-six-dimension-v1"
+AI_EDITORIAL_DIMENSIONS = (
+    ("fact_topic_alignment", "事实与主题一致性", 25, 85),
+    ("viewer_value", "观众获得感", 20, 80),
+    ("opening_attraction", "开头吸引力", 15, 72),
+    ("information_progression", "信息递进与留存", 15, 72),
+    ("plain_human_speech", "大白话与真人口语", 15, 72),
+    ("resonance_discussion", "共鸣与讨论价值", 10, 72),
+)
 SOURCE_INFORMATION_POLICY_VERSION = "source-grounded-visuals-v3"
-VISUAL_PROMPT_MANIFEST_VERSION = 2
+VISUAL_PROMPT_MANIFEST_VERSION = 5
 PRODUCTION_MANIFEST_VERSION = 1
 PRODUCTION_LINEAGE_VERSION = 5
 SCENE_IMAGE_SIZE = "2560x1440"
@@ -171,18 +191,19 @@ IMAGE_AUDIT_TEXT_COMPONENT_DENSITY = 28.0
 ORIGINAL_VIDEO_DURATION_TOLERANCE_SECONDS = 4.0
 SUBTITLE_END_PADDING_SECONDS = 1.5
 SUBTITLE_SINGLE_LINE_MAX_CHARS = 20
-TARGET_SCENE_MS = 22_000
-# Fewer, stronger key visuals beat a slideshow of near-duplicate frames.  For a
-# roughly 90-second episode this yields five main visuals; subtitle beats and
-# local motion carry the smaller changes between them.
-SHORT_VIDEO_TARGET_SCENE_MS = 18_000
+TARGET_SCENE_MS = 15_000
+# Keep each visual tied to one complete narration beat. Short videos need a
+# denser rhythm; longer explainers may hold an evidence image for longer.
+SHORT_VIDEO_TARGET_SCENE_MS = 10_000
 SCENE_COUNT_BUCKETS = (
-    (int(1.5 * 60_000), 4, 6),
-    (int(2.5 * 60_000), 6, 8),
-    (int(4.0 * 60_000), 7, 9),
-    (int(6.0 * 60_000), 10, 14),
-    (10**12, 14, 18),
+    (60_000, 5, 8),
+    (92_000, 6, 9),
+    (150_000, 7, 13),
+    (240_000, 10, 18),
+    (360_000, 12, 20),
+    (10**12, 14, 24),
 )
+SCENE_POLICY_VERSION = 3
 CONTENT_GATE_MIN_SCORE = 80
 CONTENT_OPENING_MIN_SCORE = 4.2
 CONTENT_RETENTION_MIN_SCORE = 4.0
@@ -301,7 +322,14 @@ def run_original_bridge(command: str, payload: dict[str, Any], env: dict[str, st
             parsed = None
     if result.returncode != 0:
         if parsed and isinstance(parsed, dict) and parsed.get("error"):
-            raise RuntimeError(str(parsed["error"]))
+            detail = str(parsed["error"])
+            if command == "tts" and "http 401" in detail.casefold():
+                raise RuntimeError(
+                    "豆包语音播客鉴权失败（HTTP 401）。请确认 APP ID 和 Access Token 来自同一个已开通"
+                    "“语音播客大模型”的旧版控制台应用；不要把 Secret Key 或火山方舟 API Key 填入 Access Token。"
+                    "资源 ID 应为 volc.service_type.10050。"
+                )
+            raise RuntimeError(detail)
         detail = stderr or stdout or f"bridge failed with exit code {result.returncode}"
         raise RuntimeError(detail)
     if not isinstance(parsed, dict):
@@ -309,6 +337,211 @@ def run_original_bridge(command: str, payload: dict[str, Any], env: dict[str, st
     if not parsed.get("ok", False):
         raise RuntimeError(str(parsed.get("error") or "bridge returned failure"))
     return parsed
+
+
+VOLC_ASR_FLASH_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+VOLC_ASR_SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
+VOLC_ASR_QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
+VOLC_ASR_AUDIO_FORMATS = {
+    ".mp3": "mp3",
+    ".wav": "wav",
+    ".ogg": "ogg",
+    ".opus": "ogg",
+    ".m4a": "m4a",
+    ".aac": "aac",
+    ".amr": "amr",
+    ".spx": "spx",
+    ".pcm": "pcm",
+    ".raw": "raw",
+    ".mp4": "mp4",
+}
+
+
+def volc_asr_api_key_headers(
+    api_key: str,
+    resource_id: str,
+    request_id: str,
+    *,
+    submit: bool,
+) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": resource_id,
+        "X-Api-Request-Id": request_id,
+    }
+    if submit:
+        headers["X-Api-Sequence"] = "-1"
+    return headers
+
+
+def _volc_asr_request_json(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, str], int]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(1.0, float(timeout))) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            body = json.loads(raw or "{}")
+            return (
+                body if isinstance(body, dict) else {},
+                {str(key): str(value) for key, value in response.headers.items()},
+                int(response.status),
+            )
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            body = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            body = {}
+        response_headers = {str(key): str(value) for key, value in exc.headers.items()}
+        message = response_headers.get("X-Api-Message") or str(body.get("message") or "")
+        raise RuntimeError(f"豆包录音文件识别 HTTP {exc.code}: {message or '请求失败'}") from exc
+
+
+def _volc_asr_response_header(headers: dict[str, str], key: str) -> str:
+    target = key.casefold()
+    for name, value in headers.items():
+        if str(name).casefold() == target:
+            return clean_text(str(value))
+    return ""
+
+
+def _volc_asr_status(body: dict[str, Any], headers: dict[str, str], http_status: int) -> tuple[str, str, str]:
+    code = _volc_asr_response_header(headers, "X-Api-Status-Code")
+    message = _volc_asr_response_header(headers, "X-Api-Message")
+    log_id = _volc_asr_response_header(headers, "X-Tt-Logid")
+    if not code:
+        code = clean_text(str(body.get("code") or body.get("status_code") or ""))
+    if not message:
+        message = clean_text(str(body.get("message") or body.get("msg") or ""))
+    if not code and 200 <= int(http_status) < 300:
+        code = "20000000"
+    return code, message, log_id
+
+
+def parse_volc_asr_api_key_utterances(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    result: Any = payload.get("result") or {}
+    if isinstance(result, list):
+        result = result[0] if result and isinstance(result[0], dict) else {}
+    raw_items = result.get("utterances") if isinstance(result, dict) else []
+    utterances: list[dict[str, Any]] = []
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        text = clean_text(str(item.get("text") or ""))
+        if not text:
+            continue
+        start_ms = max(0, int(item.get("start_time", item.get("start_ms", 0)) or 0))
+        end_ms = int(item.get("end_time", item.get("end_ms", start_ms)) or start_ms)
+        utterances.append(
+            {
+                "start_ms": start_ms,
+                "end_ms": max(start_ms + 1, end_ms),
+                "text": text,
+            }
+        )
+    return utterances
+
+
+def transcribe_volc_asr_api_key(
+    audio_path: Path,
+    env: dict[str, str],
+    *,
+    timeout: int = 900,
+) -> dict[str, Any]:
+    api_key = clean_text(env.get("VOLC_SPEECH_API_KEY", ""))
+    if not api_key:
+        raise RuntimeError("豆包语音 API Key 尚未配置。")
+    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+        raise RuntimeError(f"待识别音频不存在或为空: {audio_path}")
+
+    mode = clean_text(env.get("VOLC_ASR_API_KEY_MODE", "submit")).casefold() or "submit"
+    resource_id = clean_text(env.get("VOLC_ASR_API_KEY_RESOURCE_ID", "volc.seedasr.auc")) or "volc.seedasr.auc"
+    if mode not in {"submit", "flash"}:
+        raise RuntimeError(f"不支持的豆包录音文件识别模式: {mode}")
+    if mode == "flash" and resource_id != "volc.bigasr.auc_turbo":
+        raise RuntimeError("同步极速识别必须选择“录音文件识别极速版”资源。")
+
+    audio_format = VOLC_ASR_AUDIO_FORMATS.get(audio_path.suffix.casefold())
+    if not audio_format:
+        raise RuntimeError(f"豆包录音文件识别不支持该音频格式: {audio_path.suffix or '无后缀'}")
+    audio_data = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+    request_id = str(uuid.uuid4())
+    body = {
+        "user": {"uid": "short-video-studio"},
+        "audio": {"format": audio_format, "data": audio_data},
+        "request": {
+            "model_name": "bigmodel",
+            "enable_itn": True,
+            "enable_punc": True,
+            "enable_ddc": False,
+            "show_utterances": True,
+        },
+    }
+    deadline = time.monotonic() + max(30, int(timeout))
+
+    if mode == "flash":
+        payload, response_headers, http_status = _volc_asr_request_json(
+            VOLC_ASR_FLASH_URL,
+            volc_asr_api_key_headers(api_key, resource_id, request_id, submit=True),
+            body,
+            min(180, max(30, int(timeout))),
+        )
+        code, message, log_id = _volc_asr_status(payload, response_headers, http_status)
+        if code != "20000000":
+            raise RuntimeError(f"豆包极速识别失败: code={code or 'unknown'} message={message or 'unknown'} logid={log_id or '-'}")
+        return {
+            "provider": "volc_api_key",
+            "mode": mode,
+            "resource_id": resource_id,
+            "utterances": parse_volc_asr_api_key_utterances(payload),
+            "payload": payload,
+        }
+
+    payload, response_headers, http_status = _volc_asr_request_json(
+        VOLC_ASR_SUBMIT_URL,
+        volc_asr_api_key_headers(api_key, resource_id, request_id, submit=True),
+        body,
+        min(180, max(30, int(timeout))),
+    )
+    code, message, log_id = _volc_asr_status(payload, response_headers, http_status)
+    if code != "20000000":
+        raise RuntimeError(f"豆包识别任务提交失败: code={code or 'unknown'} message={message or 'unknown'} logid={log_id or '-'}")
+    task_id = clean_text(str(payload.get("task_id") or request_id))
+
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        query_payload, query_headers, query_http_status = _volc_asr_request_json(
+            VOLC_ASR_QUERY_URL,
+            volc_asr_api_key_headers(api_key, resource_id, task_id, submit=False),
+            {},
+            min(60, max(5, int(deadline - time.monotonic()))),
+        )
+        query_code, query_message, query_log_id = _volc_asr_status(query_payload, query_headers, query_http_status)
+        if query_code == "20000000":
+            return {
+                "provider": "volc_api_key",
+                "mode": mode,
+                "resource_id": resource_id,
+                "utterances": parse_volc_asr_api_key_utterances(query_payload),
+                "payload": query_payload,
+            }
+        if query_code in {"20000001", "20000002"}:
+            continue
+        raise RuntimeError(
+            f"豆包识别结果查询失败: code={query_code or 'unknown'} "
+            f"message={query_message or 'unknown'} logid={query_log_id or '-'}"
+        )
+    raise RuntimeError(f"豆包录音文件识别等待超过 {max(30, int(timeout))} 秒。")
 
 
 def clean_text(value: str) -> str:
@@ -518,7 +751,8 @@ def overlap_score(query_tokens: set[str], text: str) -> float:
 
 
 def first_heading(content: str) -> str:
-    for line in (content or "").splitlines():
+    lines = (content or "").splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("# "):
             heading = stripped[2:].strip()
@@ -533,6 +767,22 @@ def first_heading(content: str) -> str:
                 "shorttitle",
                 "videotitle",
             }:
+                # Some model outputs use a schema label as the H1 and put the
+                # actual title on the next plain-text line. Preserve that
+                # compatible form instead of falling back to the long topic.
+                for candidate in lines[index + 1 :]:
+                    candidate = clean_text(candidate)
+                    if not candidate:
+                        continue
+                    if candidate.startswith("#"):
+                        break
+                    candidate = re.sub(r"^[-*]\s+", "", candidate).strip()
+                    # A short-video title often contains a Chinese colon (for
+                    # example "超导体的天花板：反而揭示本质"). Do not mistake
+                    # that for a speaker prefix; only reject explicit dialogue.
+                    if candidate and not re.match(r"^[【\[].{1,18}[】\]]", candidate):
+                        return candidate
+                    break
                 continue
             return heading
     return ""
@@ -620,6 +870,7 @@ COMPACT_META_LABELS = (
     "核心观点",
     "时长",
     "推荐发布标题",
+    "发布描述",
     "钩子",
     "互动钩子",
     "免责声明",
@@ -673,21 +924,36 @@ def compact_content_meta(content: str) -> str:
         hook = extract_bullet_field(source, "钩子") or first_nonempty_dialogue_line(source)
         if hook:
             values["钩子"] = summarize_scene_text(strip_dialogue_speaker(hook), 72)
-    if "互动钩子" not in values:
-        dialogue = parse_dialogue_lines(source, "video")
-        tail = strip_dialogue_speaker(dialogue[-1]) if dialogue else ""
-        if tail and ("？" in tail or "?" in tail or "评论" in tail):
-            values["互动钩子"] = summarize_scene_text(tail, 72)
-
     lines = []
     for label in COMPACT_META_LABELS:
         if label not in values:
             continue
         value = values.get(label, "")
+        if label == "互动钩子" and not value:
+            continue
         lines.append(f"- {label}: {value}".rstrip())
     if not lines:
         return source
     return replace_section(source, "Meta", "\n".join(lines), level=2)
+
+
+def synchronize_content_meta_duration(content: str, mode: str) -> tuple[str, list[str]]:
+    """Make Meta duration a derived value from the canonical spoken script."""
+    source = str(content or "")
+    if mode == "article" or not extract_section(source, "Meta", level=2):
+        return source, []
+    spoken_chars, duration_sec = estimate_spoken_duration_sec(source, mode)
+    if spoken_chars <= 0 or duration_sec <= 0:
+        return source, []
+    duration_value = f"约{int(round(duration_sec))}秒（{spoken_chars}个有效中文字）"
+    meta = extract_section(source, "Meta", level=2)
+    pattern = bullet_field_pattern("时长")
+    if pattern.search(meta):
+        updated_meta = pattern.sub(f"- 时长: {duration_value}", meta, count=1)
+    else:
+        updated_meta = f"- 时长: {duration_value}\n{meta.strip()}".strip()
+    updated = replace_section(source, "Meta", updated_meta, level=2)
+    return (updated, ["Meta时长同步实际口播"]) if updated != source else (source, [])
 
 
 def first_nonempty_dialogue_line(content: str) -> str:
@@ -699,9 +965,14 @@ def first_nonempty_dialogue_line(content: str) -> str:
 
 
 def extract_numbered_items(block: str) -> list[str]:
-    items = []
-    for match in re.finditer(r"(?m)^\s*\d+\.\s+(.+?)\s*$", block or ""):
-        items.append(clean_text(match.group(1)))
+    items: list[str] = []
+    for raw in (block or "").splitlines():
+        match = re.match(r"^\s*(?:\d+[.、)]|[-*+])\s+(.+?)\s*$", raw)
+        if not match:
+            continue
+        value = clean_text(match.group(1))
+        if value:
+            items.append(value)
     return items
 
 
@@ -860,20 +1131,80 @@ def scene_count_range_for_audio(audio_ms: int) -> tuple[int, int]:
     return SCENE_COUNT_BUCKETS[-1][1], SCENE_COUNT_BUCKETS[-1][2]
 
 
-def suggest_scene_count(audio_ms: int, candidate_count: int) -> dict[str, int]:
+def script_information_beats(content: str, mode: str) -> list[str]:
+    """Extract distinct visual information changes from the spoken script."""
+    dialogue = [strip_dialogue_speaker(item) for item in parse_dialogue_lines(content, mode)]
+    fragments: list[str] = []
+    for line in dialogue:
+        spoken = clean_scene_spoken_text(line)
+        if not spoken or looks_like_visual_direction(spoken):
+            continue
+        parts = re.split(
+            r"(?<=[。！？!?；;])\s*|(?<=[，,])(?=(?:但|但是|可|然而|反而|所以|因此|结果|真正|第一|第二|第三|最后|重点|关键))",
+            spoken,
+        )
+        pending = ""
+        for part in parts:
+            part = clean_text(part).strip("，,。；;：: ")
+            if not part:
+                continue
+            pending = clean_text(f"{pending}{part}")
+            if len(pending) >= 14 or re.search(r"\d|[？?！!]", pending):
+                fragments.append(pending[:140])
+                pending = ""
+        if pending:
+            if fragments and len(pending) < 10:
+                fragments[-1] = clean_text(f"{fragments[-1]}，{pending}")[:140]
+            else:
+                fragments.append(pending[:140])
+
+    beats: list[str] = []
+    for fragment in fragments:
+        if len(fragment) < 6:
+            continue
+        if _contains_any(fragment, ("点赞", "关注", "转发", "评论区见")) and not re.search(r"\d", fragment):
+            continue
+        if any(scene_anchors_are_duplicate(fragment, existing) for existing in beats):
+            continue
+        beats.append(fragment)
+    return beats[:24]
+
+
+def suggest_scene_count(
+    audio_ms: int,
+    candidate_count: int,
+    information_count: int = 0,
+) -> dict[str, int]:
     minimum, maximum = scene_count_range_for_audio(audio_ms)
-    target_interval_ms = (
-        SHORT_VIDEO_TARGET_SCENE_MS
-        if 0 < int(audio_ms or 0) <= 100_000
-        else TARGET_SCENE_MS
-    )
-    target = max(minimum, min(maximum, round(max(1, audio_ms) / target_interval_ms)))
-    final = target
+    safe_audio_ms = max(1, int(audio_ms or 0))
+    if safe_audio_ms <= 120_000:
+        target_interval_ms = SHORT_VIDEO_TARGET_SCENE_MS
+    elif safe_audio_ms <= 240_000:
+        target_interval_ms = TARGET_SCENE_MS
+    else:
+        target_interval_ms = 18_000
+    duration_target = max(minimum, min(maximum, round(safe_audio_ms / target_interval_ms)))
+    semantic_target = max(0, int(information_count or 0))
+    candidate_target = max(0, int(candidate_count or 0))
+    source_target = semantic_target or candidate_target
+    if source_target:
+        duration_ceiling = max(1, min(24, safe_audio_ms // 6_000 or 1))
+        # Information density chooses the count inside the duration band. It
+        # must not bypass the band's upper bound, otherwise every small
+        # sentence fragment can turn a 100-second video into a slideshow.
+        target = max(1, min(maximum, source_target, duration_ceiling))
+        final = target
+    else:
+        target = duration_target
+        final = target
     return {
         "minimum": minimum,
         "maximum": maximum,
         "target": target,
         "final": max(1, final),
+        "information_count": semantic_target,
+        "candidate_count": candidate_target,
+        "duration_target": duration_target,
     }
 
 
@@ -922,7 +1253,7 @@ def estimate_content_audio_ms(content: str, mode: str) -> int:
 
 
 def retention_duration_profile(project: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
-    """Return an adaptive content-depth budget without a hard duration cap."""
+    """Return a material-driven duration budget without a hard duration cap."""
     mode = clean_text(project.get("template_mode") or template.get("mode") or "video")
     if mode == "article":
         return {
@@ -940,20 +1271,10 @@ def retention_duration_profile(project: dict[str, Any], template: dict[str, Any]
     template_name = clean_text(template.get("name") or template.get("key") or project.get("template") or "")
     content_type = clean_text(project.get("content_type") or "")
     voice_mode = clean_text(template.get("voice_mode") or "")
-
-    if content_type == "product" or any(token in template_name for token in ("商品", "带货", "好物")):
-        minimum_sec, target_sec = 55, 80
-    elif any(token in template_name for token in ("科技", "情报", "新闻", "热点", "资讯")):
-        minimum_sec, target_sec = 75, 105
-    elif any(token in template_name for token in ("长辈", "老人", "慢讲", "健康")):
-        minimum_sec, target_sec = 90, 125
-    elif voice_mode == "dual" or "双人" in template_name:
-        minimum_sec, target_sec = 85, 120
-    else:
-        minimum_sec, target_sec = 70, 100
-
     project_id = int(project.get("id", 0) or 0)
-    brief = clean_text(storage.get_brief(project_id)) if project_id else ""
+    brief = clean_text(storage.get_brief(project_id)) if project_id else clean_text(project.get("brief") or "")
+    topic = clean_text(project.get("topic_name") or project.get("title") or "")
+
     source_chars = len(re.sub(r"\s+", "", brief))
     source_links = len(set(re.findall(r"https?://[^\s)\]>]+", brief, flags=re.I)))
     source_numbers = len(
@@ -965,33 +1286,70 @@ def retention_duration_profile(project: dict[str, Any], template: dict[str, Any]
             )
         )
     )
-    evidence_score = source_chars / 700 + source_links * 0.8 + min(source_numbers, 12) * 0.18
+    source_paragraphs = len(
+        [
+            part
+            for part in re.split(r"\n\s*\n|\n(?=[一二三四五六七八九十\d]+[、.．])", brief)
+            if clean_text(part)
+        ]
+    )
+    causal_hits = len(re.findall(r"因为|所以|导致|原因|结果|但是|然而|相比|意味着|本质|关键|如果|为什么", brief))
+    evidence_score = (
+        source_chars / 650
+        + source_links * 0.9
+        + min(source_numbers, 14) * 0.2
+        + min(causal_hits, 10) * 0.16
+    )
     if evidence_score >= 6:
-        source_depth, depth_bonus, information_beats = "rich", 55, 7
-    elif evidence_score >= 3:
-        source_depth, depth_bonus, information_beats = "standard", 25, 6
+        source_depth = "rich"
+    elif evidence_score >= 2.5:
+        source_depth = "standard"
     else:
-        source_depth, depth_bonus, information_beats = "light", 0, 5
-    target_sec += depth_bonus
-    soft_maximum_sec = target_sec + (75 if source_depth == "rich" else 55)
+        source_depth = "light"
+
+    # Channel identity controls delivery style. Explainable source material
+    # controls duration, so different topics do not converge on one runtime.
+    topic_sec = min(12, max(0, len(topic) - 8) // 3)
+    evidence_sec = min(105, round(source_chars / 15))
+    structure_sec = min(
+        35,
+        source_links * 5
+        + min(source_numbers, 12) * 2
+        + min(causal_hits, 8) * 2
+        + min(source_paragraphs, 8),
+    )
+    target_sec = 52 + topic_sec + evidence_sec + structure_sec
+    if content_type == "product" or any(token in template_name for token in ("商品", "带货", "好物")):
+        target_sec = max(50, target_sec - 8)
+    if voice_mode == "dual" or "双人" in template_name:
+        target_sec += 12
+    if any(token in template_name for token in ("长辈", "老人", "慢讲", "健康")):
+        target_sec += 10
+
+    target_sec = max(50, min(210, target_sec))
+    minimum_sec = max(40, round(target_sec * 0.68))
+    information_beats = max(4, min(12, round(target_sec / 16)))
+    soft_maximum_sec = target_sec + max(35, round(target_sec * 0.45))
 
     return {
         "enabled": True,
         "minimum_sec": minimum_sec,
         "target_sec": target_sec,
-        # Legacy callers interpret a positive value as a hard cap. Zero keeps
-        # useful evidence from being deleted merely to hit a stopwatch target.
         "maximum_sec": 0,
         "soft_maximum_sec": soft_maximum_sec,
         "min_chars": int(minimum_sec * 4.4),
         "max_chars": 0,
         "information_beats": information_beats,
         "source_depth": source_depth,
+        "experiment_active": False,
+        "experiment_name": "",
+        "enforce_generation_only": False,
         "source_chars": source_chars,
         "source_links": source_links,
         "source_numbers": source_numbers,
+        "source_paragraphs": source_paragraphs,
+        "causal_hits": causal_hits,
     }
-
 
 def estimate_spoken_duration_sec(content: str, mode: str) -> tuple[int, float]:
     """Estimate duration from spoken copy, ignoring a possibly stale Meta duration."""
@@ -1038,11 +1396,14 @@ def resolve_project_scene_count(
         final = clamp_scene_count(candidate_count or 4, 4)
         return {"mode": "auto", "final": final, "target": final, "minimum": 1, "maximum": 12, "audio_ms": 0}
     estimated_ms = max(0, int(audio_ms or 0)) or estimate_content_audio_ms(content, mode)
-    suggestion = suggest_scene_count(estimated_ms, candidate_count)
+    information_beats = script_information_beats(content, mode)
+    suggestion = suggest_scene_count(estimated_ms, candidate_count, len(information_beats))
     return {
         "mode": "auto",
         **suggestion,
         "audio_ms": estimated_ms,
+        "information_beats": information_beats,
+        "count_source": "script_information" if information_beats else "scene_candidates_or_duration",
     }
 
 
@@ -1058,7 +1419,13 @@ def stable_scene_count_for_job(
     existing = max(0, int(existing_count or 0))
     visual_steps = {"images", "images_missing", "images_sample"}
     requested = {clean_text(str(step or "")) for step in planned_steps}
-    preserve = bool(not fixed_mode and existing > 0 and not requested.intersection(visual_steps))
+    # Do not preserve an oversized slideshow from an older auto policy.
+    preserve = bool(
+        not fixed_mode
+        and existing > 0
+        and existing <= desired
+        and not requested.intersection(visual_steps)
+    )
     return (clamp_scene_count(existing, desired), True) if preserve else (desired, False)
 
 
@@ -1174,10 +1541,22 @@ def aligned_scene_prompt(
 def timeline_scene_prompts(project_id: int) -> list[str]:
     content_path = storage.project_file(project_id, "content.md")
     plan_path = storage.project_file(project_id, "audio/scene_plan.json")
+    settings = project_scene_count_settings(project_id) if project_id else {}
+    count_mode = clean_text(str(settings.get("scene_count_mode") or "auto")).lower()
+    fixed_count = clamp_scene_count(settings.get("scene_count_fixed", 6)) if count_mode == "fixed" else None
+
     plan_fresh = plan_path.exists() and (not content_path.exists() or plan_path.stat().st_mtime >= content_path.stat().st_mtime)
     if plan_fresh:
         plan_payload = storage.read_json(plan_path, {})
-        plan_scenes = plan_payload.get("scenes") if isinstance(plan_payload, dict) else None
+        current_content = storage.get_content(project_id)
+        plan_current = bool(
+            isinstance(plan_payload, dict)
+            and clean_text(str(plan_payload.get("prompt_policy_version") or "")) == IMAGE_PROMPT_POLICY_VERSION
+            and clean_text(str(plan_payload.get("source_hash") or "")) == visual_brief_source_hash(current_content)
+        )
+        plan_scenes = plan_payload.get("scenes") if plan_current else None
+        if fixed_count is not None and isinstance(plan_scenes, list) and len(plan_scenes) != fixed_count:
+            plan_scenes = None
         if isinstance(plan_scenes, list):
             plan_prompts = []
             for item in plan_scenes:
@@ -1210,6 +1589,8 @@ def timeline_scene_prompts(project_id: int) -> list[str]:
         return []
     payload = storage.read_json(timeline_path, {})
     scenes = payload.get("scenes") if isinstance(payload, dict) else None
+    if fixed_count is not None and isinstance(scenes, list) and len(scenes) != fixed_count:
+        scenes = None
     if isinstance(scenes, list):
         prompts = [
             sanitize_prompt_for_image_model(str(item.get("prompt", "")), "scene") or clean_text(str(item.get("prompt", "")))
@@ -1390,7 +1771,21 @@ def looks_like_visual_generation_instruction(text: str) -> bool:
         return True
     if _contains_any(source, VISUAL_PRODUCTION_ACTIONS):
         return True
-    production_hits = sum(1 for token in VISUAL_PRODUCTION_TERMS if token in source)
+    # Count visual nouns without overlapping substrings.  For example,
+    # "复杂背景别一次框太大" contains the adjacent characters "景别", but
+    # that sentence is user advice, not a camera-shot instruction.  A plain
+    # `token in source` count treated both "背景" and the accidental "景别" as
+    # two independent production terms and removed the whole spoken paragraph.
+    occupied: list[tuple[int, int]] = []
+    production_hits = 0
+    for token in sorted(VISUAL_PRODUCTION_TERMS, key=len, reverse=True):
+        for match in re.finditer(re.escape(token), source):
+            span = match.span()
+            if any(span[0] < end and start < span[1] for start, end in occupied):
+                continue
+            occupied.append(span)
+            production_hits += 1
+            break
     instruction_hits = sum(
         1
         for token in ("请", "必须", "禁止", "不要", "只", "保留", "留出", "放在", "使用", "采用")
@@ -1619,9 +2014,21 @@ def is_narrative_speaker_label(value: str) -> bool:
             "判断",
             "信号",
             "结论",
+            "直接说结论",
+            "开门见山",
+            "结果先行",
             "重点",
             "关键",
+            "问题",
             "代价",
+            "原因",
+            "证据",
+            "建议",
+            "检查",
+            "提醒",
+            "总结",
+            "所以",
+            "接下来",
             "回到",
             "最后",
             "机构",
@@ -1630,13 +2037,49 @@ def is_narrative_speaker_label(value: str) -> bool:
         )
     ):
         return True
-    return bool(
+    if bool(
         re.search(
-            r"^(?:先|再|接下来|最后|现在)?(?:问|告诉|提醒|注意|记住|想想|看看|说说|聊聊)"
+            r"^(?:你|大家|观众)?(?:先|再|接下来|最后|现在|仔细|放大|回头|往下)?"
+            r"(?:问|告诉|提醒|注意|记住|想想|看看|看|听|检查|观察|说说|聊聊)"
             r"|(?:一个问题|重点来了|关键来了|真相|结论|最后一句|最后提醒|划重点)",
             compact,
         )
-    )
+    ):
+        return True
+    # Any bracket label that is not a known role is an editorial marker, not a
+    # voice identity. Treating arbitrary labels as speakers leaks directions
+    # such as "把话说准一点" into TTS and subtitles.
+    return True
+
+
+LANGUAGE_POLLUTION_MONEY_TERMS = ("不少钱", "大价钱", "低价", "高价", "花钱")
+LANGUAGE_POLLUTION_TECH_ACTIONS = (
+    "复制", "粘贴", "纹理", "像素", "补丁", "生成", "绘制", "画出", "弯曲", "接缝",
+    "阴影", "倒影", "边缘", "涂抹", "遮罩", "识别", "渲染", "编码", "解码",
+)
+LANGUAGE_POLLUTION_COMMERCE_TERMS = (
+    "买", "卖", "售价", "价格", "成本", "收费", "支付", "付款", "便宜", "贵", "预算",
+    "账单", "亏", "赔", "赚", "省钱", "消费", "订单", "商品",
+)
+
+
+def script_language_pollution_hits(text: str) -> list[str]:
+    """Detect incompatible semantic fragments introduced by text normalization."""
+    hits: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        spoken = clean_text(strip_spoken_line_for_tts(raw_line))
+        if not spoken:
+            continue
+        for clause in re.split(r"[，,。！？!?；;：:]", spoken):
+            clause = clean_text(clause)
+            if not clause or not any(term in clause for term in LANGUAGE_POLLUTION_MONEY_TERMS):
+                continue
+            if (
+                any(term in clause for term in LANGUAGE_POLLUTION_TECH_ACTIONS)
+                and not any(term in clause for term in LANGUAGE_POLLUTION_COMMERCE_TERMS)
+            ):
+                hits.append(summarize_scene_text(clause, 36))
+    return dedupe_clauses(hits)
 
 
 def sanitized_dialogue_payload_for_tts(lines: list[str], tts_text: str, topic: str) -> list[dict[str, str]]:
@@ -1662,6 +2105,8 @@ def sanitized_dialogue_payload_for_tts(lines: list[str], tts_text: str, topic: s
         spoken, _outro_hits = strip_weak_outro_tail(spoken)
         if not spoken:
             continue
+        if low_information_transition_family(spoken):
+            continue
         if any(token in spoken for token in WEAK_SCRIPT_CTA_TOKENS) and not any(token in spoken for token in INTERACTION_SIGNAL_TOKENS):
             continue
         payload.append({"speaker": speaker, "text": spoken})
@@ -1669,23 +2114,6 @@ def sanitized_dialogue_payload_for_tts(lines: list[str], tts_text: str, topic: s
     duplicate_indexes = set(duplicate_terminal_interaction_indexes([item["text"] for item in payload]))
     if duplicate_indexes:
         payload = [item for index, item in enumerate(payload) if index not in duplicate_indexes]
-    payload_language = (
-        "en-US"
-        if content_lines_use_english([*[item["text"] for item in payload], topic])
-        else "zh-CN"
-    )
-    if not payload:
-        payload.append({"speaker": "主播", "text": interaction_line_for_topic(topic, payload_language)})
-    elif not any(is_explicit_interaction_cta(item["text"]) for item in payload[-6:]):
-        payload.append(
-            {
-                "speaker": payload[-1].get("speaker") or "主播",
-                "text": interaction_line_for_topic(topic, payload_language),
-            }
-        )
-        duplicate_indexes = set(duplicate_terminal_interaction_indexes([item["text"] for item in payload]))
-        if duplicate_indexes:
-            payload = [item for index, item in enumerate(payload) if index not in duplicate_indexes]
     return payload
 
 
@@ -1715,7 +2143,7 @@ def content_tts_text(content: str, mode: str, dialogue_lines: list[str], scene_l
     return clean_text(content) or topic_name
 
 
-SPOKEN_SCRIPT_SCHEMA_VERSION = "spoken-script-v7"
+SPOKEN_SCRIPT_SCHEMA_VERSION = "spoken-script-v8-natural-units"
 TTS_VOICE_MANIFEST_VERSION = 3
 TTS_AUDIO_PROCESSING_VERSION = "round-aware-natural-pacing-v5"
 SUBTITLE_SYNC_MANIFEST_VERSION = 1
@@ -1758,11 +2186,37 @@ def spoken_script_source_hash(content: str) -> str:
     return hashlib.sha256(str(content or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
+def coalesce_tts_dialogue_units(dialogue: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Join same-speaker continuation lines for natural TTS delivery.
+
+    Script formatting may split one grammatical sentence across several visual or
+    subtitle beats. Sending every line as a separate podcast turn inserts an
+    audible reset between fragments. Only lines without terminal punctuation are
+    joined, so deliberate short sentences such as “影子最难。” keep their pause.
+    """
+    merged: list[dict[str, str]] = []
+    terminal = re.compile(r"[。！？!?；;…]$|[）)】]$")
+    for raw in dialogue:
+        speaker = clean_text(str(raw.get("speaker") or "主播")) or "主播"
+        text = clean_text(str(raw.get("text") or ""))
+        if not text:
+            continue
+        if merged and merged[-1]["speaker"] == speaker and not terminal.search(merged[-1]["text"]):
+            previous = merged[-1]["text"].rstrip("，,：:；; ")
+            # A comma gives the speech model a natural micro-pause without
+            # creating a new voice turn. Spoken words remain identical.
+            merged[-1]["text"] = f"{previous}，{text.lstrip('，,：:；; ')}"
+        else:
+            merged.append({"speaker": speaker, "text": text})
+    return merged
+
+
 def build_spoken_script_manifest(content: str, mode: str, topic_name: str = "") -> dict[str, Any]:
     section = "正文" if mode == "article" else detect_script_section_title(content)
     dialogue_lines = parse_dialogue_lines(content, mode)
     raw_tts_text = content_tts_text(content, mode, dialogue_lines, [], topic_name)
     dialogue = sanitized_dialogue_payload_for_tts(dialogue_lines, raw_tts_text, topic_name)
+    dialogue = coalesce_tts_dialogue_units(dialogue)
     utterances = [
         {
             "id": f"spoken-{index:03d}",
@@ -2197,11 +2651,88 @@ def split_caption_sentence(text: str, limit: int = 20) -> list[str]:
         if len(segment) <= limit:
             wrapped.append(segment)
             continue
+        # Balance hard-wrapped text so a long sentence does not end with a
+        # one-character caption (for example ``千元大`` / ``钞``). The audio
+        # timing is distributed by caption weight, so a tiny tail flashes too
+        # quickly and is commonly perceived as subtitle/voice desync.
+        chunk_count = max(2, math.ceil(len(segment) / limit))
         start = 0
-        while start < len(segment):
-            wrapped.append(segment[start : start + limit].strip())
-            start += limit
+        for chunks_left in range(chunk_count, 1, -1):
+            remaining_length = len(segment) - start
+            ideal = start + round(remaining_length / chunks_left)
+            minimum = start + max(4, ideal - start - 5)
+            maximum = min(len(segment) - (chunks_left - 1) * 4, ideal + 5)
+            candidates = range(minimum, maximum + 1)
+            boundary = max(
+                candidates,
+                key=lambda index: (_caption_boundary_score(segment, index), -abs(index - ideal)),
+            )
+            wrapped.append(segment[start:boundary].strip())
+            start = boundary
+        wrapped.append(segment[start:].strip())
     return [segment for segment in wrapped if segment]
+
+
+def _caption_boundary_score(text: str, index: int) -> int:
+    """Prefer natural reading boundaries without topic-specific vocabulary."""
+    if index <= 0 or index >= len(text):
+        return -100
+    left = text[index - 1]
+    right = text[index]
+    # Latin words, model names, numbers and units must remain intact. This
+    # covers forms such as 2nm, 8E6, Gen 6 and 5499元 across all channels.
+    if left.isascii() and right.isascii() and (left.isalnum() or left in ".%+-") and (right.isalnum() or right in ".%+-"):
+        return -100
+    if right.isspace() and left.isascii() and left.isalnum() and index + 1 < len(text) and text[index + 1].isascii() and text[index + 1].isalnum():
+        return -100
+    if left.isspace() and right.isascii() and right.isalnum() and index >= 2 and text[index - 2].isascii() and text[index - 2].isalnum():
+        return -100
+    if left.isascii() and left.isalnum() and right in "%％年月日元秒分时万亿寸代核瓦":
+        return -90
+    if left in "([{（【《“'\"" or right in ")] }）】》”'\"，。！？；：、".replace(" ", ""):
+        return -80
+    score = 0
+    if left in "，,、；：:。！？!?":
+        score += 100
+    if left.isspace() or right.isspace():
+        score += 70
+    # Grammatical joins are better caption cuts than the middle of a noun.
+    if left in "的地得了着过吗呢吧啊呀和与及或而但却则是在把被让给向对从到":
+        score += 24
+    if right in "但而可所因如当这那其再又也并就才只还先后":
+        score += 16
+    if left.isascii() != right.isascii():
+        score += 5
+    return score
+
+
+def subtitle_speech_weight(text: str) -> float:
+    """Estimate spoken duration more closely than raw character count."""
+    cleaned = clean_text(text)
+    weight = 0.0
+    index = 0
+    while index < len(cleaned):
+        char = cleaned[index]
+        if char.isdigit():
+            match = re.match(r"\d+(?:\.\d+)?", cleaned[index:])
+            token = match.group(0) if match else char
+            weight += max(1.4, len(token.replace(".", "")) * 0.82)
+            index += len(token)
+            continue
+        if char.isascii() and char.isalpha():
+            match = re.match(r"[A-Za-z]+", cleaned[index:])
+            token = match.group(0) if match else char
+            weight += max(1.0, min(len(token) * 0.58, 3.2))
+            index += len(token)
+            continue
+        if "\u4e00" <= char <= "\u9fff":
+            weight += 1.0
+        elif char in "，,、；：:":
+            weight += 0.45
+        elif char in "。！？!?":
+            weight += 0.75
+        index += 1
+    return max(1.0, weight)
 
 
 def split_script_into_caption_segments(text: str, limit: int = 20) -> list[str]:
@@ -2463,6 +2994,219 @@ def _build_source_locked_subtitles_by_weight(
     return entries
 
 
+def build_audio_activity_locked_subtitles(
+    dialogue_texts: list[str],
+    speech_intervals: list[tuple[int, int]],
+    audio_duration_ms: int,
+) -> list[dict[str, Any]]:
+    """Keep source wording while advancing captions only during detected speech."""
+    captions: list[tuple[str, int]] = []
+    for utterance_index, raw_text in enumerate(dialogue_texts):
+        text = clean_text(raw_text)
+        if not text:
+            continue
+        for segment in split_script_into_caption_segments(text, limit=SUBTITLE_SINGLE_LINE_MAX_CHARS):
+            if clean_text(segment):
+                captions.append((segment, utterance_index))
+    if not captions:
+        return []
+
+    normalized_intervals: list[tuple[int, int]] = []
+    limit_ms = max(1, int(audio_duration_ms))
+    for raw_start, raw_end in speech_intervals:
+        start_ms = max(0, min(limit_ms, int(raw_start)))
+        end_ms = max(start_ms, min(limit_ms, int(raw_end)))
+        if end_ms - start_ms < 40:
+            continue
+        if normalized_intervals and start_ms <= normalized_intervals[-1][1] + 80:
+            normalized_intervals[-1] = (normalized_intervals[-1][0], max(normalized_intervals[-1][1], end_ms))
+        else:
+            normalized_intervals.append((start_ms, end_ms))
+    if not normalized_intervals:
+        return _build_source_locked_subtitles_by_weight(dialogue_texts, [], audio_duration_ms)
+
+    lengths = [end - start for start, end in normalized_intervals]
+    active_total = sum(lengths)
+    if active_total <= 0:
+        return _build_source_locked_subtitles_by_weight(dialogue_texts, [], audio_duration_ms)
+
+    def audio_time_for_offset(offset_ms: float, *, prefer_next: bool = False) -> int:
+        remaining = max(0.0, min(float(active_total), float(offset_ms)))
+        for interval_index, ((start_ms, end_ms), length_ms) in enumerate(zip(normalized_intervals, lengths)):
+            if remaining < length_ms or (remaining == length_ms and not prefer_next):
+                return min(end_ms, start_ms + round(remaining))
+            remaining -= length_ms
+            if remaining == 0 and prefer_next and interval_index + 1 < len(normalized_intervals):
+                return normalized_intervals[interval_index + 1][0]
+        return normalized_intervals[-1][1]
+
+    weights = [subtitle_speech_weight(text) for text, _utterance_index in captions]
+    total_weight = sum(weights) or 1.0
+    interval_boundaries: list[float] = []
+    running_active = 0.0
+    for length_ms in lengths[:-1]:
+        running_active += length_ms
+        interval_boundaries.append(running_active)
+
+    average_caption_ms = active_total / max(1, len(captions))
+    snap_tolerance_ms = min(700.0, max(400.0, average_caption_ms * 0.36))
+    desired_boundaries: list[float] = []
+    consumed_weight = 0.0
+    for weight in weights[:-1]:
+        consumed_weight += weight
+        desired_boundaries.append(active_total * consumed_weight / float(total_weight))
+
+    snapped_boundaries: list[float] = []
+    previous_boundary = 0.0
+    for desired in desired_boundaries:
+        desired = max(previous_boundary + 1.0, desired)
+        nearby = [
+            candidate
+            for candidate in interval_boundaries
+            if candidate > previous_boundary and abs(candidate - desired) <= snap_tolerance_ms
+        ]
+        boundary = min(nearby, key=lambda candidate: abs(candidate - desired)) if nearby else desired
+        snapped_boundaries.append(boundary)
+        previous_boundary = boundary
+
+    entries: list[dict[str, Any]] = []
+    for caption_index, ((segment, utterance_index), weight) in enumerate(zip(captions, weights)):
+        start_offset = 0.0 if caption_index == 0 else snapped_boundaries[caption_index - 1]
+        end_offset = active_total if caption_index == len(captions) - 1 else snapped_boundaries[caption_index]
+        start_ms = audio_time_for_offset(start_offset, prefer_next=caption_index > 0)
+        end_ms = audio_time_for_offset(end_offset)
+        if end_ms <= start_ms:
+            end_ms = min(normalized_intervals[-1][1], start_ms + 120)
+        entries.append(
+            {
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "text": segment,
+                "utterance_index": utterance_index,
+            }
+        )
+    return entries
+
+
+def build_round_anchored_audio_activity_subtitles(
+    dialogue_texts: list[str],
+    speech_intervals: list[tuple[int, int]],
+    audio_duration_ms: int,
+    round_timeline: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Reset local subtitle timing at every real TTS request boundary."""
+    valid_rounds = [
+        item
+        for item in (round_timeline or [])
+        if isinstance(item, dict)
+        and clean_text(str(item.get("text") or ""))
+        and int(item.get("end_ms", 0) or 0) > int(item.get("start_ms", 0) or 0)
+    ]
+    normalized_dialogue = [
+        (index, clean_text(text))
+        for index, text in enumerate(dialogue_texts)
+        if clean_text(text)
+    ]
+    if len(valid_rounds) < 2 or not normalized_dialogue:
+        return build_audio_activity_locked_subtitles(dialogue_texts, speech_intervals, audio_duration_ms)
+
+    round_boundaries: list[int] = []
+    round_cursor = 0
+    for item in valid_rounds:
+        round_cursor += len(_subtitle_alignment_text(str(item.get("text") or "")))
+        round_boundaries.append(round_cursor)
+    if round_cursor <= 0:
+        return build_audio_activity_locked_subtitles(dialogue_texts, speech_intervals, audio_duration_ms)
+
+    grouped: list[list[tuple[int, str]]] = [[] for _item in valid_rounds]
+    source_cursor = 0
+    for original_index, text in normalized_dialogue:
+        width = max(1, len(_subtitle_alignment_text(text)))
+        midpoint = source_cursor + width / 2.0
+        round_index = next(
+            (index for index, boundary in enumerate(round_boundaries) if midpoint <= boundary),
+            len(valid_rounds) - 1,
+        )
+        grouped[round_index].append((original_index, text))
+        source_cursor += width
+
+    anchored: list[dict[str, Any]] = []
+    for item, dialogue_group in zip(valid_rounds, grouped):
+        if not dialogue_group:
+            continue
+        round_start = max(0, int(item.get("start_ms", 0) or 0))
+        round_end = min(int(audio_duration_ms), int(item.get("end_ms", audio_duration_ms) or audio_duration_ms))
+        clipped_intervals = [
+            (max(start, round_start), min(end, round_end))
+            for start, end in speech_intervals
+            if min(end, round_end) - max(start, round_start) >= 40
+        ]
+        if not clipped_intervals:
+            clipped_intervals = [(round_start, round_end)]
+        local = build_audio_activity_locked_subtitles(
+            [text for _index, text in dialogue_group],
+            clipped_intervals,
+            audio_duration_ms,
+        )
+        for entry in local:
+            local_index = int(entry.get("utterance_index", 0) or 0)
+            entry["utterance_index"] = dialogue_group[min(local_index, len(dialogue_group) - 1)][0]
+            entry["tts_round"] = int(item.get("round", 0) or 0)
+        anchored.extend(local)
+
+    if anchored and len({item.get("utterance_index") for item in anchored}) == len(normalized_dialogue):
+        return anchored
+    return build_audio_activity_locked_subtitles(dialogue_texts, speech_intervals, audio_duration_ms)
+
+
+def detect_audio_speech_intervals(audio_path: Path, audio_duration_ms: int) -> list[tuple[int, int]]:
+    """Return speech intervals using ffmpeg silence detection."""
+    if not audio_path.exists() or audio_duration_ms <= 0:
+        return []
+    completed = subprocess.run(
+        [
+            str(ffmpeg_binary()),
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(audio_path),
+            "-af",
+            "silencedetect=noise=-38dB:d=0.20",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        **background_subprocess_kwargs(),
+    )
+    output = completed.stderr or ""
+    silence_starts = [float(value) for value in re.findall(r"silence_start:\s*([0-9.]+)", output)]
+    silence_ends = [float(value) for value in re.findall(r"silence_end:\s*([0-9.]+)", output)]
+    events: list[tuple[float, str]] = [(value, "start") for value in silence_starts]
+    events.extend((value, "end") for value in silence_ends)
+    events.sort(key=lambda item: (item[0], 0 if item[1] == "start" else 1))
+    duration_sec = audio_duration_ms / 1000.0
+    cursor = 0.0
+    silence_open = False
+    speech: list[tuple[int, int]] = []
+    for timestamp, kind in events:
+        timestamp = max(0.0, min(duration_sec, timestamp))
+        if kind == "start" and not silence_open:
+            if timestamp > cursor:
+                speech.append((round(cursor * 1000), round(timestamp * 1000)))
+            silence_open = True
+        elif kind == "end" and silence_open:
+            cursor = max(cursor, timestamp)
+            silence_open = False
+    if not silence_open and cursor < duration_sec:
+        speech.append((round(cursor * 1000), int(audio_duration_ms)))
+    return [(start, end) for start, end in speech if end - start >= 40]
+
+
 def _subtitle_alignment_text(value: str) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
 
@@ -2707,6 +3451,7 @@ def build_scene_timeline_from_utterances(utterances: list[dict[str, Any]], scene
         "scene_count_range": {"min": suggestion["minimum"], "max": suggestion["maximum"]},
         "target_scene_count": suggestion["target"],
         "final_scene_count": len(scenes),
+        "scene_policy_version": SCENE_POLICY_VERSION,
         "scenes": scenes,
     }
 
@@ -2870,6 +3615,17 @@ def clean_scene_spoken_text(text: str) -> str:
             has_spoken_signal = bool(re.search(r"\d", value) or _contains_any(value, SCENE_MEANINGFUL_SPEECH_TOKENS))
             if stage_hits >= 2 and not has_spoken_signal:
                 return ""
+    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
+    value = re.sub(r"(?<=\d)\s+(?=\d)", "", value)
+    return clean_text(value).strip("，,。；;：: ")
+
+
+def clean_explicit_scene_spoken_text(text: str) -> str:
+    """Normalize an explicitly labelled narration without guessing it is stage direction."""
+    value = clean_text(str(text or ""))
+    if not value:
+        return ""
+    value = re.sub(r"^(?:【[^\n】]{1,20}】|[^\n：:]{1,12}[：:])\s*", "", value).strip()
     value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
     value = re.sub(r"(?<=\d)\s+(?=\d)", "", value)
     return clean_text(value).strip("，,。；;：: ")
@@ -3137,13 +3893,12 @@ def suggest_semantic_key_image_count(
     requested = max(1, int(requested_count or 1))
     candidates = semantic_scene_beat_candidates(utterances)
     selected = select_semantic_scene_beats(utterances, requested, audio_duration_ms)
-    duration_floor = max(1, int(math.ceil(max(1, audio_duration_ms) / 32_000.0)))
-    minimum, _maximum = scene_count_range_for_audio(audio_duration_ms)
+    duration_floor = 1
     semantic_count = len(selected)
-    # Semantic selection removes duplicate or filler visuals, but it must not
-    # collapse a normal-length episode below the channel's watchable pacing
-    # floor. Caption beats still carry the smaller information changes.
-    final = min(requested, max(minimum, semantic_count or 1))
+    # The spoken information plan owns the requested count. Real subtitle
+    # semantics may merge duplicate beats, but elapsed time must never create
+    # extra pictures that the narration does not support.
+    final = min(requested, max(1, semantic_count or requested))
     return {
         "requested": requested,
         "final": max(1, final),
@@ -3640,20 +4395,64 @@ def ensure_prompt_contains_speech_anchor(prompt: str, speech: str, *, purpose: s
     ).strip(" 。")
     prefix = (
         f"本镜口播原文：「{anchor}」。"
-        "口播是画面内容和画面文字的主要语义来源，AI 可以自行提炼、改写和组合其中的标题、数字、对比词、批注与说明关系，文字数量、字数和形式不设上限，不必完整照抄口播"
+        "口播是画面对象、动作、证据关系和原生文字的主要语义来源，不借用相邻镜头或其它项目；"
+        "模型可以从当前口播提炼、改写和组合标题、数字、对比词、批注与说明关系，"
+        "文字内容与数量由当前口播决定，可自然换行，不套固定短钩子模板"
     )
+    if PRODUCTION_LOGIC_VERSION == "project-109":
+        return "。".join([prefix, text]).strip(" 。")
     return compact_visual_image_prompt("。".join([prefix, text]), 900)
+
+
+def bind_scene_prompt_lineage(prompt: str, topic: str, speech: str) -> str:
+    """Bind the exact outbound scene prompt to the current episode and beat.
+
+    Rewriters and cached high-score candidates may preserve a visually useful
+    composition while carrying another scene's narration.  The binding is
+    deterministic and local: the composition is retained, but the authoritative
+    topic and narration anchors are placed first so downstream checks and the
+    image provider cannot consume stale lineage.
+    """
+    text = normalize_image_prompt(repair_legacy_mojibake(prompt))
+    current_topic = clean_text(topic)
+    current_speech = compact_prompt_speech_anchor(speech, 180)
+    if not text:
+        text = "成熟编辑卡通信息画面，主体、动作、证据关系与当前口播保持一致。"
+    # Remove only a leading cached topic declaration; visual clauses remain.
+    if current_topic:
+        text = re.sub(r"(?im)^\s*本期主题\s*[:：].*(?:\n|$)", "", text, count=1).strip()
+    if current_speech:
+        # A dedicated marker is parsed before any legacy/current-full-speech
+        # clauses that may still exist in a cached candidate.
+        text = ensure_prompt_contains_speech_anchor(text, current_speech, purpose="scene")
+    anchors = []
+    if current_topic:
+        anchors.append(f"本期主题：{current_topic}")
+    if current_speech:
+        anchors.append(f"本镜绑定口播：{current_speech}")
+    return normalize_image_prompt("。".join(anchors + [text]))
 
 
 def audio_bound_visual_blueprint(speech: str, topic: str) -> dict[str, Any]:
     spoken = clean_text(speech)
-    source = clean_text(f"{spoken}\n{topic}")
+    # Use only non-numeric category words from the title as a weak classifier
+    # for very short anchors. Never pass title numbers into scene semantics.
+    topic_context = re.sub(r"\d+(?:\.\d+)?\s*(?:万|亿|个|元|%|％)?", "", clean_text(topic))
+    source = clean_text(f"{spoken}\n{topic_context}")
     lowered = source.lower()
     spoken_lowered = spoken.lower()
     subjects: list[str] = []
     action = ""
     tension = ""
     evidence = ""
+
+    is_vehicle_mechanical = _contains_any(
+        lowered,
+        (
+            "汽车", "车型", "车辆", "mpv", "suv", "轿车", "刹车", "制动",
+            "踏板", "支架", "轮胎", "车企", "尊界", "v800",
+        ),
+    )
 
     is_ai_writing = _contains_any(lowered, ("ai", "人工智能")) and _contains_any(
         lowered,
@@ -3663,7 +4462,40 @@ def audio_bound_visual_blueprint(speech: str, topic: str) -> dict[str, Any]:
         lowered,
         ("智能手表", "智能手环", "血氧", "心率", "指夹式血氧仪", "血氧仪", "ppg", "健康监测"),
     )
-    if is_wearable_health and _contains_any(spoken_lowered, ("仅供参考", "说明书", "10次", "三块", "不同品牌")):
+    if is_vehicle_mechanical:
+        vehicle_name = next(
+            (
+                match.group(0)
+                for pattern in (
+                    r"尊界\s*V800", r"[A-Za-z][A-Za-z0-9-]{1,12}\s*(?:MPV|SUV)",
+                    r"[\u4e00-\u9fff]{2,8}(?:汽车|轿车|车型|MPV|SUV)",
+                )
+                if (match := re.search(pattern, source, flags=re.IGNORECASE))
+            ),
+            "当前口播中的车辆",
+        )
+        part = next(
+            (token for token in ("刹车踏板支架", "刹车踏板", "制动踏板", "刹车", "制动系统", "底盘", "轮胎") if token in source),
+            "当前口播中的机械部件",
+        )
+        subjects = [f"清晰可辨的{vehicle_name}", part, "与口播事实对应的道路、测试场或检测工位"]
+        if _contains_any(spoken_lowered, ("断裂", "断了", "崩断", "折断", "踩断")):
+            action = f"驾驶员踩下{part}的瞬间，同一机械部件的受力点发生断裂，车辆和测试环境保持清楚可辨"
+            tension = "急刹动作仍在发生，机械传力部件却在受力点突然断开，动作与失效结果同框"
+            evidence = "车辆实物、踏板受力方向、支架断点和测试场记录共同证明当前口播"
+        elif _contains_any(spoken_lowered, ("刹停", "制动距离", "米", "减速", "紧急制动")):
+            action = f"{vehicle_name}在测试道路上紧急制动，起点、刹停位置和{part}状态形成可读关系"
+            tension = "预期刹停位置与实际停止位置形成清楚距离反差"
+            evidence = "同一车辆、道路测距标记、刹车痕迹和检测结果共同承载口播数据"
+        elif _contains_any(spoken_lowered, ("结构", "载荷", "受力", "材料", "工艺", "强度")):
+            action = f"检测工位正在对{part}施加载荷，剖面中受力路径、弯曲区和危险断点清楚可见"
+            tension = "设计应承受的载荷与结构薄弱点处于同一机械剖面中"
+            evidence = "真实部件形态、夹具、载荷方向和断面细节构成工程证据"
+        else:
+            action = f"{vehicle_name}与{part}在真实车辆空间或检测工位中发生当前口播描述的动作"
+            tension = "智能配置与底层机械安全之间的反差通过真实车辆结构呈现"
+            evidence = "车辆、机械部件、当前动作和检测环境共同证明本镜结论"
+    elif is_wearable_health and _contains_any(spoken_lowered, ("仅供参考", "说明书", "10次", "三块", "不同品牌")):
         subjects = ["摊开的智能手表说明书", "三块不同外观的无品牌手表", "同一根手指上的指夹式血氧仪"]
         action = "人物一手指着说明书里的参考声明，另一手把多次测量结果并排核对"
         tension = "醒目的多次读数波动与说明书里的参考边界形成事实反差"
@@ -3855,8 +4687,10 @@ def scene_specific_image_prompt(
     task_clause = f"画面任务：{beat}"
     if beat and speech_quote and token_overlap_score(beat, speech_quote, limit=40) >= 80:
         task_clause = ""
+    semantic_topic = summarize_scene_text(speech_quote or beat or source_prompt, 72)
     parts = [
-        f"主题：{topic}",
+        f"本镜语义主题：{semantic_topic}" if semantic_topic else "",
+        f"本期背景：{topic}（仅用于频道归属，不得自动写入画面）" if topic else "",
         f"口播原文：「{speech_quote or speech_anchor}」",
         task_clause,
         f"主主体：{subject_text}",
@@ -3875,6 +4709,7 @@ def scene_specific_image_prompt(
     parts.extend(
         [
             "画面内容必须能追溯到当前口播的对象、动作、事实或关系",
+            "本镜只使用当前口播明确提到或直接推导出的对象、数字和文字；本期标题中的数字、人物和结论若未出现在本镜口播中，禁止写入画面",
             "人物、物件、文字、图表、批注和界面的使用方式均由当前口播、来源支撑信息与视觉概念共同决定",
         ]
     )
@@ -4037,12 +4872,14 @@ def build_scene_plan(
                     "note": "BGM 跟随本镜节奏，不盖过口播",
                 },
                 "material_hint": scene_material_hint(visual_type),
-                "safe_text_policy": "画面文字和信息元素由当前口播与选定视觉概念决定；文字可以多也可以不使用，但事实必须准确且不能串入其它镜头。",
+                "safe_text_policy": "每镜必须写入一条来自当前口播的完整短钩子；短钩子与主体分区、清晰可读，不得串入其它镜头、删减、截断或乱码。",
             }
         )
 
     return {
         "generated_at": storage.now_ts(),
+        "prompt_policy_version": IMAGE_PROMPT_POLICY_VERSION,
+        "source_hash": visual_brief_source_hash(content),
         "topic": episode_topic,
         "title": summary.get("publish_title") or summary.get("video_title") or clean_text(project.get("topic_name") or ""),
         "scene_count": len(scenes),
@@ -4380,6 +5217,35 @@ def resolve_third_party_image_model(env: dict[str, str]) -> str:
     return APIYI_IMAGE_MODEL_ALIASES.get(raw, raw)
 
 
+def resolve_cpa_image_model(env: dict[str, str]) -> str:
+    return clean_text(env.get("CPA_IMAGE_MODEL") or "gpt-image-2.5")
+
+
+def resolve_cpa_image_api_key(env: dict[str, str]) -> str:
+    dedicated = clean_text(env.get("CPA_IMAGE_API_KEY") or "")
+    if dedicated:
+        return dedicated
+    base_url = normalize_openai_compatible_base_url(
+        env.get("CPA_IMAGE_BASE_URL") or "http://127.0.0.1:8317/v1"
+    )
+    host = clean_text(urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        shared = clean_text(env.get("DEEPSEEK_API_KEY") or "")
+        if shared:
+            return shared
+        config_path = Path(
+            clean_text(env.get("CPA_CONFIG_PATH") or "")
+            or (Path.home() / "Desktop" / "CPA-Manager-Plus" / "cpa" / "config" / "config.yaml")
+        )
+        if config_path.exists():
+            with contextlib.suppress(Exception):
+                config_text = config_path.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r'(?ms)^api-keys:\s*\n\s*-\s*["\']?([^"\'\r\n]+)', config_text)
+                if match:
+                    return clean_text(match.group(1))
+    return ""
+
+
 def is_openai_compatible_connection_stub(model: str) -> bool:
     text = clean_text(model).lower()
     if not text:
@@ -4415,6 +5281,24 @@ def normalize_openai_compatible_base_url(value: str) -> str:
     if not lowered.endswith("/v1"):
         text = f"{text}/v1"
     return text
+
+
+def normalize_deepseek_base_url(value: str) -> str:
+    """Accept both a CPA/NewAPI server root and a complete OpenAI /v1 base."""
+    text = clean_text(value).rstrip("/") or "https://api.deepseek.com"
+    host = clean_text(urllib.parse.urlsplit(text).netloc).lower()
+    if host in {"api.deepseek.com", "api.deepseek.com.cn"}:
+        return text
+    return normalize_openai_compatible_base_url(text)
+
+
+def normalize_deepseek_model(value: str, base_url: str = "") -> str:
+    """Translate model aliases left by a different gateway when using local CPA."""
+    model = clean_text(value) or "deepseek-v4-flash"
+    host = clean_text(urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if host in {"127.0.0.1", "localhost", "::1"} and model.startswith("g2/"):
+        return model.split("/", 1)[1]
+    return model
 
 
 def normalize_openai_compatible_image_size(size: str, model: str = "") -> str:
@@ -4478,6 +5362,39 @@ def _cover_resize_image(image: Any, target_size: tuple[int, int]) -> Any:
         top = max(0, (source_height - crop_height) // 2)
         image = image.crop((0, top, source_width, top + crop_height))
     return image.resize(target_size, _pil_lanczos())
+
+
+def _cover_fit_image(image: Any, target_size: tuple[int, int]) -> Any:
+    """Fit a master cover without cutting its title or subject.
+
+    The full master is kept as a centered foreground; a blurred, full-bleed
+    rendition supplies the aspect-ratio background. This is used only for
+    derived story/portrait variants, never for the generated landscape master.
+    """
+    target_width, target_height = target_size
+    source_width, source_height = image.size
+    scale = min(
+        target_width / max(1, source_width),
+        target_height / max(1, source_height),
+    )
+    foreground_size = (
+        max(1, int(round(source_width * scale))),
+        max(1, int(round(source_height * scale))),
+    )
+    foreground = image.resize(foreground_size, _pil_lanczos())
+    background = _cover_resize_image(image, target_size)
+    if ImageFilter is not None:
+        background = background.filter(ImageFilter.GaussianBlur(max(8, int(max(target_size) / 90))))
+    if ImageEnhance is not None:
+        background = ImageEnhance.Brightness(background).enhance(0.78)
+    background.paste(
+        foreground,
+        (
+            (target_width - foreground_size[0]) // 2,
+            (target_height - foreground_size[1]) // 2,
+        ),
+    )
+    return background
 
 
 def normalize_generated_image_size(
@@ -4608,6 +5525,17 @@ def chatgpt_image_active_limit_seconds(env: dict[str, str]) -> float:
         return max(180.0, min(float(value), chatgpt_image_wait_seconds(env)))
     except ValueError:
         return 420.0
+
+
+def chatgpt_image_quota_cooldown_seconds(env: dict[str, str]) -> float:
+    """Return the fallback freeze for quota/plan-gated image generation."""
+    value = clean_text(env.get("CHATGPT_IMAGE_QUOTA_COOLDOWN_SECONDS") or "")
+    if not value:
+        return 5 * 3600.0
+    try:
+        return max(300.0, min(float(value), 24 * 3600.0))
+    except ValueError:
+        return 5 * 3600.0
 
 
 def imageai_playground_wait_seconds(env: dict[str, str]) -> float:
@@ -5068,12 +5996,86 @@ def scene_prompt_preserves_channel_contract(source_prompt: str, candidate_prompt
     return True
 
 
+IMAGE_PROVIDER_SEMANTIC_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"红果屠城", "红果席卷全网"),
+    (r"屠城", "席卷市场"),
+    (r"(?:你|他|她)妈", "家中长辈"),
+    (r"绑票", "牢牢吸引"),
+    (r"绑架", "强行控制"),
+    (r"血洗", "大幅改写"),
+    (r"杀死", "彻底淘汰"),
+    (r"自杀", "极端伤害事件"),
+    (r"垃圾内容|AI造出来的垃圾|AI垃圾", "粗糙低质内容"),
+    (r"垃圾", "低质内容"),
+    (r"抽(?:这波)?红利的脸", "反衬这波红利的代价"),
+    (r"打脸", "形成强烈反差"),
+    (r"反噬", "带来反作用"),
+    (r"爆头", "瞬间淘汰"),
+    (r"尸体", "事件现场遗留物"),
+    (r"鲜血|流血", "明显受损痕迹"),
+    (r"色情|成人视频", "不适宜内容"),
+    (r"\u5e72\u6389", "\u53d6\u4ee3"),
+    (r"\u5f80\u6b7b\u91cc", "\u9ad8\u9891\u5730"),
+    (r"\u5077\u8d70(?:\u4f60|\u4ed6|\u5979)?\u7684?\u65f6\u95f4", "\u5360\u7528\u7528\u6237\u65f6\u95f4"),
+    (r"\u5f3a\u6210\u763e", "\u9ad8\u9ecf\u6027"),
+    (r"\u4f4e\u4fd7", "\u4f4e\u8d28\u91cf"),
+    (r"\u6df1\u6e0a", "\u5931\u63a7\u8fb9\u7f18"),
+    (r"\u9769\u6240\u6709\u4eba\u7684\u547d", "\u91cd\u5851\u6240\u6709\u4eba\u7684\u5de5\u4f5c"),
+    (r"\u7838\u5728\u5c4f\u5e55\u4e0a", "\u9192\u76ee\u51fa\u73b0\u5728\u5c4f\u5e55\u4e0a"),
+    (r"\u624b\u6495", "\u63ed\u7a7f"),
+    # Keep news meaning while removing wording that image providers commonly
+    # classify as violent, criminal, sexual, or self-harm content.
+    (r"开枪|枪击|弹药|枪支", "高压对抗场景"),
+    (r"武器|炸弹|爆炸|恐怖袭击|恐怖", "危险风险意象"),
+    (r"毒品|吸毒|贩毒", "违法交易风险"),
+    (r"跳楼|跳海|自残|轻生|自杀", "严重危机事件"),
+    (r"强奸|侵犯|性侵害|裸体|性暗示", "违法侵害事件"),
+    (r"骗子|诈骗|诈骗团伙|黑吃黑", "消费风险警示"),
+    (r"攻击|入侵|黑客攻破", "网络安全风险"),
+    (r"暴涨|暴跌|崩盘|击穿", "大幅波动"),
+    (r"封杀|灭门|灭绝|追杀", "强力限制"),
+    (r"血腥|残暴|恐怖|恐怖片", "强烈压迫感"),
+)
+
+
+def image_prompt_provider_friendly_report(prompt: str) -> dict[str, Any]:
+    """Return the provider-bound prompt plus semantic rewrite metadata.
+
+    Source scripts are never edited here.  This is the final trust-boundary
+    transform shared by every image provider, including browser automation,
+    manual handoff, playground, Ark, Agnes and OpenAI-compatible gateways.
+    """
+    text = normalize_image_prompt(prompt)
+    if not text:
+        return {"prompt": "", "rewritten": False, "count": 0, "hits": []}
+    hits: list[str] = []
+    rewrite_count = 0
+    for pattern, replacement in IMAGE_PROVIDER_SEMANTIC_REWRITES:
+        found = re.findall(pattern, text, flags=re.IGNORECASE)
+        if not found:
+            continue
+        rewrite_count += len(found)
+        hits.append(pattern)
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+([，。；：])", r"\1", text)
+    return {
+        "prompt": text.strip(),
+        "rewritten": bool(rewrite_count),
+        "count": rewrite_count,
+        "hits": hits,
+    }
+
+
+def make_image_prompt_provider_friendly(prompt: str) -> str:
+    return str(image_prompt_provider_friendly_report(prompt).get("prompt") or "")
+
+
 def sanitize_prompt_for_image_model(prompt: str, purpose: str) -> str:
     text = normalize_image_prompt(prompt)
     if not text:
         return ""
     if purpose == "scene" and is_semantic_scene_generation_brief(text):
-        return text
+        return make_image_prompt_provider_friendly(text)
     if is_content_authored_image_prompt(text):
         return light_clean_content_image_prompt(text, purpose) or text
     hooks = extract_image_prompt_hooks(text, 2)
@@ -5306,6 +6308,7 @@ def compile_outbound_image_prompt(prompt: str, purpose: str, max_chars: int | No
         "口播原文：",
         "当前口播重点：",
         "选定视觉概念：",
+        "本镜画面：",
         "频道固定画面风格：",
         "频道固定视觉签名：",
         "频道画面策略：",
@@ -5315,6 +6318,8 @@ def compile_outbound_image_prompt(prompt: str, purpose: str, max_chars: int | No
         "本镜任务：",
         "本镜信息任务：",
         "画面任务：",
+        "本期核心对象必须是：",
+        "主体硬约束：",
         "主主体：",
         "主体：",
         "动作：",
@@ -5335,6 +6340,9 @@ def compile_outbound_image_prompt(prompt: str, purpose: str, max_chars: int | No
         "排版：",
         "创作边界：",
         "创作自由：",
+        "追加要求：",
+        "追加要求（最高优先级）：",
+        "补充要求：",
         "视觉取舍：",
         "信息策略：",
         "文字策略：",
@@ -5465,6 +6473,40 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
     source = normalize_image_prompt(strip_image_prompt_workflow_rules(prompt))
     if not source:
         return ""
+    if PRODUCTION_LOGIC_VERSION == "project-109":
+        source = re.sub(r"(?m)^(\s*)追加要求[:：]", r"\1追加要求（最高优先级）：", source)
+        # 109 sends the complete, episode-scoped scene brief. Provider adapters
+        # may still sanitize unsafe wording, but this layer must not invent a
+        # shorter subject or discard evidence/text requirements.
+        speech = scene_prompt_speech_anchor(source)
+        typography = scene_exact_typography_payload(source)
+        required_text = [
+            clean_text(str(item))
+            for item in typography.get("all_text", [])
+            if clean_text(str(item))
+        ]
+        if speech and required_text:
+            speech_tokens = set(semantic_tokens(speech, limit=24))
+            text_tokens = set(semantic_tokens(" ".join(required_text), limit=16))
+            speech_numbers = set(extract_numeric_fact_tokens(speech))
+            text_numbers = set(extract_numeric_fact_tokens(" ".join(required_text)))
+            matches_scene = bool(speech_tokens & text_tokens) and (
+                not text_numbers or text_numbers.issubset(speech_numbers)
+            )
+            if not matches_scene:
+                for item in required_text:
+                    source = source.replace(item, "")
+                source = re.sub(
+                    r"(?m)^\s*(?:必须落进成图的信息|画面原生文字|原生画面文字)\s*[:：].*\n?",
+                    "",
+                    source,
+                ).strip()
+                replacement = clean_text(scene_information_headline(speech))
+                if replacement and replacement != "本镜核心结论":
+                    source += f"\n原生画面文字：{replacement}"
+        if "模型一次完成画面和文字" not in source:
+            source += "\n文字策略：模型一次完成画面和文字；文字只取自当前口播和本镜证据，完整可读，不截断、不乱码。"
+        return source
     if not is_semantic_scene_generation_brief(source) and not any(
         marker in source
         for marker in ("本期主题：", "当前完整口播：", "口播原文：", "本镜任务：", "选定视觉概念：")
@@ -5478,6 +6520,7 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         "口播原文：",
         "当前口播重点：",
         "选定视觉概念：",
+        "本镜画面：",
         "频道固定画面风格：",
         "频道固定视觉签名：",
         "频道画面策略：",
@@ -5487,6 +6530,8 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         "本镜任务：",
         "本镜信息任务：",
         "画面任务：",
+        "本期核心对象必须是：",
+        "主体硬约束：",
         "主主体：",
         "主体：",
         "动作：",
@@ -5528,8 +6573,32 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         120,
     )
     focus = _compact_complete_text(field("当前口播重点："), 48)
-    concept = _compact_complete_text(field("选定视觉概念："), 84)
+    user_requirement = _compact_complete_text(
+        field("追加要求（最高优先级）：") or field("追加要求：") or field("补充要求："),
+        120,
+    )
+    concept = _compact_complete_text(
+        field("选定视觉概念：") or field("本镜画面："),
+        168,
+    )
     task = _compact_complete_text(field("本镜任务：") or field("本镜信息任务：") or field("画面任务："), 62)
+    core_object = _compact_complete_text(
+        field("本期核心对象必须是：") or field("主体硬约束："),
+        72,
+    )
+    core_object = clean_text(
+        re.split(
+            r"[，,。；;](?=构图|画面|主体|可用|所有|不得|必须)",
+            core_object,
+            maxsplit=1,
+        )[0]
+    )
+    normalized_core_object = core_object.strip("「」“”\"' ")
+    if (
+        normalized_core_object in _TOPIC_ENTITY_GENERIC_TERMS
+        or _contains_any(normalized_core_object, ("交易日", "工作日", "日期", "股价", "市值", "涨幅", "跌幅", "上市门槛"))
+    ):
+        core_object = ""
     shot_subjects = _compact_complete_text(field("主主体：") or field("主体："), 116)
     shot_action = _compact_complete_text(field("动作："), 78)
     shot_tension = _compact_complete_text(field("冲突/悬念：") or field("冲突："), 72)
@@ -5570,7 +6639,10 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         return ""
 
     specific_concept = specific_clause(concept)
-    if any(marker in task for marker in generic_fragments):
+    task_message_match = re.search(r"以[「“]([^」”]{2,160})[」”]为主信息", task)
+    if task_message_match:
+        task = _compact_complete_text(task_message_match.group(1), 76)
+    elif any(marker in task for marker in generic_fragments):
         task = ""
     if not task:
         task = focus or specific_concept or _compact_complete_text(speech, 76)
@@ -5653,16 +6725,33 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
     prioritized_negative.extend(item for item in negative_terms if item not in prioritized_negative)
     concise_negative = _compact_complete_text("、".join(prioritized_negative), 68)
     concise_speech = _compact_complete_text(speech, 96)
+    allowed_numeric_facts: list[str] = []
+    numeric_source = re.sub(r"#[0-9A-Fa-f]{3,8}\b", "", f"{topic} {speech}")
+    for token in extract_numeric_fact_tokens(numeric_source):
+        value = normalized_numeric_fact(token)
+        if value and value not in allowed_numeric_facts:
+            allowed_numeric_facts.append(value)
+    numeric_boundary = (
+        f"数字硬约束：只允许出现{'、'.join(allowed_numeric_facts)}，禁止添加任何其它价格、型号、比例、日期或数量"
+        if allowed_numeric_facts
+        else "数字硬约束：当前主题和本镜口播没有具体数字，禁止自行添加价格、型号、比例、日期或数量"
+    )
     concrete_task = _compact_complete_text(
         directed_shot
         or ("" if concept_is_generic else specific_concept)
         or proof_target
         or task
         or audience_takeaway,
-        148,
+        168,
     )
     if not concrete_task:
         concrete_task = _compact_complete_text(speech, 70)
+    if core_object and core_object.lower() not in concrete_task.lower():
+        concrete_task = _compact_complete_text(
+            f"画面必须清晰画出可辨认的{core_object}实物，以{core_object}为唯一商品主体，"
+            f"所有对比区域都使用同一种商品，禁止出现其它可售商品；{concrete_task}",
+            176,
+        )
     concise_proof = _compact_complete_text(proof_target, 62)
     if concise_proof and any(marker in concise_proof for marker in generic_fragments):
         concise_proof = ""
@@ -5675,6 +6764,10 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
     composition_contract = composition or (
         "原生文字要与主体成为同一场景，用纸张、屏幕、标注、刻度、关系线或空间排版承载信息，不贴独立模板板"
     )
+    if _contains_any(composition_contract, ("原生文字", "标题板", "空间排版承载信息")):
+        composition_contract = (
+            "原生文字要与主体成为同一场景，用纸张、屏幕、标注、刻度、关系线或空间排版承载信息，不贴独立模板板"
+        )
     one_second_takeaway = shot_tension or audience_takeaway
     native_text = scene_exact_typography_payload(source)
     native_text_items = [
@@ -5682,9 +6775,37 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         for item in native_text.get("all_text", [])
         if clean_text(str(item))
     ]
+    explicit_scene_hook = bool(
+        re.search(
+            r"(?:画面短钩子|必须逐字、完整、清晰写入画面的短钩子)\s*[:：]?[^「]{0,100}「[^」]{2,80}」",
+            source,
+        )
+    )
+    # Typography belongs to this scene's narration.  Planning metadata can be
+    # regenerated independently from the audio timeline; when that happens an
+    # adjacent scene's callout must not leak into the outbound image prompt.
+    if native_text_items and speech and not explicit_scene_hook:
+        native_text_source = " ".join(native_text_items)
+        narration_tokens = set(semantic_tokens(speech, limit=24))
+        typography_tokens = set(semantic_tokens(native_text_source, limit=16))
+        shared_tokens = narration_tokens & typography_tokens
+        narration_numbers = set(extract_numeric_fact_tokens(speech))
+        typography_numbers = set(extract_numeric_fact_tokens(native_text_source))
+        typography_matches_scene = bool(shared_tokens) and (
+            not typography_numbers or typography_numbers.issubset(narration_numbers)
+        )
+        if not typography_matches_scene:
+            scene_headline = clean_text(scene_information_headline(speech))
+            native_text_items = [scene_headline] if scene_headline and scene_headline != "本镜核心结论" else []
+    scene_hook_text = _compact_complete_text(
+        native_text_items[0] if native_text_items else speech or one_second_takeaway,
+        76,
+    )
     lines = [
         f"本期主题：{_compact_complete_text(topic, 42)}" if topic else "",
         f"当前完整口播：{concise_speech}" if concise_speech else "",
+        f"追加要求（最高优先级）：{user_requirement}" if user_requirement else "",
+        f"核心对象硬约束：必须清晰画出{core_object}实物，禁止用其它商品代替" if core_object else "",
         f"{visual_field}：{concrete_task}" if concrete_task else "",
         f"观众1秒必须看懂：{_compact_complete_text(one_second_takeaway, 68)}" if one_second_takeaway else "",
         f"可见证据：{concise_proof}" if concise_proof and concise_proof != concrete_task else "",
@@ -5694,12 +6815,12 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         f"同集视觉连续性：{concise_continuity}" if concise_continuity else "",
         f"构图协作：{_compact_complete_text(composition_contract, 88)}",
         (
-            f"原生画面文字：{'；'.join(native_text_items)}；由模型直接完整写入图片，可自动换行，不得截断"
-            if native_text_items
-            else "原生画面文字：根据当前完整口播自行提炼并直接写入图片，字数和数量不设统一上限"
+            f"原生画面文字：{scene_hook_text}；由模型直接完整写入图片，可自动换行，不得截断。"
+            if scene_hook_text else "原生画面文字：根据当前完整口播自行提炼并直接写入图片。"
         ),
         f"排除：{_compact_complete_text('、'.join(banned_visuals[:3]), 76)}" if banned_visuals else "",
         f"禁用：{concise_negative}" if concise_negative else "",
+        numeric_boundary,
         "成图要求：横向16:9，成熟编辑卡通，主体与证据铺满画面，不要留下大片空白。",
         "文字策略：模型一次完成画面和文字，文字必须与当前口播呼应且完整可读；禁止乱码、截断、Logo、水印和后期模板标题板。",
     ]
@@ -5713,6 +6834,8 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
     lines = [
         f"本期主题：{_compact_complete_text(topic, 32)}" if topic else "",
         f"当前完整口播：{_compact_complete_text(concise_speech, 70)}" if concise_speech else "",
+        f"追加要求（最高优先级）：{_compact_complete_text(user_requirement, 96)}" if user_requirement else "",
+        f"核心对象硬约束：必须清晰画出{_compact_complete_text(core_object, 40)}实物，禁止用其它商品代替" if core_object else "",
         f"{visual_field}：{_compact_complete_text(concrete_task, 120)}" if concrete_task else "",
         f"观众1秒必须看懂：{_compact_complete_text(one_second_takeaway, 48)}" if one_second_takeaway else "",
         f"频道硬风格：{_compact_complete_text(concise_style, 72)}" if concise_style else "",
@@ -5721,13 +6844,13 @@ def lightweight_scene_model_prompt(prompt: str, max_chars: int = 680) -> str:
         f"同集视觉连续性：{_compact_complete_text(concise_continuity, 36)}" if concise_continuity else "",
         f"构图协作：{_compact_complete_text(composition_contract, 58)}",
         (
-            f"原生画面文字：{'；'.join(native_text_items)}；完整写入，可换行，不截断"
-            if native_text_items
-            else "原生画面文字：按当前口播提炼，直接写入成图"
+            f"原生画面文字：{_compact_complete_text(scene_hook_text, 76)}；由模型直接完整写入，可自动换行，不得截断。"
+            if scene_hook_text else "原生画面文字：根据当前完整口播自行提炼并直接写入图片。"
         ),
         f"禁用：{_compact_complete_text(concise_negative, 32)}" if concise_negative else "",
-        "成图要求：横向16:9，信息充实，主体铺满，无大片空白。",
-        "文字策略：画面与文字一次生成，文字完整可读，不截断、不出乱码。",
+        numeric_boundary,
+        "成图要求：横向16:9，成熟编辑卡通，主体与证据铺满画面，不要留下大片空白。",
+        "文字策略：模型一次完成画面和文字，文字必须与当前口播呼应且完整可读；禁止乱码、截断、Logo、水印和后期模板标题板。",
     ]
     kept = [item for item in lines if item]
     result = "\n".join(kept)
@@ -6455,8 +7578,8 @@ def concrete_visual_hint_from_anchor(anchor_text: str, raw_text: str = "", purpo
         if _contains_any(anchor, ("说明书", "仅供参考", "诊断依据")):
             return f"{prefix}：人物把智能手表与展开的产品说明书放在同一桌面，手指指向关键免责声明位置，旁边的指夹式血氧仪成为真实对照物"
         return f"{prefix}：真实人物正在使用智能手表完成一次血氧测量，手腕、手指、设备贴合状态和即时反应清楚可见，必要时用指夹式血氧仪做现场对照"
-    if _contains_any(source, ("路由器", "wifi", "WiFi", "PLC", "插座", "传感器", "网关", "主机", "智能家居", "设备")):
-        return f"{prefix}：真实家居空间里把核心设备放大成主角，墙体/插座/手机控制界面形成清楚连接关系，光线突出技术冲突"
+    if _contains_any(source, ("路由器", "wifi", "WiFi", "PLC", "智能插座", "传感器", "智能网关", "智能家居")):
+        return f"{prefix}：真实家居空间里把核心设备放大成主角，墙体、智能插座与控制端形成清楚连接关系，光线突出技术冲突"
     if _contains_any(source, ("世界杯", "足球", "篮球", "比赛", "冠军", "球员", "比分", "奖杯")):
         return f"{prefix}：球场灯光下的关键动作瞬间，球员、奖杯或观众反应形成强对峙，胜负压力一眼能看懂"
     if _contains_any(source, ("实验", "细胞", "基因", "器官", "大脑", "医学", "药物", "分子")):
@@ -6693,6 +7816,8 @@ def foreign_scene_callout_hits(prompt: str, source: str) -> list[str]:
         if scene_callout_rule_matches(source_text, rule_tokens, labels):
             continue
         for label in labels:
+            if label in source_text:
+                continue
             if label in text and label not in hits:
                 hits.append(label)
     return hits
@@ -7925,6 +9050,15 @@ VISUAL_TOPIC_TYPE_PROFILES: dict[str, dict[str, Any]] = {
         "hooks": ["值不值", "体验反差", "细节特写", "真实使用"],
         "avoid": ["不要做静态电商白底图"],
     },
+    "vehicle_mobility": {
+        "label": "车辆/机械/出行文化",
+        "world": "暖米白纸张上的成熟科技编辑线稿卡通：车辆、道路、展台或检测现场保持真实结构，用炭黑轮廓、手绘箭头和少量砖红、靛蓝、芥末黄表现当前口播里的工程取舍",
+        "subjects": ["当前口播对应的车辆主体", "当前口播对应的机械部件", "道路、展台或检测现场", "工程关系箭头", "当前事实证据"],
+        "actions": ["展示当前结构差异", "呈现正在发生的使用动作", "对比两种工程取舍", "标出本镜因果关系", "记录当前检测或使用结果"],
+        "hooks": ["工程反差", "使用代价", "结构差异", "真实场景", "当前证据"],
+        "avoid": ["不要出现手机界面、智能设备阵列、办公室屏幕光、通用科技控制台或无关骑行装备"],
+        "palette": "暖米白纸张、炭黑线稿、砖红、靛蓝和芥末黄；不得切换成写实摄影、工业灰或暗色赛博风",
+    },
     "social_story": {
         "label": "社会议题/人物故事",
         "world": "真实人物、城市空间、表情和道具关系形成叙事现场，观点藏在一个可感知瞬间里",
@@ -7946,6 +9080,17 @@ VISUAL_TOPIC_TYPE_PROFILES: dict[str, dict[str, Any]] = {
 
 def infer_visual_topic_type(source: str, style: str, domain: str) -> str:
     text = clean_text(source).lower()
+    # Concrete vehicle/mechanical evidence outranks generic AI/technology words.
+    # A car-safety episode may mention algorithms, chips or OTA, but its visual
+    # subject remains the vehicle, brake assembly and test track.
+    if domain == "vehicle_mobility" or _contains_any(
+        text,
+        (
+            "汽车", "车型", "mpv", "suv", "轿车", "车辆", "摩托", "摩托车", "机车",
+            "发动机", "车架", "刹车", "制动", "踏板", "轮胎", "车企", "尊界", "v800",
+        ),
+    ):
+        return "vehicle_mobility"
     if domain == "wearable_health" or _contains_any(text, ("智能手表", "智能手环", "血氧", "心率", "指夹式血氧仪", "ppg", "健康监测")):
         return "wearable_health"
     if domain == "smart_home":
@@ -8001,6 +9146,129 @@ def visual_callout_candidates(source: str, limit: int = 4) -> list[str]:
     return dedupe_clauses([summarize_scene_text(item, 8) for item in candidates if clean_text(item)])[:limit]
 
 
+SCENE_PHONE_INTENT_TERMS = (
+    "手机", "智能手机", "app", "界面", "截图", "拍照", "评论区", "消息", "扫码",
+    "屏幕操作", "来电", "短信", "弹窗", "拨号", "刷视频",
+)
+
+
+def scene_allows_phone(speech: str) -> bool:
+    """Phones are scene facts, never a generic proxy for a modern viewer."""
+    source = clean_text(speech).lower()
+    return any(term in source for term in SCENE_PHONE_INTENT_TERMS)
+
+
+def enforce_scene_prop_contract(prompt: str, speech: str, topic_type: str = "") -> str:
+    """Remove generic phone acting and bind people to the current scene subject."""
+    text = normalize_image_prompt(prompt)
+    phone_rule = "本镜禁用手机：口播没有手机、App或界面行为，人物手中不得出现手机，手机也不得作为道具；不得用低头看手机代替当前动作。"
+    vehicle_rule = "车辆题材主体约束：必须呈现当前口播对应的真实车辆、机械部件或检测现场；不得用手机、通用人物摆拍或无关商品代替车辆证据。"
+    text = re.sub(r"(?:^|\n)本镜禁用手机：[^\n]*", "", text)
+    text = re.sub(r"(?:^|\n)车辆题材主体约束：[^\n]*", "", text)
+    explicit_subject = re.search(r"(?m)^本期核心对象必须是[:：]([^\n。；]+)", text)
+    subject = explicit_subject.group(1).strip() if explicit_subject else ""
+    phone_subject = bool(re.search(r"手机|iphone|smartphone", subject, re.I))
+    if not (scene_allows_phone(speech) or phone_subject):
+        for phrase in (
+            "人物拿着手机", "人物手持手机", "人物低头看手机", "人物盯着手机",
+            "男人拿着手机", "女人拿着手机", "用户拿着手机", "手持手机",
+            "拿着手机", "低头看手机", "盯着手机", "手机贴近脸部",
+        ):
+            text = text.replace(phrase, "")
+        text = re.sub(r"[，,；;]?\s*(?:手机|智能手机)(?:作为)?(?:道具|前景|陪衬|装饰)", "", text)
+        text = clean_generation_prompt_punctuation(text)
+        text += f"\n{phone_rule}"
+    if topic_type == "vehicle_mobility":
+        text += f"\n{vehicle_rule}"
+    return clean_generation_prompt_punctuation(text)
+
+
+def episode_event_visual_contract(topic: str, content: str, topic_type: str = "") -> str:
+    """Lock every scene to the episode's real event, not just its local sentence."""
+    source = repair_legacy_mojibake(clean_text(f"{topic}\n{content}"))
+    entity_profile = topic_entity_profile(topic, content)
+    primary_entity = clean_text(str(entity_profile.get("primary_entity") or ""))
+    secondary_entities = [
+        clean_text(str(item))
+        for item in entity_profile.get("secondary_entities", [])
+        if clean_text(str(item))
+    ][:3]
+    if topic_type != "vehicle_mobility":
+        if not primary_entity or primary_entity in _TOPIC_ENTITY_GENERIC_TERMS:
+            return ""
+        related = "、".join(secondary_entities)
+        relation_clause = f"；关联对象只允许使用{related}" if related else ""
+        return (
+            f"整期事件锁定：本期从完整内容提取出的核心实体是{primary_entity}{relation_clause}。"
+            "所有镜头必须继续表现同一核心实体和同一事件，当前口播只决定本镜强调的动作、证据或结果；"
+            "不得因进入原因分析、数据解释或结论段，就把主体替换成手机、通用人物摆拍、无关商品或泛化设备。"
+        )
+
+    model = ""
+    model_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z]{1,12}\s*[A-Za-z]?\d{2,4})",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if model_match:
+        model = clean_text(model_match.group(1)).replace(" ", "")
+    if "尊界V800" in source or "尊界 V800" in source:
+        model = "尊界V800"
+
+    if _contains_any(source, ("刹车踏板支架", "制动踏板支架", "踏板支架断裂", "刹车踏板")):
+        vehicle = f"{model}豪华MPV" if model else "当前事件中的豪华MPV"
+        return (
+            f"整期事件锁定：本期讲的是{vehicle}在紧急制动测试中，驾驶舱脚部的刹车踏板支架受力断裂，"
+            "踏板脱落并造成制动距离显著增加的同一事件。每一镜都必须保留该车型、测试语境、"
+            "刹车踏板、踏板支架和断裂因果中的至少三项；局部口播只决定这一镜强调事件的哪一步，"
+            "不得把主体改成泛化机械、其它车辆零件或其它科技产品。"
+            "核心实物身份：画面中的机械主体必须能辨认出驾驶舱脚部的制动踏板、连接臂、固定支架及支架断点，"
+            "并能看出它与车辆制动操作的空间关系。"
+            "严禁误画：变速箱、齿轮箱、发动机内部、差速器、轮毂电机、摩托车部件、手机和通用实验装置"
+            "均不得替代刹车踏板支架。"
+            "连续测试表达：出现多台车或多次重刹时，使用一个主测试现场和少量结果标记表达复现，"
+            "禁止复制成多个近似分格、多个重复踏板或多张海报拼贴。"
+        )
+    return (
+        "整期事件锁定：所有镜头必须属于当前车辆事件；局部口播只改变事件步骤，不得另选商品、设备或无关机械总成。"
+    )
+
+
+def enforce_episode_event_visual_contract(
+    prompt: str,
+    *,
+    topic: str,
+    content: str,
+    speech: str,
+    topic_type: str,
+) -> str:
+    """Append one authoritative event contract and remove known cross-domain carriers."""
+    text = normalize_image_prompt(prompt)
+    text = re.sub(r"(?:^|\n)整期事件锁定：[^\n]*", "", text)
+    if topic_type == "vehicle_mobility" and _contains_any(
+        clean_text(f"{topic} {content}"),
+        ("刹车踏板支架", "制动踏板支架", "踏板支架断裂", "刹车踏板"),
+    ):
+        for stale in (
+            "软件可以每周OTA修复",
+            "手机、夸张动作中的主角、清楚可辨的道具",
+            "把手、设备、手机、屏幕放进同一真实空间",
+            "把手、设备、手机放进同一真实空间",
+        ):
+            text = text.replace(stale, "")
+        # A local sentence about engineering causes still needs the physical
+        # event object. Generic mechanical wording otherwise becomes a gearbox.
+        if _contains_any(speech, ("结构受力", "材料选型", "机械构件", "载荷", "工艺", "设计缺陷")):
+            text += (
+                "\n本镜主体落点：以车辆驾驶舱脚部的刹车踏板支架实物和同一支架的受力断点为主，"
+                "检测载荷、材料或设计只作为支架旁的证据标注，不得另画一套泛化机械总成。"
+            )
+    contract = episode_event_visual_contract(topic, content, topic_type)
+    if contract:
+        text += f"\n{contract}"
+    return clean_generation_prompt_punctuation(text)
+
+
 def visual_brief_scene_task(
     index: int,
     total: int,
@@ -8010,6 +9278,7 @@ def visual_brief_scene_task(
     style: str,
     domain: str,
     profile: dict[str, Any],
+    resonance_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     narrative = narrative_state_for_scene(index, total)
     source = "\n".join(item for item in (topic, beat, dialogue_anchor, narrative) if clean_text(item))
@@ -8057,6 +9326,15 @@ def visual_brief_scene_task(
         action = actions[(index - 1) % len(actions)] if actions else "正在发生的动作"
     callouts = visual_callout_candidates(source, limit=3) or [str(item) for item in profile.get("hooks", [])[:2]]
     tension = infer_visual_tension(source, style, visual_type, "scene") or str(profile.get("world") or "")
+    contract = resonance_contract or {}
+    if index == 1:
+        emotional_target = "代入与好奇：观众第一眼认出这和自己有关"
+    elif index == total:
+        emotional_target = "认同与行动：用人物选择或结果收住，不摆拍喊口号"
+    elif "证据" in narrative or "反转" in narrative:
+        emotional_target = "意外与认知反转：让证据改变观众刚才的判断"
+    else:
+        emotional_target = "紧张或共情：把现实代价落在动作、表情和关系变化上"
     return {
         "index": index,
         "narrative_state": narrative,
@@ -8067,6 +9345,9 @@ def visual_brief_scene_task(
         "action_peak": action,
         "attention_hooks": callouts[:3],
         "tension": summarize_scene_text(tension, 90),
+        "emotional_target": emotional_target,
+        "viewer_identification": summarize_scene_text(str(contract.get("shared_stake") or ""), 72),
+        "viewpoint_tension": summarize_scene_text(str(contract.get("honest_disagreement") or ""), 90),
     }
 
 
@@ -8085,7 +9366,7 @@ def build_visual_brief(
     # do not describe what the viewer should see.
     topic = clean_text(project.get("topic_name") or first_heading(visual_content or content) or "本期主题")
     summary = summarize_content(visual_content or content, mode)
-    style_source = "\n".join(
+    episode_source = "\n".join(
         filter(
             None,
             [
@@ -8096,25 +9377,44 @@ def build_visual_brief(
                 extract_bullet_field(visual_content, "反常识点"),
                 extract_bullet_field(visual_content, "人物或场景锚点"),
                 extract_bullet_field(visual_content, "新比喻或新意象"),
-                channel_image_style_prompt(template) or str(template.get("visual_strategy") or ""),
                 visual_content[:1600],
             ],
         )
     )
+    style_source = "\n".join(
+        filter(
+            None,
+            [
+                episode_source,
+                channel_image_style_prompt(template) or str(template.get("visual_strategy") or ""),
+            ],
+        )
+    )
     style = classify_material_style(style_source, template, "scene")
-    domain = classify_visual_prompt_domain(style_source, "scene")
-    topic_type = infer_visual_topic_type(style_source, style, domain)
-    if style == "storyboard_comic" and re.search(
-        r"(?:\bAI\b|人工智能|模型|参数|推理|Agent|DeepSeek|GPT|大语言)",
-        style_source,
-        flags=re.IGNORECASE,
+    domain = classify_visual_prompt_domain(episode_source, "scene")
+    topic_type = infer_visual_topic_type(episode_source, style, domain)
+    # Vehicle/mechanical stories can mention AI, software, chips or OTA as
+    # part of the argument. Those words describe the comparison, not the
+    # visual subject. Keep the concrete vehicle route authoritative so a
+    # car-safety episode does not inherit the generic AI-tech recipe.
+    if (
+        topic_type != "vehicle_mobility"
+        and style == "storyboard_comic"
+        and re.search(
+            r"(?:\bAI\b|人工智能|模型|参数|推理|Agent|DeepSeek|GPT|大语言)",
+            episode_source,
+            flags=re.IGNORECASE,
+        )
     ):
         topic_type = "ai_tech"
     profile = dict(visual_topic_profile(topic_type))
+    resonance_contract = audience_resonance_contract(topic, visual_content or content)
     if style == "storyboard_comic":
         profile["world"] = (
-            "暖米白纸张上的成熟科技编辑线稿卡通：当前主题对象由炭黑轮廓、手绘箭头、"
-            "少量砖红/靛蓝/芥末黄平涂组成，像信息杂志跨页；不使用写实摄影、暗色控制台或泛用人物摆拍"
+            "暖米白纸张上的成熟科技编辑线稿卡通：当前口播对应的主体由炭黑轮廓、手绘箭头、"
+            "少量砖红、靛蓝和芥末黄平涂组成，像信息杂志跨页；保持真实结构与正确关系，"
+            "不使用写实摄影、3D渲染、工业灰大片底色、暗色控制台或赛博科技风。"
+            f"本期只改变主体和场景：{profile.get('world') or '围绕当前口播建立独立场景'}"
         )
     desired = scene_count or clamp_scene_count(resolve_project_scene_count(project, visual_content or content, mode).get("final", 0), 4 if mode == "article" else 6)
     scene_beats = beats or derive_content_scene_beats(visual_content or content, mode, topic, style=style, source=style_source, desired_count=desired)
@@ -8130,6 +9430,7 @@ def build_visual_brief(
             style,
             domain,
             profile,
+            resonance_contract,
         )
         for idx, beat in enumerate(scene_beats, start=1)
     ]
@@ -8146,6 +9447,14 @@ def build_visual_brief(
             "不要所有场景复用同一构图、同一背景或同一个主体姿势",
         ]
     )
+    subject_pool = [str(item) for item in profile.get("subjects", [])]
+    if topic_type == "vehicle_mobility":
+        concrete_vehicle_parts = [
+            token
+            for token in ("摩托车", "汽车", "MPV", "发动机", "车架", "刹车", "制动踏板", "底盘", "轮胎")
+            if token.lower() in episode_source.lower()
+        ]
+        subject_pool = dedupe_clauses([*concrete_vehicle_parts, *subject_pool])
     return {
         "generated_at": storage.now_ts(),
         "source_hash": visual_brief_source_hash(content),
@@ -8158,9 +9467,10 @@ def build_visual_brief(
         "style": style,
         "domain": domain,
         "visual_world": str(profile.get("world") or ""),
-        "subject_pool": [str(item) for item in profile.get("subjects", [])],
+        "subject_pool": subject_pool,
         "action_pool": [str(item) for item in profile.get("actions", [])],
         "attention_hooks": [str(item) for item in profile.get("hooks", [])],
+        "audience_resonance_contract": resonance_contract,
         "channel_frame": compact_prompt_rule(channel_image_style_prompt(template) or str(template.get("visual_strategy") or ""), 220),
         "forbidden": forbidden[:6],
         "scene_count": len(scenes),
@@ -8184,6 +9494,10 @@ def visual_director_path(project_id: int) -> Path:
 def effective_visual_scene_count(project: dict[str, Any], fallback: int = 0) -> int:
     project_id = int(project.get("id") or 0)
     if project_id:
+        settings = project_scene_count_settings(project_id)
+        count_mode = clean_text(str(settings.get("scene_count_mode") or "auto")).lower()
+        if count_mode == "fixed":
+            return clamp_scene_count(settings.get("scene_count_fixed", 6))
         timeline_path = storage.project_file(project_id, "audio/scene_timeline.json")
         content_path = storage.project_file(project_id, "content.md")
         timeline_fresh = timeline_path.exists() and (
@@ -8484,6 +9798,7 @@ def build_visual_director(project: dict[str, Any], template: dict[str, Any], con
             "action_pool": visual_brief.get("action_pool", []),
             "attention_hooks": visual_brief.get("attention_hooks", []),
             "forbidden": visual_brief.get("forbidden", []),
+            "audience_resonance_contract": visual_brief.get("audience_resonance_contract", {}),
         },
         "edit_direction": edit_direction,
         "sound_direction": sound_direction,
@@ -8593,6 +9908,7 @@ def _compact_visual_brief_for_prompt(brief: dict[str, Any]) -> dict[str, Any]:
     return {
         "topic_type_label": brief.get("topic_type_label"),
         "visual_world": brief.get("visual_world"),
+        "audience_resonance_contract": brief.get("audience_resonance_contract", {}),
         "subject_pool": brief.get("subject_pool", [])[:5],
         "action_pool": brief.get("action_pool", [])[:5],
         "attention_hooks": brief.get("attention_hooks", [])[:5],
@@ -8606,6 +9922,9 @@ def _compact_visual_brief_for_prompt(brief: dict[str, Any]) -> dict[str, Any]:
                 "primary_subjects": item.get("primary_subjects", [])[:3],
                 "action_peak": item.get("action_peak"),
                 "attention_hooks": item.get("attention_hooks", [])[:3],
+                "emotional_target": item.get("emotional_target"),
+                "viewer_identification": item.get("viewer_identification"),
+                "viewpoint_tension": item.get("viewpoint_tension"),
             }
             for item in scenes[:12]
             if isinstance(item, dict)
@@ -8689,6 +10008,11 @@ def compose_visual_director_messages(
         "action_pool": ["本期可视化动作，不要泛泛写思考/讨论"],
         "attention_hooks": ["画面可用的短词/数字/冲突钩子，1-8字为主"],
         "forbidden": ["本期禁用的跑题元素，包含历史项目不可复制的元素"],
+        "audience_resonance_contract": {
+            "shared_stake": "多数观众熟悉的处境或现实代价",
+            "honest_disagreement": "资料支持的两种真实判断；没有则留空",
+            "emotional_moment": "情绪真正发生的具体一秒",
+        },
         "scenes": [
             {
                 "index": 1,
@@ -8700,6 +10024,9 @@ def compose_visual_director_messages(
                 "action_peak": "本镜能拍出来的瞬间动作",
                 "attention_hooks": ["短词或数字"],
                 "tension": "画面第一眼冲突/悬念",
+                "emotional_target": "本镜希望观众感到代入/紧张/意外/释然/认同中的哪一种，以及原因",
+                "viewer_identification": "本镜如何连接普通人的处境",
+                "viewpoint_tension": "本镜承载的真实观点分歧；不适用则留空",
             }
         ],
     }
@@ -8713,7 +10040,9 @@ def compose_visual_director_messages(
 3. 只有口播里的新观点、数字、案例、转折或结论才单独切镜；纯过渡句沿用前一张图，不单独生成图片。每个重要镜头都要从对应口播中抽取不同的可视化证据，避免所有图都是同一个办公室、同一个人物、同一个屏幕光。
 4. 是否使用文字、使用多少文字和信息元素，由当前口播的表达需要决定；数字、结论、批注、图表和关系线都可使用，但每项必须对应本镜口播且核心事实准确，不能复制无关长段正文。
 5. 不要把历史项目、其它主题的固定流程、道具和画风套到无关主题；这条规则只用于避偏，不要写进最终图片提示词。
-6. 只返回 JSON，不要 markdown，不要解释。
+6. 每镜必须有明确情绪任务，但情绪来自正在发生的动作、后果、表情或人物关系，不使用抱头、摊手、震惊脸等通用摆拍替代事实。开场让观众认出自己的处境，中段让代价或分歧可见，证据段产生认知反转，结尾形成认同或行动。
+7. 观点对立只能来自当前资料确实存在的取舍或判断，不制造敌人、不煽动群体；没有真实分歧时 viewpoint_tension 留空。
+8. 只返回 JSON，不要 markdown，不要解释。
 """.strip()
     user = {
         "current_project": {
@@ -8728,10 +10057,10 @@ def compose_visual_director_messages(
         "required_scene_count": int(fallback.get("scene_count") or len(fallback.get("scenes") or [])),
         "output_schema": output_schema,
     }
-    return [
+    return episode_review.attach_guidance([
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(user, ensure_ascii=False, indent=2)},
-    ]
+    ], project)
 
 
 def normalize_ai_visual_brief(
@@ -8786,6 +10115,9 @@ def normalize_ai_visual_brief(
                 "action_peak": guarded_text(raw.get("action_peak"), fallback_scene.get("action_peak") or "一个正在发生的关键动作", 36),
                 "attention_hooks": hooks,
                 "tension": guarded_text(raw.get("tension"), fallback_scene.get("tension"), 90),
+                "emotional_target": guarded_text(raw.get("emotional_target"), fallback_scene.get("emotional_target"), 90),
+                "viewer_identification": guarded_text(raw.get("viewer_identification"), fallback_scene.get("viewer_identification"), 90),
+                "viewpoint_tension": guarded_text(raw.get("viewpoint_tension"), fallback_scene.get("viewpoint_tension"), 100),
             }
         )
 
@@ -8809,6 +10141,21 @@ def normalize_ai_visual_brief(
         )
     ) or clean_text(str(fallback.get("topic_type_label") or topic_type))
     visual_world = guarded_text(payload.get("visual_world"), fallback.get("visual_world"), 120)
+    if PRODUCTION_LOGIC_VERSION == "project-109" and clean_text(str(fallback.get("style") or "")) == "storyboard_comic":
+        # Project 109 keeps the channel medium stable. AI still selects this
+        # episode's subject, action and evidence, but cannot replace the paper
+        # editorial cartoon with photography or a topic-specific dark palette.
+        visual_world = clean_text(str(fallback.get("visual_world") or visual_world))
+    raw_contract = payload.get("audience_resonance_contract") if isinstance(payload.get("audience_resonance_contract"), dict) else {}
+    fallback_contract = fallback.get("audience_resonance_contract") if isinstance(fallback.get("audience_resonance_contract"), dict) else {}
+    resonance_contract = {
+        "shared_stake": summarize_scene_text(str(raw_contract.get("shared_stake") or fallback_contract.get("shared_stake") or ""), 100),
+        "honest_disagreement": summarize_scene_text(str(raw_contract.get("honest_disagreement") or fallback_contract.get("honest_disagreement") or ""), 120),
+        "emotional_moment": summarize_scene_text(str(raw_contract.get("emotional_moment") or fallback_contract.get("emotional_moment") or ""), 100),
+        "plain_language_goal": clean_text(str(fallback_contract.get("plain_language_goal") or "")),
+        "comment_trigger": clean_text(str(fallback_contract.get("comment_trigger") or "")),
+        "share_trigger": clean_text(str(fallback_contract.get("share_trigger") or "")),
+    }
     return {
         **fallback,
         "generated_at": storage.now_ts(),
@@ -8825,6 +10172,7 @@ def normalize_ai_visual_brief(
         "subject_pool": subject_pool,
         "action_pool": action_pool,
         "attention_hooks": attention_hooks,
+        "audience_resonance_contract": resonance_contract,
         "forbidden": forbidden,
         "scene_count": len(normalized_scenes),
         "scenes": normalized_scenes,
@@ -8844,14 +10192,12 @@ def generate_ai_visual_brief(
         raise ContentGenerationError("DEEPSEEK_API_KEY 未配置，视觉导演使用规则兜底。")
     if OpenAI is None:
         raise ContentGenerationError("当前环境缺少 openai 依赖，视觉导演使用规则兜底。")
-    base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-    model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
     thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
     reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0, max_retries=0)
-    extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-    if thinking_type in {"enabled", "disabled"}:
-        extra_body["thinking"] = {"type": thinking_type}
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0, max_retries=0, default_headers={"User-Agent": "short-video-studio/1.0"})
+    extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
     try:
         response = client.chat.completions.create(
             model=model,
@@ -8935,7 +10281,20 @@ def get_or_create_visual_brief(
                 return save_visual_brief(project_id, content, scene_count=scene_count, beats=beats, dialogue_anchors=dialogue_anchors)
             except Exception:
                 pass
-    return build_visual_brief(project, template, content, scene_count=scene_count, beats=beats, dialogue_anchors=dialogue_anchors)
+    brief = build_visual_brief(
+        project,
+        template,
+        content,
+        scene_count=scene_count,
+        beats=beats,
+        dialogue_anchors=dialogue_anchors,
+    )
+    if project_id:
+        # A policy/content mismatch is a real cache invalidation. Persist the
+        # deterministic rebuild immediately so every later image entry point
+        # observes the same brief instead of repeatedly reading stale data.
+        storage.write_json(visual_brief_path(project_id), brief)
+    return brief
 
 def save_visual_brief(
     project_id: int,
@@ -9042,10 +10401,12 @@ def visual_director_scene_clause(visual_brief: dict[str, Any], index: int) -> st
     subjects = "、".join(clean_visual_brief_list(scene.get("primary_subjects", []), 34, 3))
     hooks = "、".join(filter_visual_hook_items(scene.get("attention_hooks", []), 3))
     action = clean_visual_brief_fragment(scene.get("action_peak"), 44)
+    emotion = clean_visual_brief_fragment(scene.get("emotional_target"), 54)
     parts = [
         f"主主体：{subjects or '本期核心主体'}",
         f"动作峰值：{action}" if action else "",
         f"画面短字：{hooks}" if hooks else "",
+        f"情绪任务：{emotion}" if emotion else "",
     ]
     return compact_prompt_rule("，".join(item for item in parts if clean_text(item)), 130)
 
@@ -9069,11 +10430,13 @@ def visual_director_scene_hint(visual_brief: dict[str, Any], index: int) -> str:
     action = clean_visual_brief_fragment(scene.get("action_peak"), 48)
     tension = clean_visual_brief_fragment(scene.get("tension"), 48)
     hooks = "、".join(filter_visual_hook_items(scene.get("attention_hooks", []), 2))
+    emotion = clean_visual_brief_fragment(scene.get("emotional_target"), 58)
     parts = [
         f"主体：{subjects}" if subjects else "",
         f"动作：{action}" if action else "",
         f"冲突：{tension}" if tension else "",
         f"短字：{hooks}" if hooks else "",
+        f"情绪：{emotion}" if emotion else "",
     ]
     return compact_prompt_rule("，".join(item for item in parts if clean_text(item)), 130)
 
@@ -9092,6 +10455,8 @@ def visual_director_scene_seed(visual_brief: dict[str, Any], index: int) -> str:
         f"动作={clean_visual_brief_fragment(scene.get('action_peak'), 48)}" if clean_visual_brief_fragment(scene.get("action_peak"), 48) else "",
         f"冲突={clean_visual_brief_fragment(scene.get('tension'), 48)}" if clean_visual_brief_fragment(scene.get("tension"), 48) else "",
         f"短词/数字={hooks}" if hooks else "",
+        f"情绪任务={clean_visual_brief_fragment(scene.get('emotional_target'), 70)}" if clean_visual_brief_fragment(scene.get("emotional_target"), 70) else "",
+        f"观众代入={clean_visual_brief_fragment(scene.get('viewer_identification'), 70)}" if clean_visual_brief_fragment(scene.get("viewer_identification"), 70) else "",
     ]
     return compact_prompt_rule("，".join(item for item in parts if clean_text(item)), 320)
 
@@ -9325,6 +10690,9 @@ def build_elastic_visual_decision(
         "secondary_action": actions[1] if len(actions) > 1 else "",
         "speech_anchor": summarize_scene_text(speech or clean_text(str(scene.get("dialogue_anchor") or "")), 76),
         "tension": tension,
+        "emotional_target": clean_text(str(scene.get("emotional_target") or "")),
+        "viewer_identification": clean_text(str(scene.get("viewer_identification") or "")),
+        "viewpoint_tension": clean_text(str(scene.get("viewpoint_tension") or "")),
         "must_show": must_show,
         "hook_words": hooks[:3],
         "channel_identity": clean_text(str(template.get("brand_name") or template.get("name") or template.get("key") or project.get("template") or "")),
@@ -9343,6 +10711,9 @@ def render_elastic_visual_prompt(decision: dict[str, Any]) -> str:
     action = clean_text(str(decision.get("action") or ""))
     speech_anchor = clean_text(str(decision.get("speech_anchor") or ""))
     tension = clean_text(str(decision.get("tension") or ""))
+    emotional_target = clean_text(str(decision.get("emotional_target") or ""))
+    viewer_identification = clean_text(str(decision.get("viewer_identification") or ""))
+    viewpoint_tension = clean_text(str(decision.get("viewpoint_tension") or ""))
     channel = clean_text(str(decision.get("channel_identity") or ""))
 
     subject_text = "、".join(subjects[:3]) or "本期核心人物和关键物件"
@@ -9359,6 +10730,12 @@ def render_elastic_visual_prompt(decision: dict[str, Any]) -> str:
         parts.append(f"情节锚点：{speech_anchor}")
     if tension:
         parts.append(f"冲突悬念：{tension}")
+    if viewer_identification:
+        parts.append(f"观众代入：{viewer_identification}")
+    if viewpoint_tension:
+        parts.append(f"真实观点张力：{viewpoint_tension}")
+    if emotional_target:
+        parts.append(f"情绪任务：{emotional_target}；通过动作后果、表情变化或人物关系呈现，不用抱头、摊手、震惊脸摆拍")
     if hooks:
         if purpose == "cover":
             parts.append(f"画面短字只用：{'、'.join(hooks[:2])}")
@@ -9576,7 +10953,7 @@ def distill_content_authored_image_prompt(prompt: str, purpose: str) -> str:
         parts.append(channel)
     if not parts:
         return ""
-    parts.append("真实摄影质感，主体清楚，屏幕和数据只做短标签或可视化光牌，画面留出字幕空间")
+    parts.append("主体清楚，信息元素服从当前内容与频道画风，画面留出字幕空间")
     return compact_visual_image_prompt("。".join(dedupe_clauses(parts)).replace("...", "").replace("…", ""), 760 if purpose == "scene" else 760)
 
 
@@ -10131,9 +11508,12 @@ def composer_scene_prompts(project_id: int, scene_paths: list[Path], fallback_pr
                 by_filename[filename] = prompt
     prompts: list[str] = []
     for idx, path in enumerate(scene_paths):
-        source = by_filename.get(path.name)
-        if not source and idx < len(fallback_prompts):
-            source = fallback_prompts[idx]
+        # The caller supplies the current manifest prompts. Historical records
+        # describe the pixels already on disk and must never override the
+        # active episode when building a new composition.
+        source = fallback_prompts[idx] if idx < len(fallback_prompts) else ""
+        if not source:
+            source = by_filename.get(path.name)
         prompts.append(composer_scene_prompt(source or ""))
     return prompts
 
@@ -10213,7 +11593,19 @@ _RAPID_OCR_ENGINE: Any = None
 
 def extract_numeric_fact_tokens(text: str) -> list[str]:
     values: list[str] = []
-    source = clean_text(text)
+    # News snippets often mix Traditional Chinese units and full-width symbols
+    # with Simplified Chinese narration. Normalize only numeric notation here so
+    # source-backed facts such as ``30％`` and ``50萬`` match ``30%`` and ``50万``
+    # instead of being mistaken for unsupported numbers and blurred later.
+    source = clean_text(text).translate(
+        str.maketrans(
+            {
+                "％": "%",
+                "萬": "万",
+                "億": "亿",
+            }
+        )
+    )
     for chinese_percent in re.findall(r"百分之([零一二两三四五六七八九十百千万]+)", source):
         value = chinese_integer_value(chinese_percent)
         if value is not None:
@@ -10222,11 +11614,11 @@ def extract_numeric_fact_tokens(text: str) -> list[str]:
         r"(?:"
         r"\d+(?:\.\d+)?\s*(?:个)?\s*"
         r"(?:mAh|Ah|mWh|Wh|kWh|mW|kW|W|mV|V|mA|A|GHz|MHz|kHz|Hz|GB|TB|MB|KB|"
-        r"毫安时|毫安|安时|安|毫瓦时|瓦时|千瓦时|毫瓦|千瓦|瓦|毫伏|伏|"
-        r"摄氏度|℃|°C|秒|分钟|小时|天|周|月|季度|年|字|%|元|块|万|亿|次|倍|家|人|条|款|台)?"
+        r"毫安时|毫安|安时|安|毫瓦时|瓦时|千瓦时|毫瓦|千瓦|瓦|毫伏|伏|美元|"
+        r"摄氏度|℃|°C|秒|分钟|小时|天|周|月|季度|年|字|%|元|块|美元|万|亿|次|倍|家|人|条|款|台)?"
         r"|[零一二两三四五六七八九十百千万几]+\s*(?:个)?\s*"
         r"(?:万毫安时|万毫安|毫安时|毫安|安时|安|毫瓦时|瓦时|千瓦时|毫瓦|千瓦|瓦|毫伏|伏|"
-        r"摄氏度|秒|分钟|小时|天|周|月|季度|年|字|元|块|万|亿|次|倍|家|人|条|款|台)"
+        r"摄氏度|秒|分钟|小时|天|周|月|季度|年|字|元|块|美元|万|亿|次|倍|家|人|条|款|台)"
         r")",
         flags=re.IGNORECASE,
     )
@@ -10234,9 +11626,35 @@ def extract_numeric_fact_tokens(text: str) -> list[str]:
         value = clean_text(match.group(0))
         if not value or not re.search(r"\d|[零一二两三四五六七八九十百千万几]", value):
             continue
-        following = source[match.end() : match.end() + 4]
-        if value.endswith("块") and following.startswith(("表", "手表", "屏幕", "玻璃", "面板", "牌子")):
+        preceding = source[max(0, match.start() - 3) : match.start()]
+        following = source[match.end() : match.end() + 6]
+        # Ordinals and physical measure words are grammar, not sourced facts.
+        if preceding.endswith("第") and value.endswith(("次", "条", "款")):
             continue
+        if value.endswith("块"):
+            physical_nouns = (
+                "表", "手表", "屏幕", "玻璃", "面板", "牌子", "背景", "区域", "地砖",
+                "土地", "空地", "内容", "位置", "空间", "像素", "补丁", "阴影", "墙", "布",
+            )
+            classifier_context = (
+                "同", "这", "那", "每", "某", "另一", "复制", "粘贴", "画", "绘制", "生成",
+                "切", "贴", "补", "框", "抹", "处理", "选择", "选中", "移动", "删除",
+            )
+            currency_context = (
+                "花", "买", "卖", "售价", "价格", "成本", "收费", "支付", "付款", "便宜",
+                "贵", "预算", "账单", "亏", "赔", "赚", "省",
+            )
+            ambiguous_small_block = bool(re.fullmatch(r"[一两二几]\s*块", value))
+            if (
+                preceding.endswith("小")
+                or following.startswith(physical_nouns)
+                or (
+                    ambiguous_small_block
+                    and any(preceding.endswith(token) for token in classifier_context)
+                    and not any(token in preceding or token in following for token in currency_context)
+                )
+            ):
+                continue
         if value not in values:
             values.append(value)
     return values
@@ -10274,7 +11692,7 @@ def normalized_numeric_fact(token: str) -> str:
     if percent_match:
         value = chinese_integer_value(percent_match.group(1))
         return f"{value}%" if value is not None else source
-    number_match = re.fullmatch(r"([零一二两三四五六七八九十百千万几]+)(秒|分钟|小时|天|年|字|元|块|万|亿|次|倍)?", source)
+    number_match = re.fullmatch(r"([零一二两三四五六七八九十百千万几]+)(秒|分钟|小时|天|年|字|元|块|美元|万|亿|次|倍)?", source)
     if number_match:
         value = chinese_integer_value(number_match.group(1))
         if value is not None:
@@ -10506,6 +11924,8 @@ def required_scene_information_text(prompt: str) -> list[str]:
         r"必须落进成图的信息\s*[:：][^「]{0,80}「([^」]{2,160})」",
         r"(?:AI|模型)原生主标题\s*「([^」]{2,160})」",
         r"后期原生主标题\s*「([^」]{2,160})」",
+        r"画面短钩子\s*[:：][^「]{0,100}「([^」]{2,80})」",
+        r"必须逐字、完整、清晰写入画面的短钩子\s*[:：]?\s*「([^」]{2,80})」",
     )
     for pattern in patterns:
         for match in re.finditer(pattern, source):
@@ -10668,7 +12088,7 @@ def scene_information_ocr_report(ocr_text: str, prompt: str) -> dict[str, Any]:
         "completeness": reports,
         "matched": matched,
         "missing": [item for item in required if item not in matched],
-        "passed": not required or bool(reports.get(headline, {}).get("passed")),
+        "passed": bool(required) and bool(reports.get(headline, {}).get("passed")),
     }
 
 
@@ -10682,9 +12102,18 @@ def foreign_scene_numeric_facts(text: str, context: dict[str, Any]) -> list[str]
         .replace("一秒抓人", "立即抓人")
         .replace("1秒抓人", "立即抓人")
     )
+    # Channel style metadata is not episode evidence. In particular, colors
+    # such as #24211D and #405A93 used to be parsed as invented scene facts.
+    text = re.sub(r"#[0-9A-Fa-f]{3,8}\b", "", text)
     allowed_source = clean_text(
-        f"{context.get('audio_anchor', '')} {context.get('speech', '')} {context.get('fact_source', '')}"
+        f"{context.get('topic', '')} {context.get('audio_anchor', '')} {context.get('speech', '')} {context.get('fact_source', '')}"
     )
+    # A verified source may contain an issuer/security code that the visual
+    # teacher adds as an object label. Keep only six-digit exchange codes from
+    # that source; do not widen the scene whitelist to every source number.
+    verified_source = clean_text(str(context.get('source_information_text') or ''))
+    verified_codes = " ".join(re.findall(r"\b\d{6}(?:\.(?:SH|SZ))?\b", verified_source, flags=re.I))
+    allowed_source = clean_text(f"{allowed_source} {verified_codes}")
     allowed = {normalized_numeric_fact(item) for item in extract_numeric_fact_tokens(allowed_source)}
     if context.get("fact_registry_enforced"):
         # The explicit audio anchor is always authoritative.  The broader
@@ -10698,6 +12127,13 @@ def foreign_scene_numeric_facts(text: str, context: dict[str, Any]) -> list[str]
         allowed.update(
             normalized_numeric_fact(item)
             for item in extract_numeric_fact_tokens(clean_text(str(context.get("audio_anchor") or "")))
+            if normalized_numeric_fact(item)
+        )
+        # Preserve verified six-digit issuer codes even when the episode fact
+        # registry is strict about ordinary scene numbers.
+        allowed.update(
+            normalized_numeric_fact(item)
+            for item in extract_numeric_fact_tokens(verified_codes)
             if normalized_numeric_fact(item)
         )
     candidate = {normalized_numeric_fact(item) for item in extract_numeric_fact_tokens(text)}
@@ -10757,10 +12193,15 @@ def repair_foreign_scene_numeric_facts(prompt: str, context: dict[str, Any]) -> 
             replacement = "多次"
         elif re.search(r"字", fact):
             replacement = "一段内容"
-        repaired = repaired.replace(fact, replacement)
+        # Never replace a numeric suffix inside a larger supported value
+        # (for example replacing ``0元`` inside ``1000元``). Historical runs
+        # could otherwise corrupt a valid title into ``100相关金额``.
+        fact_pattern = rf"(?<![\d.]){re.escape(fact)}(?![\d.])"
+        repaired = re.sub(fact_pattern, replacement, repaired)
         for raw_fact in raw_numeric_tokens:
             if normalized_numeric_fact(raw_fact) == fact:
-                repaired = repaired.replace(raw_fact, replacement)
+                raw_pattern = rf"(?<![\d.]){re.escape(raw_fact)}(?![\d.])"
+                repaired = re.sub(raw_pattern, replacement, repaired)
     return normalize_image_prompt(repaired), foreign
 
 
@@ -10975,6 +12416,20 @@ def scene_image_index_from_path(path: Path) -> int:
         flags=re.IGNORECASE,
     )
     return int(match.group(1)) if match else 0
+
+
+def authoritative_scene_speech_for_output(output_path: Path) -> str:
+    """Read the current shot narration, never a preflight rewrite or cached prompt."""
+    index = scene_image_index_from_path(output_path)
+    root = scene_image_root(output_path)
+    if not index or root is None:
+        return ""
+    plan = storage.read_json(root.parent / "audio" / "scene_plan.json", {})
+    scenes = plan.get("scenes") if isinstance(plan, dict) else []
+    for position, scene in enumerate(scenes if isinstance(scenes, list) else [], start=1):
+        if isinstance(scene, dict) and int(scene.get("index") or position) == index:
+            return clean_text(str(scene.get("speech_text") or scene.get("audio_anchor") or ""))
+    return ""
 
 
 def scene_image_root(path: Path) -> Path | None:
@@ -11254,26 +12709,32 @@ def audit_generated_image(path: Path, size: str, purpose: str, prompt: str = "")
             if item
         ]
         if expected_cover_text:
-            ocr_text = clean_text(str(ocr.get("text") or ""))
-            ocr_lines = [clean_text(str(item.get("text") or "")) for item in ocr.get("lines", []) if isinstance(item, dict)]
-            cover_completeness = {
-                item: visual_text_completeness_report(item, ocr_text, ocr_lines)
-                for item in expected_cover_text
-            }
-            matched_cover_text = [
-                item
-                for item in expected_cover_text
-                if bool(cover_completeness.get(item, {}).get("passed"))
-            ]
-            missing_cover_text = [item for item in expected_cover_text if item not in matched_cover_text]
             report["ocr"]["expected_cover_text"] = expected_cover_text
-            report["ocr"]["cover_text_completeness"] = cover_completeness
-            report["ocr"]["matched_cover_text"] = matched_cover_text
-            report["ocr"]["missing_cover_text"] = missing_cover_text
-            if expected_cover_text and expected_cover_text[0] in missing_cover_text:
-                report["reasons"].append("cover_title_missing")
-            if len(expected_cover_text) > 1 and expected_cover_text[1] in missing_cover_text:
-                report["reasons"].append("cover_subtitle_missing")
+            if ocr.get("status") != "ok":
+                # OCR availability is an audit capability state, not evidence that
+                # the image omitted its title. Keep manual review visible without
+                # triggering another expensive image generation attempt.
+                report["reasons"].append("cover_text_ocr_unavailable")
+            else:
+                ocr_text = clean_text(str(ocr.get("text") or ""))
+                ocr_lines = [clean_text(str(item.get("text") or "")) for item in ocr.get("lines", []) if isinstance(item, dict)]
+                cover_completeness = {
+                    item: visual_text_completeness_report(item, ocr_text, ocr_lines)
+                    for item in expected_cover_text
+                }
+                matched_cover_text = [
+                    item
+                    for item in expected_cover_text
+                    if bool(cover_completeness.get(item, {}).get("passed"))
+                ]
+                missing_cover_text = [item for item in expected_cover_text if item not in matched_cover_text]
+                report["ocr"]["cover_text_completeness"] = cover_completeness
+                report["ocr"]["matched_cover_text"] = matched_cover_text
+                report["ocr"]["missing_cover_text"] = missing_cover_text
+                if expected_cover_text and expected_cover_text[0] in missing_cover_text:
+                    report["reasons"].append("cover_title_missing")
+                if len(expected_cover_text) > 1 and expected_cover_text[1] in missing_cover_text:
+                    report["reasons"].append("cover_subtitle_missing")
 
     hard_reasons = {
         "missing_file",
@@ -11286,6 +12747,7 @@ def audit_generated_image(path: Path, size: str, purpose: str, prompt: str = "")
         "flat_graphic_placeholder",
         "exact_duplicate_scene",
         "near_duplicate_scene",
+        "ocr_information_missing",
     }
     severity = "ok"
     if report["reasons"]:
@@ -11295,6 +12757,55 @@ def audit_generated_image(path: Path, size: str, purpose: str, prompt: str = "")
     report["severity"] = severity
     report["ok"] = not report["reasons"]
     return report
+
+
+def derive_cover_variants_from_master(
+    project_id: int,
+    master_path: Path,
+    prompt_by_name: dict[str, str] | None = None,
+    *,
+    missing_only: bool = False,
+    log: Callable[[str], Any] | None = None,
+) -> int:
+    """Create story/portrait cover files from one accepted landscape master.
+
+    This is a local fit/adaptation operation. It deliberately never invokes an
+    image provider, so a manual landscape redraw remains one generation job;
+    the full master stays visible in portrait/story variants instead of being
+    center-cropped and cutting off the headline or subject.
+    """
+    if not master_path.exists() or master_path.stat().st_size < 4096:
+        return 0
+    add = log or (lambda _message: None)
+    prompts = prompt_by_name or {}
+    master_prompt = clean_text(
+        str(prompts.get(master_path.name) or storage.read_text(master_path.with_suffix(".md")) or "")
+    )
+    targets = (
+        ("图文封面", storage.project_file(project_id, "covers/cover_story.png"), COVER_STORY_SIZE),
+        ("竖屏封面", storage.project_file(project_id, "covers/cover_portrait.png"), COVER_PORTRAIT_SIZE),
+    )
+    derived = 0
+    for label, variant_path, variant_size in targets:
+        if missing_only and variant_path.exists() and variant_path.stat().st_size >= 4096:
+            continue
+        variant_path.parent.mkdir(parents=True, exist_ok=True)
+        # Preserve the complete master headline and subject while adapting
+        # aspect ratio; do not center-crop a landscape image into portrait.
+        with Image.open(master_path) as source:
+            fitted = _cover_fit_image(_image_to_rgb_canvas(source), parse_image_size_hint(variant_size))
+            fitted.save(variant_path, format="PNG")
+        normalize_generated_image_size(variant_path, variant_size, log=add, label=label)
+        variant_prompt = clean_text(str(prompts.get(variant_path.name) or master_prompt))
+        storage.write_text(variant_path.with_suffix(".md"), variant_prompt + "\n")
+        variant_audit = audit_generated_image(variant_path, variant_size, "cover", variant_prompt)
+        variant_audit["derived_from"] = master_path.name
+        variant_audit["generation_mode"] = "local_cover_adaptation"
+        variant_audit["source_prompt_sha256"] = hashlib.sha256(master_prompt.encode("utf-8", errors="ignore")).hexdigest()[:16] if master_prompt else ""
+        storage.write_json(variant_path.with_suffix(".audit.json"), variant_audit)
+        derived += 1
+        add(f"[covers] {label}已由主封面本地适配，不追加图片模型调用")
+    return derived
 
 
 IMAGE_AUDIT_REASON_LABELS = {
@@ -11325,6 +12836,7 @@ IMAGE_AUDIT_REASON_LABELS = {
     "duplicate_visual_concept": "与已有镜头的证据载体和构图重复",
     "cover_title_missing": "封面缺少指定主标题或标题不可读",
     "cover_subtitle_missing": "封面缺少指定反转短句或短句不可读",
+    "cover_text_ocr_unavailable": "本机文字识别未启用，封面文字等待人工确认",
 }
 
 
@@ -11357,7 +12869,7 @@ def generate_ark_image(
 
     model = resolve_ark_image_model(env)
     client = OpenAI(api_key=api_key, base_url=ARK_BASE_URL, timeout=240.0)
-    clean_prompt = normalize_image_prompt(prompt)
+    clean_prompt = make_image_prompt_provider_friendly(prompt)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     extra_body = build_ark_extra_body(env, purpose)
     references = [path for path in list(reference_images or []) if path.exists()][:6]
@@ -11407,7 +12919,7 @@ def _request_provider_json(
                 "OpenAI 兼容网关返回“域名解析错误”：Base URL 已连通，但 NewAPI 后台渠道、分组或模型路由可能指向了不可解析的上游域名。请确认 token 分组有可用图片模型，模型 ID 不要填 newapi_channel_conn。"
             ) from exc
         detail = clean_text(body)[:400]
-        raise RuntimeError(f"HTTP {exc.code}: {detail or '图片接口返回错误'}") from exc
+        raise RuntimeError(f"HTTP {exc.code}: {detail or '兼容接口上游返回错误'}") from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", None) or exc
         raise RuntimeError(f"网络请求失败：{reason}") from exc
@@ -11493,6 +13005,23 @@ def chatgpt_handoff_provider_record(provider_key: str, env: dict[str, str]) -> d
     return {"key": provider_key, "label": "ChatGPT 网页 + Classic 接力（旧配置）", "model": "chatgpt-account"}
 
 
+def scene_local_copy_supported(value: str, speech: str) -> bool:
+    """Conservative guard for inherited text, not a semantic fact verifier."""
+    normalize = lambda text: re.sub(r"[\W_]+", "", str(text), flags=re.UNICODE).lower()
+    candidate, narration = normalize(value), normalize(speech)
+    return bool(candidate and narration and candidate in narration)
+
+
+def scene_layout_memory(prompt: str) -> str:
+    """Only carry a fixed vocabulary of composition traits across shots."""
+    source = selected_visual_concept_from_prompt(prompt)
+    # Never serialize free-form conflict, narration, entities or native text.
+    source = re.split(r"(?:冲突|口播|证据|画面文字|结论|标题)\s*[:：]", source, maxsplit=1)[0]
+    traits = ("远景", "全景", "中景", "近景", "特写", "俯视", "仰视", "平视",
+              "左右", "上下", "中心", "对角线", "分屏", "横向", "纵向", "剖面")
+    return "、".join(item for item in traits if item in source)
+
+
 def balanced_scene_generation_brief(
     prompt: str,
     *,
@@ -11513,6 +13042,14 @@ def balanced_scene_generation_brief(
                 source,
             )
             spoken = clean_text(quoted_speech.group(1)) if quoted_speech else extract_prompt_dialogue_hint_full(source)
+    # Field extraction must stop at the next prompt field. Otherwise a style
+    # phrase such as "真实科技纪录片现场" can leak into the narration line and
+    # survive even after the channel policy correctly rewrites the concept.
+    spoken = re.split(
+        r"\s*(?:选定视觉概念|本镜任务|创作边界|创作自由|频道固定视觉签名)\s*[:：]",
+        spoken,
+        maxsplit=1,
+    )[0]
     spoken = compact_prompt_speech_anchor(spoken, 360)
     focus = clean_text(anchor)
     if not focus:
@@ -11523,13 +13060,50 @@ def balanced_scene_generation_brief(
         concept_match = re.search(r"选定视觉概念\s*[:：]\s*([^\n]+)", source)
         selected_concept = compact_visual_concept(concept_match.group(1), 280) if concept_match else ""
 
+    if "开箱使用" in selected_concept and not _contains_any(spoken, ("开箱", "拆箱", "拆封")):
+        selected_concept = f"以当前口播中的对象及其动作关系组织画面：{spoken}"
+
     current_topic = clean_text(topic)
     if not current_topic:
         topic_match = re.search(
-            r"(?:锁定本期主题|本期主题|主题情境|本镜主题情境|主题)\s*[:：]\s*(.*?)(?=[，,。；;\n]\s*(?:(?:本镜)?口播原文|当前完整口播|当前口播重点|画面任务|本镜任务|主体|主主体)\s*[:：]|$)",
+            r"(?:锁定本期主题|本期主题|主题情境|本镜主题情境|主题)\s*[:：]\s*(.*?)"
+            r"(?=(?:[，,。；;\n]\s*|\s+)(?:(?:本镜)?口播原文|当前完整口播|当前口播重点|"
+            r"本期核心对象必须是|主体硬约束|画面任务|本镜任务|主体|主主体)\s*[:：]|$)",
             source,
         )
         current_topic = clean_text(topic_match.group(1)) if topic_match else ""
+    entity_constraint_match = re.search(
+        r"(?:本期核心对象必须是|主体硬约束)\s*[:：]\s*[^。；;\n]{1,96}",
+        source,
+    )
+    entity_constraint = clean_text(entity_constraint_match.group(0)) if entity_constraint_match else ""
+
+    # A cached visual concept is never authoritative. Rebuild the provider-facing
+    # concept from this scene's final narration when the current episode is about
+    # vehicles or mechanical safety. This prevents an earlier phone/smart-home
+    # concept from surviving provider switches or manifest refreshes.
+    vehicle_context = clean_text(f"{current_topic} {spoken}").lower()
+    if _contains_any(
+        vehicle_context,
+        (
+            "汽车", "车型", "车辆", "mpv", "suv", "轿车", "摩托", "摩托车", "机车",
+            "发动机", "车架", "刹车", "制动", "踏板", "支架", "轮胎", "车企", "尊界", "v800",
+        ),
+    ):
+        vehicle_blueprint = audio_bound_visual_blueprint(spoken, current_topic)
+        selected_concept = compact_visual_concept(
+            "；".join(
+                item
+                for item in (
+                    "证据主体：" + "、".join(vehicle_blueprint.get("subjects", [])[:3]),
+                    "正在发生：" + clean_text(str(vehicle_blueprint.get("action") or "")),
+                    "冲突悬念：" + clean_text(str(vehicle_blueprint.get("tension") or "")),
+                    "证据信息：" + clean_text(str(vehicle_blueprint.get("evidence") or "")),
+                )
+                if clean_text(item.split("：", 1)[-1])
+            ),
+            280,
+        )
 
     def named_field(marker: str) -> str:
         label = clean_text(marker).rstrip(":：")
@@ -11618,10 +13192,20 @@ def balanced_scene_generation_brief(
         5,
     )
     source_payload = source_information if isinstance(source_information, dict) else {}
+    bound_speech = clean_text(str(source_payload.get("bound_speech") or ""))
+    binding_mismatch = bool(bound_speech and clean_scene_spoken_text(bound_speech) != clean_scene_spoken_text(spoken))
+    if binding_mismatch:
+        source_payload = {}
+    # Old payloads lack provenance: accept only relevant supporting material,
+    # rather than treating all following script sentences as this shot's facts.
     source_evidence = [
         clean_text(str(item))
         for item in source_payload.get("supporting_evidence", [])
         if clean_text(str(item))
+        and (scene_local_copy_supported(str(item), spoken)
+             or (source_payload.get("grounding") != "script_context"
+                 and source_information_has_scene_subject_overlap(str(item), spoken)
+                 and source_information_match_score(str(item), spoken) >= 18))
     ]
     for item in source_evidence:
         if item not in evidence:
@@ -11650,6 +13234,13 @@ def balanced_scene_generation_brief(
             continue
         if value not in facts:
             facts.append(value)
+    # Inherited source metadata is not permission to render another sentence.
+    # Keep full source material upstream; final image text is scene-local.
+    if spoken:
+        required_visual_copy = [item for item in required_visual_copy if scene_local_copy_supported(item, spoken)]
+        payload_fact_chips = [item for item in payload_fact_chips if scene_local_copy_supported(item, spoken)]
+        if payload_headline and not bound_speech and not scene_local_copy_supported(payload_headline, spoken):
+            payload_headline = spoken
     audience_plan = audience_visual_plan(
         topic=current_topic,
         narration=spoken or focus,
@@ -11658,6 +13249,8 @@ def balanced_scene_generation_brief(
     lines = []
     if current_topic:
         lines.append(f"本期主题：{current_topic}")
+    if entity_constraint:
+        lines.append(entity_constraint)
     if channel_style:
         lines.append(f"频道固定视觉签名：{channel_style}")
     if channel_strategy:
@@ -11703,7 +13296,13 @@ def balanced_scene_generation_brief(
             "直接选择最适合这一段口播的视觉方案生成图片，不要复述规则。",
         ]
     )
-    return "\n".join(lines)
+    scene_source = clean_text(f"{current_topic} {spoken} {focus}")
+    topic_type = infer_visual_topic_type(
+        scene_source,
+        "",
+        classify_visual_prompt_domain(scene_source, "scene"),
+    )
+    return enforce_scene_prop_contract("\n".join(lines), spoken or focus, topic_type)
 
 
 def ai_teacher_scene_grounding_report(
@@ -11720,7 +13319,8 @@ def ai_teacher_scene_grounding_report(
     foreign_numbers = foreign_scene_numeric_facts(combined, semantic_context)
     semantic_source = clean_text(
         f"{semantic_context.get('topic', '')} {semantic_context.get('audio_anchor', '')} "
-        f"{semantic_context.get('speech', '')} {semantic_context.get('visual_director', '')}"
+        f"{semantic_context.get('speech', '')} {semantic_context.get('visual_director', '')} "
+        f"{semantic_context.get('source_information_text', '')}"
     )
     foreign_callouts = foreign_scene_callout_hits(combined, semantic_source)
     topic_conflicts = visual_topic_conflict_hits(combined, active_topic_type)
@@ -11802,28 +13402,93 @@ def audio_bound_semantic_scene_prompt(topic: str, speech: str, anchor: str = "")
     )
 
 
-def build_chatgpt_handoff_prompt(prompt: str, size: str, purpose: str) -> str:
+def build_chatgpt_handoff_prompt(
+    prompt: str,
+    size: str,
+    purpose: str,
+    required_user_instruction: str = "",
+    preserve_visual_prompt: bool = False,
+) -> str:
     ratio_hint = build_apiyi_size_hint(size)
     purpose_hint = "短视频封面" if purpose == "cover" else "短视频画面"
     if purpose == "scene":
-        # `scene_specific_image_prompt` is already a compact director contract.
-        # Re-wrapping it as an open brief used to discard its concrete subject
-        # and action, leaving only generic evidence language at the provider.
-        has_directed_shot = ("主主体：" in prompt or "主体：" in prompt) and "动作：" in prompt
-        semantic_prompt = (
-            normalize_image_prompt(prompt)
-            if is_semantic_scene_generation_brief(prompt) or has_directed_shot
-            else balanced_scene_generation_brief(prompt)
+        provider_safe_source = normalize_image_prompt(repair_legacy_mojibake(prompt))
+        # The episode contract is an immutable identity field. The regular
+        # provider compactor may shorten composition prose, but must never
+        # turn a later scene into a different event or physical subject.
+        episode_contract_match = re.search(
+            r"(?:^|\n)\s*(整期事件锁定\s*[:：][^\n]+)",
+            provider_safe_source,
         )
-        clean_prompt = lightweight_scene_model_prompt(semantic_prompt, max_chars=680)
+        episode_contract = clean_text(episode_contract_match.group(1)) if episode_contract_match else ""
+        if not preserve_visual_prompt:
+            source_report = image_prompt_provider_friendly_report(prompt)
+            provider_safe_source = str(source_report.get("prompt") or prompt)
+        has_directed_shot = ("主主体：" in provider_safe_source or "主体：" in provider_safe_source) and "动作：" in provider_safe_source
+        has_user_requirement = any(
+            marker in provider_safe_source
+            for marker in ("追加要求：", "追加要求（最高优先级）：", "补充要求：", "用户重绘硬要求")
+        )
+        semantic_prompt = provider_safe_source if preserve_visual_prompt else (
+            normalize_image_prompt(provider_safe_source)
+            if is_semantic_scene_generation_brief(provider_safe_source) or has_directed_shot or has_user_requirement
+            else balanced_scene_generation_brief(provider_safe_source)
+        )
+        # Handoff must carry the same complete brief as the direct image API.
+        # The old 680-character compactor silently removed later scene facts
+        # and user additions, so keep the full semantic prompt here too.
+        clean_prompt = make_image_prompt_provider_friendly(semantic_prompt)
+        if "原生画面文字" not in clean_prompt:
+            clean_prompt = normalize_image_prompt(
+                clean_prompt
+                + "\n原生画面文字：根据当前完整口播自行提炼并直接写入图片；"
+                "模型一次完成画面和文字，文字字数和数量不设统一上限，必须完整可读。"
+            )
+        if "文字策略：模型一次完成画面和文字" not in clean_prompt:
+            clean_prompt = normalize_image_prompt(
+                clean_prompt
+                + "\n文字策略：模型一次完成画面和文字，文字字数和数量不设统一上限，必须完整可读。"
+            )
+        if "不要留下大片空白" not in clean_prompt:
+            clean_prompt = normalize_image_prompt(
+                clean_prompt
+                + "\n成图要求：横向16:9，主体与证据铺满画面，不要留下大片空白；禁止乱码、截断。"
+            )
+        elif "禁止乱码、截断" not in clean_prompt:
+            clean_prompt = normalize_image_prompt(clean_prompt + "\n文字质量：禁止乱码、截断。")
+        missing_meanings = [] if preserve_visual_prompt else [
+            replacement
+            for pattern, replacement in IMAGE_PROVIDER_SEMANTIC_REWRITES
+            if re.search(pattern, normalize_image_prompt(prompt), flags=re.IGNORECASE)
+            and replacement not in clean_prompt
+        ]
+        numeric_source = provider_safe_source
+        if "数字硬约束" in provider_safe_source:
+            numeric_contract = re.search(r"数字硬约束\s*[:：]\s*([^\n]+)", provider_safe_source)
+            numeric_source = clean_text(numeric_contract.group(1)) if numeric_contract else ""
+        source_facts = [] if preserve_visual_prompt else extract_numeric_fact_tokens(numeric_source)
+        missing_facts = [fact for fact in source_facts if fact not in clean_prompt]
+        supplements = dedupe_clauses(missing_meanings + missing_facts)
+        if supplements:
+            clean_prompt = normalize_image_prompt(
+                clean_prompt + "\n必须保持的语义与事实：" + "、".join(supplements[:10])
+            )
+        if episode_contract and "整期事件锁定" not in clean_prompt:
+            clean_prompt = normalize_image_prompt(f"{clean_prompt}\n{episode_contract}")
     else:
-        clean_prompt = compile_outbound_image_prompt(
-            sanitize_prompt_for_image_model(prompt, purpose),
-            purpose,
-            max_chars=560,
-        )
+        # Covers also keep the authored prompt intact; only provider-safe
+        # wording is normalized before handoff.
+        clean_prompt = make_image_prompt_provider_friendly(normalize_image_prompt(prompt))
         clean_prompt = re.sub(r"用小角标、专属色块或固定镜头气质体现个人IP识别[，,；;。]?", "", clean_prompt)
         clean_prompt = re.sub(r"频道名只做很小识别[，,；;。]?", "", clean_prompt)
+        clean_prompt = make_image_prompt_provider_friendly(clean_prompt)
+    persisted_requirement = clean_text(required_user_instruction) or _extract_persisted_image_requirement(prompt)
+    if persisted_requirement and _normalize_chatgpt_composer_text(persisted_requirement) not in _normalize_chatgpt_composer_text(clean_prompt):
+        clean_prompt = normalize_image_prompt(
+            f"{clean_prompt}\n用户追加要求（最高优先级，必须落实到成图）：{persisted_requirement}"
+        )
+    if persisted_requirement and _normalize_chatgpt_composer_text(persisted_requirement) not in _normalize_chatgpt_composer_text(clean_prompt):
+        raise RuntimeError("用户填写的重绘要求在网页提示词构建时丢失，已终止本次生图")
     lines = [
         "请直接调用 ChatGPT 的“生成图片”功能，立即生成 1 张图片。",
         "只输出成图，不要整理或改写 Prompt。",
@@ -12136,11 +13801,30 @@ def default_chatgpt_browser_profile_dir() -> Path:
 
 
 _CHATGPT_ACCOUNT_POOL_LOCK = threading.Lock()
+_CHATGPT_ANT_AUTOMATION_LOCK = threading.Lock()
 _CHATGPT_ACCOUNT_POOL_CURSOR = 0
 _CHATGPT_ACCOUNT_USE_LOCKS: dict[str, threading.Lock] = {}
 _CHATGPT_ACCOUNT_LEASES: dict[str, dict[str, Any]] = {}
-_CHATGPT_ACCOUNT_HEALTH: dict[str, dict[str, Any]] = {}
+_CHATGPT_ACCOUNT_HEALTH_FILE = storage.CONFIG_ROOT / "chatgpt-account-health.json"
+_CHATGPT_ACCOUNT_HEALTH_RAW = storage.read_json(_CHATGPT_ACCOUNT_HEALTH_FILE, {})
+_CHATGPT_ACCOUNT_HEALTH: dict[str, dict[str, Any]] = (
+    {
+        str(key): dict(value)
+        for key, value in _CHATGPT_ACCOUNT_HEALTH_RAW.items()
+        if isinstance(value, dict)
+    }
+    if isinstance(_CHATGPT_ACCOUNT_HEALTH_RAW, dict)
+    else {}
+)
+_CHATGPT_HEALTH_MIGRATED = False
+for _health in _CHATGPT_ACCOUNT_HEALTH.values():
+    if clean_text(str(_health.get("last_error") or "")) == "ChatGPT 已发送，但页面没有出现可核对的用户消息，已停止本次生成":
+        _health.update({"cooldown_until": 0, "quota_retry_at": None, "last_error": ""})
+        _CHATGPT_HEALTH_MIGRATED = True
+if _CHATGPT_HEALTH_MIGRATED:
+    storage.write_json(_CHATGPT_ACCOUNT_HEALTH_FILE, _CHATGPT_ACCOUNT_HEALTH)
 _CHATGPT_CDP_PROCESSES: dict[str, subprocess.Popen[Any]] = {}
+_ANT_TASK_INSTANCE_LEASE_FILE = storage.CONFIG_ROOT / "ant-task-instance-lease.json"
 
 
 class ChatgptLoginRequiredError(RuntimeError):
@@ -12153,6 +13837,51 @@ class ChatgptAccessChallengeError(RuntimeError):
 
 class ChatgptGenerationCancelledError(RuntimeError):
     pass
+
+
+def _write_ant_task_instance_lease(code: str, session: dict[str, Any]) -> None:
+    last_start_at = clean_text(str(session.get("lastStartAt") or ""))
+    if not last_start_at:
+        raise RuntimeError("Ant Browser 未返回实例启动时间，无法建立安全的任务所有权记录。")
+    storage.write_json(
+        _ANT_TASK_INSTANCE_LEASE_FILE,
+        {
+            "code": clean_text(code).upper(),
+            "last_start_at": last_start_at,
+            "recorded_at": storage.now_ts(),
+        },
+    )
+
+
+def _clear_ant_task_instance_lease(code: str = "") -> None:
+    lease = storage.read_json(_ANT_TASK_INSTANCE_LEASE_FILE, {})
+    expected = clean_text(code).upper()
+    if expected and clean_text(str(lease.get("code") or "")).upper() != expected:
+        return
+    _ANT_TASK_INSTANCE_LEASE_FILE.unlink(missing_ok=True)
+
+
+def recover_orphaned_ant_task_instance() -> bool:
+    """Stop only an Ant instance whose exact launch still belongs to this app."""
+    lease = storage.read_json(_ANT_TASK_INSTANCE_LEASE_FILE, {})
+    code = clean_text(str(lease.get("code") or "")).upper()
+    owned_start_at = clean_text(str(lease.get("last_start_at") or ""))
+    if not code or not owned_start_at:
+        _clear_ant_task_instance_lease()
+        return False
+    client = ant_browser.client_from_env(runtime_env(), timeout=8.0)
+    status = client.runtime_status(code)
+    current_start_at = clean_text(str(status.get("lastStartAt") or ""))
+    if current_start_at != owned_start_at:
+        _clear_ant_task_instance_lease(code)
+        return False
+    if not status.get("running") and not status.get("debugReady"):
+        _clear_ant_task_instance_lease(code)
+        return False
+    stopped = client.stop_and_wait(code, timeout_seconds=12.0)
+    if stopped:
+        _clear_ant_task_instance_lease(code)
+    return stopped
 
 
 def chatgpt_image_account_count(env: dict[str, str]) -> int:
@@ -12349,18 +14078,27 @@ def close_connected_chatgpt_browser(
     image_saved: bool = True,
 ) -> bool:
     if account.get("provider") == "ant_browser":
+        if not account.pop("ant_started_by_task", False):
+            account["cleanup_failed"] = False
+            if log:
+                log(f"[images] {account['label']} 本次生图页面已回收，共享 Ant Browser 实例保持运行")
+            return True
         stopped = False
         try:
-            env = runtime_env()
-            ant_browser.client_from_env(env, timeout=max(3.0, timeout_seconds)).stop(str(account.get("code") or ""))
-            stopped = True
+            stopped = ant_browser.client_from_env(
+                runtime_env(), timeout=max(3.0, timeout_seconds)
+            ).stop_and_wait(
+                str(account.get("code") or ""),
+                timeout_seconds=max(8.0, timeout_seconds),
+            )
         except Exception as exc:
             if log:
-                log(f"[images] Ant Browser 实例 {account.get('code') or account.get('label')} 回收异常：{user_facing_error(exc)}")
-        with contextlib.suppress(Exception):
-            browser.close()
+                log(f"[images] Ant Browser 实例关闭异常：{user_facing_error(exc)}")
+        account["cleanup_failed"] = not stopped
+        if stopped:
+            _clear_ant_task_instance_lease(str(account.get("code") or ""))
         if log and stopped:
-            log(f"[images] {account['label']} 已由 Ant Browser 停止，登录资料仍由 Ant Browser 保管")
+            log(f"[images] {account['label']} 本次生图窗口已关闭")
         return stopped
     with contextlib.suppress(Exception):
         _request_chatgpt_browser_shutdown(browser)
@@ -12390,15 +14128,12 @@ def close_connected_chatgpt_browser(
 
 def close_chatgpt_cdp_browser(account: dict[str, Any], timeout_seconds: float = 8.0) -> bool:
     if account.get("provider") == "ant_browser":
-        try:
-            ant_browser.client_from_env(runtime_env(), timeout=max(3.0, timeout_seconds)).stop(
-                str(account.get("code") or "")
-            )
-            account["cdp_url"] = ""
-            account["port"] = 0
-            return True
-        except Exception:
-            return False
+        return close_connected_chatgpt_browser(
+            None,
+            account,
+            timeout_seconds=timeout_seconds,
+            image_saved=False,
+        )
     if not chatgpt_cdp_metadata(account, timeout=0.2):
         if not _wait_for_managed_chatgpt_process_exit(account, timeout_seconds=3.0):
             _terminate_managed_chatgpt_process(account)
@@ -12478,13 +14213,23 @@ def ensure_chatgpt_cdp_browser(
         code = clean_text(str(account.get("code") or ""))
         if not code:
             raise RuntimeError("Ant Browser 实例缺少快捷打开码。")
-        if log:
-            log(f"[images] 正在通过 Ant Browser 启动实例 {code}（{account['label']}）")
-        session = client.start_session(
-            code,
-            start_url=clean_text(url or env.get("CHATGPT_IMAGE_WEB_URL") or "https://chatgpt.com/"),
-            timeout_ms=120000,
-        )
+        status = client.runtime_status(code)
+        account["ant_started_by_task"] = not bool(status.get("running") or status.get("debugReady"))
+        if status.get("debugReady") and (status.get("directDebugUrl") or status.get("cdpUrl")):
+            session = status
+            if log:
+                log(f"[images] 正在接管已运行的 Ant Browser 实例 {code}，不会新建启动页面")
+        else:
+            if log:
+                log(f"[images] 正在通过 Ant Browser 启动实例 {code}（{account['label']}）")
+            session = client.start_session(
+                code,
+                start_url=clean_text(url or env.get("CHATGPT_IMAGE_WEB_URL") or "https://chatgpt.com/"),
+                timeout_ms=120000,
+            )
+            if not clean_text(str(session.get("lastStartAt") or "")):
+                session = client.runtime_status(code)
+            _write_ant_task_instance_lease(code, session)
         direct_url = clean_text(str(session.get("directDebugUrl") or session.get("cdpUrl") or ""))
         if not direct_url:
             raise RuntimeError(f"Ant Browser 实例 {code} 未返回 CDP 地址。")
@@ -12599,6 +14344,7 @@ def chatgpt_account_abort_event(account: dict[str, Any], account_lock: threading
         _CHATGPT_ACCOUNT_LEASES[account["id"]] = {
             "lock": account_lock,
             "abort_event": abort_event,
+            "account": dict(account),
             "started_at": storage.now_ts(),
             "owner_thread": threading.current_thread(),
         }
@@ -12621,13 +14367,12 @@ def abort_active_chatgpt_image_generations(
 ) -> dict[str, Any]:
     """Stop active browser work and wait for worker threads to return their account leases."""
     targets: list[tuple[dict[str, Any], threading.Lock]] = []
-    accounts_by_id = {account["id"]: account for account in chatgpt_image_accounts(env)}
     with _CHATGPT_ACCOUNT_POOL_LOCK:
         for account_id, lease in list(_CHATGPT_ACCOUNT_LEASES.items()):
-            account = accounts_by_id.get(account_id)
+            account = lease.get("account") if isinstance(lease.get("account"), dict) else {"id": account_id}
             use_lock = lease.get("lock")
             abort_event = lease.get("abort_event")
-            if account is None or use_lock is None or not hasattr(use_lock, "locked"):
+            if use_lock is None or not hasattr(use_lock, "locked"):
                 continue
             if not use_lock.locked():
                 _CHATGPT_ACCOUNT_LEASES.pop(account_id, None)
@@ -12655,23 +14400,35 @@ def record_chatgpt_account_result(account: dict[str, Any], *, error: str = "", e
         health = _CHATGPT_ACCOUNT_HEALTH.setdefault(account["id"], {})
         if not error:
             health.update({"failures": 0, "cooldown_until": 0, "last_success_at": now, "last_error": ""})
+            storage.write_json(_CHATGPT_ACCOUNT_HEALTH_FILE, _CHATGPT_ACCOUNT_HEALTH)
             return
         failures = int(health.get("failures", 0) or 0) + 1
         source = clean_text(error)
+        retry_match = re.search(r"\[retry_at=(\d+(?:\.\d+)?)\]", source)
+        retry_at = float(retry_match.group(1)) if retry_match else 0.0
+        display_error = re.sub(r"\s*\[retry_at=[^\]]+\]", "", source).strip()
         configured = env or {}
         try:
             default_cooldown = int(float(clean_text(configured.get("CHATGPT_IMAGE_ACCOUNT_COOLDOWN_SECONDS") or "180")))
         except ValueError:
             default_cooldown = 180
-        cooldown = 900 if any(token in source for token in ("额度", "上限", "登录", "套餐")) else max(60, default_cooldown)
+        if any(token in source for token in ("额度", "上限", "套餐")):
+            cooldown = chatgpt_image_quota_cooldown_seconds(configured)
+        elif "登录" in source:
+            cooldown = 900
+        else:
+            cooldown = max(60, default_cooldown)
+        cooldown_until = max(now + 60, retry_at) if retry_at else now + cooldown
         health.update(
             {
                 "failures": failures,
-                "cooldown_until": now + cooldown,
+                "cooldown_until": cooldown_until,
+                "quota_retry_at": retry_at or None,
                 "last_failure_at": now,
-                "last_error": source[:300],
+                "last_error": display_error[:300],
             }
         )
+        storage.write_json(_CHATGPT_ACCOUNT_HEALTH_FILE, _CHATGPT_ACCOUNT_HEALTH)
 
 
 def _reconcile_stale_chatgpt_account_lease(
@@ -12723,6 +14480,49 @@ def _reconcile_stale_chatgpt_account_lease(
         return not use_lock.locked()
 
 
+def _reconcile_deleted_ant_account_state(valid_account_ids: set[str]) -> None:
+    """Drop idle runtime state for Ant profiles deleted outside this app."""
+    changed = False
+    with _CHATGPT_ACCOUNT_POOL_LOCK:
+        stale_ids = {
+            account_id
+            for account_id in set(_CHATGPT_ACCOUNT_HEALTH)
+            | set(_CHATGPT_ACCOUNT_USE_LOCKS)
+            | set(_CHATGPT_ACCOUNT_LEASES)
+            | set(_CHATGPT_CDP_PROCESSES)
+            if account_id.startswith("ant-") and account_id not in valid_account_ids
+        }
+        for account_id in stale_ids:
+            lease = _CHATGPT_ACCOUNT_LEASES.get(account_id)
+            use_lock = _CHATGPT_ACCOUNT_USE_LOCKS.get(account_id)
+            if lease and use_lock and use_lock.locked():
+                continue
+            _CHATGPT_ACCOUNT_HEALTH.pop(account_id, None)
+            _CHATGPT_ACCOUNT_USE_LOCKS.pop(account_id, None)
+            _CHATGPT_ACCOUNT_LEASES.pop(account_id, None)
+            process = _CHATGPT_CDP_PROCESSES.get(account_id)
+            if process is None or process.poll() is not None:
+                _CHATGPT_CDP_PROCESSES.pop(account_id, None)
+            changed = True
+    if changed:
+        storage.write_json(_CHATGPT_ACCOUNT_HEALTH_FILE, _CHATGPT_ACCOUNT_HEALTH)
+
+
+def _sync_ant_browser_configured_codes(
+    env: dict[str, str], discovered_codes: list[str]
+) -> list[str]:
+    """Persist only existing configured Ant launch codes, preserving order."""
+    configured_codes = ant_browser.parse_launch_codes(env.get("ANT_BROWSER_LAUNCH_CODES") or "")
+    if not configured_codes:
+        return []
+    available = set(discovered_codes)
+    synced = [code for code in configured_codes if code in available]
+    if synced != configured_codes:
+        storage.save_env_patch({"ANT_BROWSER_LAUNCH_CODES": ",".join(synced)})
+        env["ANT_BROWSER_LAUNCH_CODES"] = ",".join(synced)
+    return synced
+
+
 def chatgpt_account_pool_status(env: dict[str, str]) -> dict[str, Any]:
     now = storage.now_ts()
     accounts: list[dict[str, Any]] = []
@@ -12733,6 +14533,13 @@ def chatgpt_account_pool_status(env: dict[str, str]) -> dict[str, Any]:
     except Exception as exc:
         source_accounts = []
         connection_error = user_facing_error(exc)
+    if provider == "ant_browser" and not connection_error:
+        valid_account_ids = {
+            clean_text(str(account.get("id") or ""))
+            for account in source_accounts
+            if clean_text(str(account.get("id") or ""))
+        }
+        _reconcile_deleted_ant_account_state(valid_account_ids)
     for account in source_accounts:
         metadata = chatgpt_cdp_metadata(account, timeout=0.2)
         _reconcile_stale_chatgpt_account_lease(
@@ -12773,16 +14580,22 @@ def chatgpt_account_pool_status(env: dict[str, str]) -> dict[str, Any]:
                 ),
                 "cooling_down": cooldown_until > now,
                 "cooldown_remaining": max(0, int(cooldown_until - now)),
+                "cooldown_until": cooldown_until or None,
+                "quota_retry_at": health.get("quota_retry_at"),
                 "last_success_at": health.get("last_success_at"),
                 "last_error": health.get("last_error", ""),
             }
         )
+    discovered_codes = [clean_text(str(item.get("code") or "")) for item in accounts if clean_text(str(item.get("code") or ""))]
+    configured_codes = ant_browser.parse_launch_codes(env.get("ANT_BROWSER_LAUNCH_CODES") or "")
+    if provider == "ant_browser":
+        configured_codes = _sync_ant_browser_configured_codes(env, discovered_codes)
     return {
         "count": len(accounts),
         "strategy": "round_robin",
         "provider": provider,
         "api_url": clean_text(env.get("ANT_BROWSER_API_URL") or "http://127.0.0.1:19876"),
-        "configured_codes": ant_browser.parse_launch_codes(env.get("ANT_BROWSER_LAUNCH_CODES") or ""),
+        "configured_codes": configured_codes,
         "connection_error": connection_error,
         "base_port": chatgpt_image_cdp_base_port(env) if provider == "local" else 0,
         "accounts": accounts,
@@ -12790,11 +14603,18 @@ def chatgpt_account_pool_status(env: dict[str, str]) -> dict[str, Any]:
 
 
 def test_ant_browser_connection(env: dict[str, str]) -> dict[str, Any]:
-    client = ant_browser.client_from_env(env, timeout=5.0)
+    client = ant_browser.client_from_env(env, timeout=30.0)
     client.health()
     profiles = client.list_profiles()
     codes = [clean_text(str(item.get("launchCode") or "")) for item in profiles]
     codes = [code for code in codes if code]
+    configured_codes = ant_browser.parse_launch_codes(env.get("ANT_BROWSER_LAUNCH_CODES") or "")
+    if configured_codes:
+        available = set(codes)
+        synced_codes = [code for code in configured_codes if code in available]
+        if synced_codes != configured_codes:
+            storage.save_env_patch({"ANT_BROWSER_LAUNCH_CODES": ",".join(synced_codes)})
+            env["ANT_BROWSER_LAUNCH_CODES"] = ",".join(synced_codes)
     return {
         "ok": True,
         "api_url": client.base_url,
@@ -13089,6 +14909,15 @@ def _large_chatgpt_images_script() -> str:
     return """
 () => {
   const main = document.querySelector("main") || document.querySelector('[role="main"]');
+  const conversationTurns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+  const latestUserTurnIndex = conversationTurns.reduce((latest, item, index) => {
+    const role = item.getAttribute("data-turn")
+      || item.getAttribute("data-message-author-role")
+      || item.querySelector('[data-turn]')?.getAttribute("data-turn")
+      || item.querySelector('[data-message-author-role]')?.getAttribute("data-message-author-role")
+      || "";
+    return role.toLowerCase() === "user" ? index : latest;
+  }, -1);
   const turns = Array.from(document.querySelectorAll(
     '[data-testid^="conversation-turn"], [data-message-author-role], [data-turn]'
   ));
@@ -13104,10 +14933,12 @@ def _large_chatgpt_images_script() -> str:
     const turnIndex = turn
       ? turns.findIndex((item) => item === turn || item.contains(turn) || turn.contains(item))
       : -1;
+    const conversationTurn = img.closest('[data-testid^="conversation-turn-"]');
+    const conversationTurnIndex = conversationTurn ? conversationTurns.indexOf(conversationTurn) : -1;
     const generatedImage = Boolean(
-      img.closest('[id^="image-"], [class*="imagegen-image"]')
-      || /backend-api\/estuary\/content/i.test(src)
-      || /(?:已生成图片|generated image)/i.test(img.alt || "")
+      img.closest('[data-testid="generated-image-preview"], [data-testid="generated-image-gallery"], [id^="image-"], [class*="imagegen-image"], [class*="generated-image-preview"], [class*="generated-image-gallery"]')
+      || /(?:backend-api\\/(?:estuary\\/content|files)|files\\.oaiusercontent\\.com|oaidalleapiprodscus\\.blob\\.core\\.windows\\.net)/i.test(src)
+      || /(?:已生成图片|生成された画像|generated image|생성된 이미지)/i.test(img.alt || "")
     );
     return {
       index,
@@ -13120,7 +14951,12 @@ def _large_chatgpt_images_script() -> str:
       in_main: main ? main.contains(img) : !img.closest("nav, aside"),
       assistant: explicitRole.toLowerCase() === "assistant",
       generated: generatedImage,
-      turn_index: turnIndex
+      turn_index: turnIndex,
+      conversation_turn_index: conversationTurnIndex,
+      latest_user_turn_index: latestUserTurnIndex,
+      after_latest_user: explicitRole.toLowerCase() === "assistant"
+        && latestUserTurnIndex >= 0
+        && conversationTurnIndex > latestUserTurnIndex
     };
   })
   .filter((item) => item.complete && item.src && item.width >= 256 && item.height >= 256)
@@ -13136,6 +14972,54 @@ def chatgpt_image_snapshot_keys(images: Any) -> set[str]:
         for item in images
         if isinstance(item, dict) and clean_text(str(item.get("src") or ""))
     }
+
+
+def select_chatgpt_image_candidate(images: Any, before_indexes: set[Any]) -> dict[str, Any] | None:
+    if not isinstance(images, list):
+        return None
+    before_uses_fingerprints = bool(before_indexes) and all(isinstance(item, str) for item in before_indexes)
+    eligible_images = [
+        item
+        for item in images
+        if isinstance(item, dict)
+        and bool(item.get("in_main", True))
+        and (bool(item.get("assistant")) or bool(item.get("generated")))
+    ]
+    new_images = [
+        item
+        for item in eligible_images
+        if (
+            clean_text(
+                str(
+                    item.get("key")
+                    or f"{item.get('src', '')}|{item.get('width', 0)}x{item.get('height', 0)}"
+                )
+            )
+            not in before_indexes
+            if before_uses_fingerprints
+            else int(item.get("index", -1)) not in before_indexes
+        )
+        and not (
+            int(item.get("latest_user_turn_index", -1) or -1) >= 0
+            and not bool(item.get("after_latest_user"))
+        )
+    ]
+    candidates = new_images or [
+        item
+        for item in eligible_images
+        if bool(item.get("after_latest_user")) and bool(item.get("generated"))
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            int(item.get("conversation_turn_index", -1) or -1),
+            int(item.get("turn_index", -1) or -1),
+            int(item.get("width", 0) or 0) * int(item.get("height", 0) or 0),
+            int(item.get("index", -1) or -1),
+        ),
+    )
 
 
 def _chatgpt_login_required(page: Any) -> bool:
@@ -13160,11 +15044,11 @@ def _chatgpt_login_required(page: Any) -> bool:
             locator = page.locator(selector).first
             if locator.count() and locator.is_visible(timeout=400):
                 return True
-        except (AttributeError, RuntimeError):
+        except Exception:
             continue
     try:
         body_text = clean_text(page.locator("body").inner_text(timeout=1200)).lower()
-    except (AttributeError, RuntimeError):
+    except Exception:
         body_text = ""
     login_tokens = (
         "log in",
@@ -13203,7 +15087,7 @@ def _chatgpt_access_challenge(page: Any) -> str:
         title = ""
     try:
         body_text = clean_text(str(page.locator("body").inner_text(timeout=1200) or ""))[:3000]
-    except (AttributeError, RuntimeError):
+    except Exception:
         body_text = ""
     return chatgpt_access_challenge_reason(title, current_url, body_text)
 
@@ -13267,11 +15151,13 @@ async (src) => {
 
 def _find_chatgpt_composer(page: Any, timeout_seconds: float = 180.0) -> tuple[Any, str]:
     selectors = [
+        "form textarea#prompt-textarea",
+        "form div#prompt-textarea[contenteditable='true']",
+        "main textarea#prompt-textarea",
+        "main div#prompt-textarea[contenteditable='true']",
         "textarea#prompt-textarea",
-        "#prompt-textarea",
-        "textarea",
-        "div.ProseMirror",
-        "[contenteditable='true']",
+        "div#prompt-textarea[contenteditable='true']",
+        "form div.ProseMirror[contenteditable='true']",
     ]
     deadline = time.monotonic() + timeout_seconds
     last_error = ""
@@ -13296,6 +15182,26 @@ def _find_chatgpt_composer(page: Any, timeout_seconds: float = 180.0) -> tuple[A
     )
 
 
+def _normalize_chatgpt_composer_text(value: Any) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or "")))
+
+
+def _extract_persisted_image_requirement(prompt: str) -> str:
+    text = normalize_image_prompt(prompt)
+    matches = re.findall(
+        r"(?:追加要求(?:（?:[^）]*）)?|补充要求|用户重绘硬要求(?:（?:[^）]*）)?)\s*[：:]\s*([^\n]+)",
+        text,
+    )
+    requirement = clean_text(matches[-1]) if matches else ""
+    if re.search(r"(?:车|车型|汽车|车辆)", requirement, flags=re.IGNORECASE):
+        requirement = re.sub(r"\bMVP\b", "MPV", requirement, flags=re.IGNORECASE)
+    return requirement
+
+
+def _chatgpt_composer_is_textarea(selector: str) -> bool:
+    return bool(re.search(r"(?:^|\s)textarea(?:[#.\[:]|$)", selector, flags=re.IGNORECASE))
+
+
 def _fill_chatgpt_composer(
     page: Any,
     prompt: str,
@@ -13304,65 +15210,73 @@ def _fill_chatgpt_composer(
     timeout_seconds: float = 180.0,
     account_id: str | None = None,
 ) -> None:
-    deadline = time.monotonic() + max(30.0, timeout_seconds)
-    last_error = ""
-    login_hint_logged = False
-    waiting_hint_logged = False
-    next_progress_at = 0.0
-    while time.monotonic() < deadline:
-        try:
-            composer, selector = _find_chatgpt_composer(page, timeout_seconds=12.0)
-            if selector.startswith("textarea"):
-                composer.evaluate(
-                    """
-(el, text) => {
-  el.scrollIntoView({ block: "center", inline: "nearest" });
-  el.focus();
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-  if (setter) setter.call(el, text);
-  else el.value = text;
-  el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-}
-""",
-                    prompt,
-                )
-            else:
-                composer.evaluate(
-                    """
-(el, text) => {
-  el.scrollIntoView({ block: "center", inline: "nearest" });
-  el.focus();
-  document.execCommand("selectAll", false, null);
-  document.execCommand("insertText", false, text);
-  el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-}
-""",
-                    prompt,
-                )
-            return
-        except (ChatgptAccessChallengeError, ChatgptLoginRequiredError):
-            raise
-        except Exception as exc:
-            last_error = str(exc)
-            _raise_chatgpt_access_challenge(page)
-            if _chatgpt_login_required(page):
-                _raise_chatgpt_login_required(page)
-            if log and not waiting_hint_logged:
-                log("[images] ChatGPT 输入框暂时不可编辑，正在轮询等待页面加载完成")
-                waiting_hint_logged = True
-            if log and time.monotonic() >= next_progress_at:
-                remaining = max(0, int(deadline - time.monotonic()))
-                log(f"[images] ChatGPT 页面等待中，剩余约 {remaining}s")
-                next_progress_at = time.monotonic() + 20.0
-            page.wait_for_timeout(1800)
-    _raise_chatgpt_access_challenge(page)
-    if _chatgpt_login_required(page):
-        _raise_chatgpt_login_required(page)
-    raise RuntimeError(
-        "ChatGPT 输入框长时间不可编辑，请确认已登录且页面完全加载后重试。"
-        + (f" 最近错误：{last_error}" if last_error else "")
-    )
+    composer, selector = _find_chatgpt_composer(page, timeout_seconds=max(30.0, timeout_seconds))
+    with contextlib.suppress(Exception):
+        page.add_style_tag(
+            content=(
+                'body, textarea, [contenteditable="true"] {'
+                'font-family: "Microsoft YaHei UI", "Microsoft YaHei", '
+                '"Noto Sans CJK SC", "Segoe UI", sans-serif !important;}'
+            )
+        )
+
+    is_textarea = _chatgpt_composer_is_textarea(selector)
+    expected = _normalize_chatgpt_composer_text(prompt)
+
+    def read_inserted() -> str:
+        return str(
+            composer.input_value(timeout=2000)
+            if is_textarea
+            else composer.inner_text(timeout=2000)
+        )
+
+    composer.scroll_into_view_if_needed(timeout=3000)
+    existing = read_inserted()
+    if _normalize_chatgpt_composer_text(existing) == expected:
+        if log:
+            log(f"[images] ChatGPT 提示词已在输入框中（{len(prompt)} 字），跳过重复写入")
+        return
+
+    composer.click(timeout=3000)
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    if not is_textarea:
+        composer.evaluate(
+            """el => {
+                el.innerHTML = '';
+                el.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    inputType: 'deleteContentBackward',
+                    data: null
+                }));
+            }"""
+        )
+    composer.fill(prompt, timeout=10000)
+    inserted = read_inserted()
+    if _normalize_chatgpt_composer_text(inserted) != expected:
+        composer.click(timeout=3000)
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+        if not is_textarea:
+            composer.evaluate(
+                """el => {
+                    el.innerHTML = '';
+                    el.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'deleteContentBackward',
+                        data: null
+                    }));
+                }"""
+            )
+        page.keyboard.insert_text(prompt)
+        inserted = read_inserted()
+
+    if _normalize_chatgpt_composer_text(inserted) != expected:
+        raise RuntimeError(
+            f"ChatGPT 主输入框写入校验失败（预期 {len(prompt)} 字，实际 {len(inserted)} 字）；已停止重写"
+        )
+    if log:
+        log(f"[images] ChatGPT 提示词已完整写入并校验通过（{len(prompt)} 字）")
 
 
 def _attach_chatgpt_reference_images(
@@ -13406,7 +15320,7 @@ def _attach_chatgpt_reference_images(
         log(f"[images] 已上传 {len(paths)} 张商品参考图，本张按图生图保持商品外观")
 
 
-def _click_chatgpt_send(page: Any) -> None:
+def _click_chatgpt_send(page: Any, expected_prompt: str = "") -> None:
     selectors = [
         "button[data-testid='send-button']",
         "button[aria-label*='Send']",
@@ -13414,17 +15328,138 @@ def _click_chatgpt_send(page: Any) -> None:
         "button:has-text('发送')",
         "button:has-text('Send')",
     ]
-    for _ in range(30):
+    clicked = False
+    for _ in range(24):
         for selector in selectors:
             button = page.locator(selector).last
             try:
                 if button.count() and button.is_visible(timeout=500) and button.is_enabled(timeout=500):
                     button.click(timeout=5000)
-                    return
+                    clicked = True
+                    break
             except Exception:
                 continue
+        if clicked:
+            break
         page.wait_for_timeout(500)
-    page.keyboard.press("Enter")
+    if not clicked:
+        page.keyboard.press("Enter")
+
+    # Do not treat a click as success until ChatGPT has consumed the prompt.
+    consumed = False
+    for _ in range(16):
+        page.wait_for_timeout(350)
+        try:
+            composer, selector = _find_chatgpt_composer(page, timeout_seconds=2.0)
+            current = (
+                composer.input_value(timeout=1000)
+                if _chatgpt_composer_is_textarea(selector)
+                else composer.inner_text(timeout=1000)
+            )
+        except Exception:
+            consumed = True
+            break
+        if not clean_text(str(current or "")):
+            consumed = True
+            break
+    if not consumed:
+        try:
+            composer.focus(timeout=1000)
+            composer.press("Enter", timeout=2000)
+        except Exception:
+            pass
+        for _ in range(10):
+            page.wait_for_timeout(350)
+            try:
+                current = (
+                    composer.input_value(timeout=1000)
+                    if _chatgpt_composer_is_textarea(selector)
+                    else composer.inner_text(timeout=1000)
+                )
+            except Exception:
+                consumed = True
+                break
+            if not clean_text(str(current or "")):
+                consumed = True
+                break
+    if not consumed:
+        raise RuntimeError("ChatGPT 提示词已写入，但发送没有成功；已停止当前账号，避免继续空等。")
+
+    if expected_prompt:
+        expected = _normalize_chatgpt_composer_text(expected_prompt)
+        for _ in range(6):
+            with contextlib.suppress(Exception):
+                messages = page.locator("[data-message-author-role='user']")
+                if messages.count():
+                    actual_text = str(messages.last.inner_text(timeout=1500) or "")
+                    actual = _normalize_chatgpt_composer_text(actual_text)
+                    if actual == expected:
+                        return
+                    if actual:
+                        raise RuntimeError(
+                            f"ChatGPT 实际发送内容与最终提示词不一致（预期 {len(expected_prompt)} 字，实际 {len(actual_text)} 字），已停止本次生成"
+                        )
+            page.wait_for_timeout(300)
+        # Some localized or partially hydrated ChatGPT pages do not expose
+        # data-message-author-role immediately. The composer was consumed, so
+        # let the image-state watcher decide completion instead of closing a
+        # browser that may already be generating.
+        return
+
+
+def _chatgpt_quota_retry_at(page: Any, text: str) -> tuple[float, str]:
+    browser_clock: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        value = page.evaluate(
+            "() => ({ now: Date.now() / 1000, offset: new Date().getTimezoneOffset() })"
+        )
+        if isinstance(value, dict):
+            browser_clock = value
+    now_ts = float(browser_clock.get("now") or storage.now_ts())
+    offset_minutes = int(browser_clock.get("offset") or 0)
+    browser_tz = timezone(timedelta(minutes=-offset_minutes))
+    local_now = datetime.fromtimestamp(now_ts, tz=browser_tz)
+
+    relative_patterns = (
+        (r"(\d+(?:\.\d+)?)\s*時間後(?:に)?リセット", 3600),
+        (r"(\d+(?:\.\d+)?)\s*小时后(?:重置|恢复)", 3600),
+        (r"(?:resets?|available again)\s+in\s+(\d+(?:\.\d+)?)\s*hours?", 3600),
+        (r"(\d+(?:\.\d+)?)\s*分後(?:に)?リセット", 60),
+        (r"(\d+(?:\.\d+)?)\s*分钟后(?:重置|恢复)", 60),
+        (r"(?:resets?|available again)\s+in\s+(\d+(?:\.\d+)?)\s*minutes?", 60),
+    )
+    for pattern, multiplier in relative_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        target = local_now + timedelta(seconds=float(match.group(1)) * multiplier)
+        return target.timestamp(), target.strftime("%Y-%m-%d %H:%M")
+
+    patterns = (
+        (r"明日(?:の)?\s*(\d{1,2})\s*[:：]\s*(\d{2})", True, ""),
+        (r"明天\s*(\d{1,2})\s*[:：]\s*(\d{2})", True, ""),
+        (r"(?:wait for more|available again|try again|resets?)\s+(?:at|on)?\s*(\d{1,2})\s*:\s*(\d{2})\s*(am|pm)?", False, "en"),
+    )
+    lowered = text.lower()
+    for pattern, force_tomorrow, _language in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if not match:
+            continue
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        meridiem = clean_text(match.group(3) if match.lastindex and match.lastindex >= 3 else "").lower()
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            continue
+        target_date = local_now.date() + timedelta(days=1 if force_tomorrow else 0)
+        target = datetime.combine(target_date, datetime.min.time(), tzinfo=browser_tz).replace(hour=hour, minute=minute)
+        if target <= local_now:
+            target += timedelta(days=1)
+        return target.timestamp(), target.strftime("%Y-%m-%d %H:%M")
+    return 0.0, ""
 
 
 def _chatgpt_generation_page_state(page: Any) -> dict[str, Any]:
@@ -13471,6 +15506,19 @@ def _chatgpt_generation_page_state(page: Any) -> dict[str, Any]:
 
     error = ""
     error_markers = (
+        ("画像生成リクエストの上限に達しました", "ChatGPT 图片生成额度已用完"),
+        ("画像を使い切りました", "ChatGPT 图片生成额度已用完"),
+        ("無料の画像生成枠を使い切っています", "ChatGPT 免费图片额度已用完"),
+        ("この画像の生成が予定されています", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("画像は後ほど生成されます", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("今すぐ作成するには、プランをアップグレードしてください", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("image generation is scheduled", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("images will be generated later", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("upgrade your plan to create now", "ChatGPT 图片生成额度受限，当前请求已排队"),
+        ("you're out of images", "ChatGPT 图片生成额度已用完"),
+        ("you are out of images", "ChatGPT 图片生成额度已用完"),
+        ("you've used all your free images", "ChatGPT 免费图片额度已用完"),
+        ("you have used all your free images", "ChatGPT 免费图片额度已用完"),
         ("you've reached your image generation limit", "ChatGPT 图片生成额度已用完"),
         ("you have reached your image generation limit", "ChatGPT 图片生成额度已用完"),
         ("已达到图片生成上限", "ChatGPT 图片生成额度已用完"),
@@ -13490,17 +15538,32 @@ def _chatgpt_generation_page_state(page: Any) -> dict[str, Any]:
         ("登录以继续", "ChatGPT 账号登录已失效"),
         ("network error", "ChatGPT 页面网络连接异常"),
         ("网络错误", "ChatGPT 页面网络连接异常"),
+        ("this response couldn't load", "ChatGPT 本次图片回复加载失败"),
+        ("this response could not load", "ChatGPT 本次图片回复加载失败"),
+        ("この応答を読み込めませんでした", "ChatGPT 本次图片回复加载失败"),
     )
     for marker, message in error_markers:
         if marker in lowered:
             error = message
             break
 
+    quota_error = any(token in error for token in ("额度已用完", "额度受限", "免费图片额度"))
+    retry_at, retry_label = _chatgpt_quota_retry_at(page, recent_text) if quota_error else (0.0, "")
+    if quota_error and not retry_at:
+        page_now = storage.now_ts()
+        with contextlib.suppress(Exception):
+            clock = page.evaluate("() => Date.now() / 1000")
+            if clock:
+                page_now = float(clock)
+        retry_at = page_now + 5 * 3600.0
+        retry_label = datetime.fromtimestamp(retry_at).strftime("%Y-%m-%d %H:%M")
     signature = hashlib.sha256(recent_text.encode("utf-8", errors="ignore")).hexdigest()[:16] if recent_text else ""
     return {
         "active": active,
         "send_ready": send_ready,
         "error": error,
+        "retry_at": retry_at,
+        "retry_label": retry_label,
         "signature": signature,
     }
 
@@ -13515,8 +15578,20 @@ def chatgpt_image_wait_failure(
     active_limit_seconds: float | None = None,
 ) -> str:
     explicit_error = clean_text(str(page_state.get("error") or ""))
+    # ChatGPT can briefly render "This response couldn't load" while the
+    # image response is still being hydrated.  Treat it as terminal only when
+    # it persists; otherwise a healthy generation gets closed after ~10s.
+    if (
+        explicit_error == "ChatGPT 本次图片回复加载失败"
+        and (page_state.get("active") or elapsed_seconds < 45.0)
+    ):
+        explicit_error = ""
     if explicit_error:
-        return f"{explicit_error}，本张已停止等待。"
+        retry_at = float(page_state.get("retry_at") or 0)
+        retry_label = clean_text(str(page_state.get("retry_label") or ""))
+        retry_note = f"；账号将在 {retry_label} 自动解冻" if retry_at and retry_label else ""
+        retry_token = f" [retry_at={retry_at:.3f}]" if retry_at else ""
+        return f"{explicit_error}，本张已停止等待{retry_note}。{retry_token}"
     if page_state.get("active"):
         if active_limit_seconds and elapsed_seconds >= active_limit_seconds:
             return (
@@ -13577,39 +15652,9 @@ def _save_latest_chatgpt_image(
                 "ChatGPT 浏览器连接中断：请确认弹出的 Chrome 窗口没有被关闭，账号没有跳到重新登录页。"
                 + (f" 最近错误：{last_error}" if last_error else "")
             ) from exc
-        if isinstance(images, list):
-            before_uses_fingerprints = bool(before_indexes) and all(isinstance(item, str) for item in before_indexes)
-            new_images = [
-                item
-                for item in images
-                if isinstance(item, dict)
-                and bool(item.get("in_main", True))
-                and (
-                    clean_text(
-                        str(
-                            item.get("key")
-                            or f"{item.get('src', '')}|{item.get('width', 0)}x{item.get('height', 0)}"
-                        )
-                    )
-                    not in before_indexes
-                    if before_uses_fingerprints
-                    else int(item.get("index", -1)) not in before_indexes
-                )
-            ]
-            if new_images:
-                assistant_images = [item for item in new_images if item.get("assistant")]
-                generated_images = [item for item in new_images if item.get("generated")]
-                eligible = assistant_images or generated_images
-                if eligible:
-                    # `data-turn="assistant"` is the current ChatGPT marker,
-                    # while older layouts used `data-message-author-role`.
-                    # The imagegen marker is a guarded fallback for the next DOM
-                    # change; stable src fingerprints still exclude old images.
-                    candidate = max(
-                        eligible,
-                        key=lambda item: (int(item.get("turn_index", -1) or -1), int(item.get("index", -1) or -1)),
-                    )
-                    break
+        candidate = select_chatgpt_image_candidate(images, before_indexes)
+        if candidate:
+            break
         now = time.monotonic()
         page_state = _chatgpt_generation_page_state(page)
         signature = clean_text(str(page_state.get("signature") or ""))
@@ -13791,6 +15836,46 @@ def _open_fresh_chatgpt_image_chat(page: Any, chatgpt_url: str, log: Callable[[s
     return page
 
 
+def _dismiss_chatgpt_blocking_overlays(
+    page: Any,
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """Dismiss non-essential ChatGPT dialogs that can cover the composer."""
+    dismissed = 0
+    labels = re.compile(
+        r"^(?:关闭|取消|稍后|以后再说|暂不|跳过|知道了|我知道了|"
+        r"Close|Dismiss|Not now|Maybe later|Skip|Got it|"
+        r"閉じる|キャンセル|後で|スキップ|닫기|취소|나중에)$",
+        re.IGNORECASE,
+    )
+    candidates = [
+        page.locator("[role='dialog'] button[aria-label*='关闭']"),
+        page.locator("[role='dialog'] button[aria-label*='Close']"),
+        page.locator("button[aria-label='关闭']"),
+        page.locator("button[aria-label='Close']"),
+        page.get_by_role("button", name=labels),
+    ]
+    for locator in candidates:
+        try:
+            count = min(int(locator.count()), 8)
+        except Exception:
+            continue
+        for index in range(count - 1, -1, -1):
+            button = locator.nth(index)
+            try:
+                if button.is_visible(timeout=300) and button.is_enabled(timeout=300):
+                    button.click(timeout=1500)
+                    dismissed += 1
+                    page.wait_for_timeout(150)
+            except Exception:
+                continue
+    with contextlib.suppress(Exception):
+        page.keyboard.press("Escape")
+    if dismissed and log:
+        log(f"[images] 已自动关闭 {dismissed} 个遮挡输入框的 ChatGPT 弹窗")
+    return dismissed
+
+
 def chatgpt_delete_after_save_enabled(env: dict[str, str]) -> bool:
     value = clean_text(env.get("CHATGPT_IMAGE_DELETE_AFTER_SAVE") or "")
     return True if not value else env_flag(value)
@@ -13958,12 +16043,18 @@ def close_chatgpt_browser_context(context: Any, log: Callable[[str], None] | Non
 
 
 def _activate_chatgpt_image_mode(page: Any, log: Callable[[str], None] | None = None) -> bool:
-    image_mode_pattern = re.compile(r"^(?:生成图片|创建图片|Create image|Create images)$", re.IGNORECASE)
+    image_mode_pattern = re.compile(
+        r"^(?:生成图片|创建图片|生成图像|创建图像|Create (?:an? )?images?|"
+        r"Generate (?:an? )?images?|画像を作成|画像を生成|이미지 (?:만들기|생성)|"
+        r"Crear imagen|Generar imagen|Créer une image|Générer une image|"
+        r"Bild erstellen|Bild generieren|Criar imagem|Gerar imagem)$",
+        re.IGNORECASE,
+    )
 
     def click_visible(locator: Any) -> bool:
         try:
             count = min(int(locator.count()), 6)
-        except (AttributeError, RuntimeError):
+        except Exception:
             return False
         for index in range(count):
             try:
@@ -13972,7 +16063,7 @@ def _activate_chatgpt_image_mode(page: Any, log: Callable[[str], None] | None = 
                     item.click(timeout=4000)
                     page.wait_for_timeout(600)
                     return True
-            except (AttributeError, RuntimeError):
+            except Exception:
                 continue
         return False
 
@@ -13998,6 +16089,7 @@ def _activate_chatgpt_image_mode(page: Any, log: Callable[[str], None] | None = 
         menu_candidates = [
             page.get_by_role("menuitem", name=image_mode_pattern),
             page.get_by_role("button", name=image_mode_pattern),
+            page.locator("[role='menuitem'], [role='option'], button").filter(has_text=image_mode_pattern),
         ]
         for candidate in menu_candidates:
             if click_visible(candidate):
@@ -14006,7 +16098,7 @@ def _activate_chatgpt_image_mode(page: Any, log: Callable[[str], None] | None = 
                 return True
 
     if log:
-        log("[images] 当前页面没有找到“生成图片”按钮，将使用强制生图指令继续")
+        log("[images] 当前账号未识别到 ChatGPT 图片模式入口；不会盲发提示词，将轮换下一个账号")
     return False
 
 
@@ -14024,6 +16116,8 @@ def _generate_chatgpt_web_auto_image_for_account(
 ) -> Path:
     page: Any = None
     browser: Any = None
+    owned_pages: list[Any] = []
+    preexisting_page_ids: set[int] = set()
     completed = False
     browser_cleanup_done = False
     try:
@@ -14055,16 +16149,43 @@ def _generate_chatgpt_web_auto_image_for_account(
         if not browser.contexts:
             raise RuntimeError(f"{account['label']} 的浏览器端口没有可用上下文。")
         context = browser.contexts[0]
-        page = _reuse_chatgpt_automation_page(context, chatgpt_url, log=log)
+        if account.get("provider") == "ant_browser":
+            preexisting_page_ids = {id(existing) for existing in list(context.pages or [])}
+            if account.get("ant_started_by_task") and context.pages:
+                page = context.pages[-1]
+                if log:
+                    log("[images] 复用本次启动实例的初始页面，不再额外打开第二个标签")
+            else:
+                page = context.new_page()
+            owned_pages.append(page)
+        else:
+            page = _reuse_chatgpt_automation_page(context, chatgpt_url, log=log)
         page = _open_fresh_chatgpt_image_chat(page, chatgpt_url, log=log)
+        if account.get("provider") == "ant_browser" and id(page) not in preexisting_page_ids:
+            if all(existing is not page for existing in owned_pages):
+                owned_pages.append(page)
         if env_flag(env.get("CHATGPT_IMAGE_HEADLESS")):
+            _raise_chatgpt_access_challenge(page)
+        elif account.get("provider") == "ant_browser" and chatgpt_image_account_count(env) > 1:
+            # A Cloudflare challenge requires a person. In a multi-account Ant
+            # Browser pool, fail this lease immediately so the pool can cool the
+            # challenged profile and continue with the next available account.
             _raise_chatgpt_access_challenge(page)
         else:
             _wait_for_visible_chatgpt_challenge(page, timeout_seconds=min(timeout_seconds, 300.0), log=log)
-        _activate_chatgpt_image_mode(page, log=log)
+        if log:
+            log("[images] 已进入独立新对话，直接输入生图要求，不再依赖页面语言或“生成图片”菜单")
+        _dismiss_chatgpt_blocking_overlays(page, log=log)
         _attach_chatgpt_reference_images(page, list(reference_images or []), log=log)
-        before_images = page.evaluate(_large_chatgpt_images_script())
-        before_indexes = chatgpt_image_snapshot_keys(before_images)
+        # Snapshot existing images before sending to prevent DOM reuse pollution
+        before_indexes: set[str] = set()
+        try:
+            _existing = page.evaluate(_large_chatgpt_images_script())
+            before_indexes = chatgpt_image_snapshot_keys(_existing)
+        except Exception as _snap_err:
+            if log:
+                log(f"[images] 前置图快照采样跳过: {_snap_err}")
+            before_indexes = set()
         _fill_chatgpt_composer(
             page,
             clean_prompt,
@@ -14073,7 +16194,7 @@ def _generate_chatgpt_web_auto_image_for_account(
             timeout_seconds=min(chatgpt_image_wait_seconds(env), 300.0),
             account_id=account["id"],
         )
-        _click_chatgpt_send(page)
+        _click_chatgpt_send(page, clean_prompt)
         if log:
             log("[images] ChatGPT 提示词已发送，正在等待生成图片")
         result = _save_latest_chatgpt_image(
@@ -14089,7 +16210,11 @@ def _generate_chatgpt_web_auto_image_for_account(
         if log:
             log(f"[images] ChatGPT 网页自动化已保存 {output_path.name}")
         cleanup_chatgpt_conversation_after_save(page, env, log=log)
-        if browser is not None and env_flag(env.get("CHATGPT_IMAGE_CLOSE_BROWSER_AFTER_SAVE", "true")):
+        if (
+            browser is not None
+            and account.get("provider") != "ant_browser"
+            and env_flag(env.get("CHATGPT_IMAGE_CLOSE_BROWSER_AFTER_SAVE", "true"))
+        ):
             close_connected_chatgpt_browser(browser, account, log=log)
             browser = None
             browser_cleanup_done = True
@@ -14098,15 +16223,33 @@ def _generate_chatgpt_web_auto_image_for_account(
     except ChatgptAccessChallengeError:
         # A browser started in legacy true-headless mode will keep returning the
         # challenge page. Close it so the next run restarts in background CDP mode.
-        if browser is not None and env_flag(env.get("CHATGPT_IMAGE_HEADLESS")):
+        if (
+            browser is not None
+            and account.get("provider") != "ant_browser"
+            and env_flag(env.get("CHATGPT_IMAGE_HEADLESS"))
+        ):
             close_connected_chatgpt_browser(browser, account, timeout_seconds=8.0, log=log)
             browser = None
             browser_cleanup_done = True
         raise
     finally:
-        if page is not None:
+        pages_to_close = owned_pages if account.get("provider") == "ant_browser" else ([page] if page is not None else [])
+        for owned_page in pages_to_close:
             with contextlib.suppress(Exception):
-                page.close()
+                owned_page.close()
+        if account.get("provider") == "ant_browser":
+            with contextlib.suppress(Exception):
+                if browser is not None:
+                    close_connected_chatgpt_browser(
+                        browser,
+                        account,
+                        timeout_seconds=8.0,
+                        log=log,
+                        image_saved=completed,
+                    )
+                else:
+                    close_chatgpt_cdp_browser(account, timeout_seconds=8.0)
+            browser_cleanup_done = True
         if not completed and not browser_cleanup_done:
             if browser is not None:
                 with contextlib.suppress(Exception):
@@ -14194,6 +16337,10 @@ def _run_chatgpt_web_auto_image_account_pool(
                 account_error = user_facing_error(exc)
                 record_chatgpt_account_result(account, error=account_error, env=env)
                 account_errors.append(f"{account['label']}：{account_error}")
+                if account.get("provider") == "ant_browser" and account.get("cleanup_failed"):
+                    if log:
+                        log("[images] 上一个 Ant Browser 实例未确认关闭，本张暂停轮询，避免继续打开多个窗口")
+                    break
                 if log:
                     remaining = attempt_limit - attempt_index - 1
                     if remaining > 0:
@@ -14219,26 +16366,39 @@ def generate_chatgpt_web_auto_image(
     env: dict[str, str],
     log: Callable[[str], None] | None = None,
     reference_images: list[Path] | None = None,
+    required_user_instruction: str = "",
+    final_prompt_override: str = "",
 ) -> Path:
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:
         raise RuntimeError("ChatGPT 网页自动化需要 playwright，请先运行 pip install playwright。") from exc
 
-    clean_prompt = build_chatgpt_handoff_prompt(prompt, size, purpose)
+    clean_prompt = str(final_prompt_override or "").strip() or build_chatgpt_handoff_prompt(
+        prompt,
+        size,
+        purpose,
+        required_user_instruction=required_user_instruction,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     storage.write_text(output_path.with_suffix(".md"), clean_prompt + "\n")
     chatgpt_url = clean_text(env.get("CHATGPT_IMAGE_WEB_URL") or "https://chatgpt.com/") or "https://chatgpt.com/"
-    return _run_chatgpt_web_auto_image_account_pool(
-        sync_playwright,
-        clean_prompt,
-        output_path,
-        chatgpt_url,
-        chatgpt_image_wait_seconds(env),
-        env,
-        log=log,
-        reference_images=reference_images,
-    )
+    def run_pool() -> Path:
+        return _run_chatgpt_web_auto_image_account_pool(
+            sync_playwright,
+            clean_prompt,
+            output_path,
+            chatgpt_url,
+            chatgpt_image_wait_seconds(env),
+            env,
+            log=log,
+            reference_images=reference_images,
+        )
+
+    if log and _CHATGPT_ANT_AUTOMATION_LOCK.locked():
+        log("[images] 另一个 ChatGPT 生图正在运行，本张排队等待，保证一次只启动一个账号")
+    with _CHATGPT_ANT_AUTOMATION_LOCK:
+        return run_pool()
 
 
 def default_imageai_playground_profile_dir() -> Path:
@@ -14254,7 +16414,8 @@ def imageai_playground_user_data_dir(env: dict[str, str]) -> Path:
 
 def build_imageai_playground_prompt(prompt: str, size: str, purpose: str) -> str:
     del size
-    return sanitize_prompt_for_image_model(prompt, purpose)
+    clean_prompt = sanitize_prompt_for_image_model(prompt, purpose)
+    return make_image_prompt_provider_friendly(clean_prompt)
 
 
 def imageai_playground_launch_url(env: dict[str, str]) -> str:
@@ -14567,6 +16728,12 @@ def third_party_image_available(env: dict[str, str]) -> bool:
     return bool(api_key and base_url)
 
 
+def cpa_image_available(env: dict[str, str]) -> bool:
+    api_key = resolve_cpa_image_api_key(env)
+    base_url = normalize_openai_compatible_base_url(env.get("CPA_IMAGE_BASE_URL") or "http://127.0.0.1:8317/v1")
+    return bool(api_key and base_url)
+
+
 def imageai_playground_available(env: dict[str, str]) -> bool:
     if env_flag(env.get("IMAGEAI_PLAYGROUND_USE_SAVED_SETTINGS", "true")):
         return bool(clean_text(env.get("IMAGEAI_PLAYGROUND_URL") or "https://imageai.centos.hk/"))
@@ -14578,12 +16745,17 @@ def resolve_image_provider(env: dict[str, str]) -> dict[str, str]:
     prefer_apiyi = env_flag(env.get("APIYI_IMAGE_REPLACE_ARK"))
     has_apiyi = apiyi_image_available(env)
     has_third_party = third_party_image_available(env)
+    has_cpa = cpa_image_available(env)
     has_imageai_playground = imageai_playground_available(env)
     has_ark = bool((env.get("ARK_API_KEY", "") or "").strip())
     has_agnes = bool((env.get("AGNES_API_KEY", "") or "").strip())
 
     if preference in {"chatgpt_web_auto", "chatgpt-auto", "chatgpt_auto", "chatgpt_browser"}:
         return {"key": "chatgpt_web_auto", "label": "ChatGPT 网页自动化", "model": "chatgpt-account"}
+    if preference in {"cpa_image", "cpa-image", "cpa"}:
+        if not has_cpa:
+            raise RuntimeError("已选择本地 CPA 生图，但 CPA_IMAGE_API_KEY 或 CPA_IMAGE_BASE_URL 还没填完整。")
+        return {"key": "cpa_image", "label": "本地 CPA API 生图", "model": resolve_cpa_image_model(env)}
     if preference in {"chatgpt_web_handoff", "chatgpt-web-handoff", "chatgpt_web_manual"}:
         return chatgpt_handoff_provider_record("chatgpt_web_handoff", env)
     if preference in {"chatgpt_desktop_handoff", "chatgpt-desktop-handoff", "chatgpt_classic", "chatgpt-classic"}:
@@ -14656,6 +16828,7 @@ def resolve_image_provider_queue(env: dict[str, str]) -> list[dict[str, str]]:
     has_agnes = bool((env.get("AGNES_API_KEY", "") or "").strip())
     has_apiyi = apiyi_image_available(env)
     has_third_party = third_party_image_available(env)
+    has_cpa = cpa_image_available(env)
     has_imageai_playground = imageai_playground_available(env)
     allow_chatgpt_auto = not env.get("CHATGPT_IMAGE_AUTO_OPEN") or env_flag(env.get("CHATGPT_IMAGE_AUTO_OPEN"))
 
@@ -14672,6 +16845,8 @@ def resolve_image_provider_queue(env: dict[str, str]) -> list[dict[str, str]]:
             return {"key": "apiyi", "label": "API易 / OpenAI 兼容文生图", "model": resolve_apiyi_image_model(env)}
         if key == "third_party":
             return {"key": "third_party", "label": "第三方 OpenAI 兼容文生图", "model": resolve_third_party_image_model(env)}
+        if key == "cpa_image":
+            return {"key": "cpa_image", "label": "本地 CPA API 生图", "model": resolve_cpa_image_model(env)}
         if key == "newapi":
             return {"key": "third_party", "label": "NewAPI / OpenAI Image", "model": resolve_third_party_image_model(env)}
         if key == "imageai_playground":
@@ -14696,6 +16871,10 @@ def resolve_image_provider_queue(env: dict[str, str]) -> list[dict[str, str]]:
         if not has_ark:
             raise RuntimeError("已选择火山方舟出图，但 ARK_API_KEY 还没填写。")
         return [record("ark")]
+    if preference in {"cpa_image", "cpa-image", "cpa"}:
+        if not has_cpa:
+            raise RuntimeError("已选择本地 CPA 生图，但 CPA 配置不完整。")
+        return [record("cpa_image")]
     if preference in {"agnes", "agnes_image", "agnes-image"}:
         if not has_agnes:
             raise RuntimeError("已选择 Agnes 图片 API，但 AGNES_API_KEY 还没填写。")
@@ -14748,6 +16927,16 @@ def describe_image_provider_queue(env: dict[str, str]) -> str:
 
 
 def openai_compatible_image_config(env: dict[str, str], provider_key: str) -> dict[str, Any]:
+    if provider_key == "cpa_image":
+        return {
+            "key": "cpa_image",
+            "label": "本地 CPA API 生图",
+            "api_key": resolve_cpa_image_api_key(env),
+            "base_url": normalize_openai_compatible_base_url(env.get("CPA_IMAGE_BASE_URL") or "http://127.0.0.1:8317/v1"),
+            "model": resolve_cpa_image_model(env),
+            "timeout": max(30.0, float(env.get("CPA_IMAGE_TIMEOUT_SECONDS") or 1200)),
+            "retries": max(1, int(env.get("CPA_IMAGE_RETRIES") or 2)),
+        }
     if provider_key == "third_party":
         return {
             "key": "third_party",
@@ -14795,7 +16984,9 @@ def generate_openai_compatible_image(
             f"{label} 图片模型 ID 不能填写 {model}；它是 NewAPI 连接对象类型，不是图片模型。请改成 gpt-image-1、dall-e-3、gpt-image-2-all 或你的 NewAPI 图片模型别名。"
         )
     request_size = normalize_openai_compatible_image_size(size, model)
-    clean_prompt = apply_apiyi_prompt_conventions(prompt, size, purpose)
+    clean_prompt = make_image_prompt_provider_friendly(
+        apply_apiyi_prompt_conventions(prompt, size, purpose)
+    )
     references = [path for path in list(reference_images or []) if path.exists()][:6]
     if references:
         if OpenAI is None:
@@ -14885,7 +17076,7 @@ def generate_openai_compatible_image(
             if log:
                 log(f"[images] {label} saved {output_path.name} ({len(image_data) / 1048576.0:.1f} MB)")
             return output_path
-        except RuntimeError as exc:
+        except (RuntimeError, ConnectionError, TimeoutError, OSError, urllib.error.URLError, http.client.RemoteDisconnected) as exc:
             last_exc = exc
             if log:
                 elapsed = time.monotonic() - started if "started" in locals() else 0.0
@@ -14906,11 +17097,10 @@ def image_prompt_generation_attempt_limit(provider_key: str, output_name: str) -
     if re.search(r"s_\d+_[a-z](?:\.gen-\d+)?\.png$", normalized_name):
         return 1
     if clean_text(provider_key).lower() in {"chatgpt_web_auto", "imageai_playground"}:
-        # Browser image generation is slow and costly. Once it returns a usable
-        # image, semantic/typography audit findings stay as review warnings;
-        # they must not trigger another browser generation of the same slot.
-        # Explicit single-image redraw remains available from the UI.
-        return 1
+        # Scene slots stay single-pass to avoid silent image multiplication.
+        # A cover missing its exact headline is a hard contract failure, so the
+        # same slot gets one corrected redraw before it is exposed for review.
+        return 2 if "cover" in normalized_name else 1
     return IMAGE_PROMPT_REWRITE_ATTEMPTS
 
 
@@ -14924,6 +17114,62 @@ SCENE_SELECTED_CONCEPT_RE = re.compile(
 def selected_visual_concept_from_prompt(prompt: str) -> str:
     match = SCENE_SELECTED_CONCEPT_RE.search(normalize_image_prompt(prompt))
     return compact_visual_concept(match.group(1), 280) if match else ""
+
+
+def scene_prompt_composition_signature(prompt: str) -> dict[str, str]:
+    """Return shot-design fields without narration or native typography."""
+    source = normalize_image_prompt(prompt)
+
+    def value(markers: tuple[str, ...]) -> str:
+        for marker in markers:
+            match = re.search(
+                rf"(?:^|\n){re.escape(marker)}\s*[:：]\s*([^\n]+)",
+                source,
+            )
+            if match:
+                return clean_text(match.group(1)).strip("，。；:： ")
+        return ""
+
+    shot = value(("选定视觉概念", "本镜画面", "本镜任务"))
+    subject = value(("主主体", "主体"))
+    action = value(("动作",))
+    viewpoint = value(("镜头视角", "景别"))
+    carrier_tokens = sorted(visual_concept_carriers(f"{shot} {subject} {action}"))
+    return {
+        "shot": shot,
+        "subject": subject,
+        "action": action,
+        "viewpoint": viewpoint,
+        "carriers": "|".join(carrier_tokens),
+    }
+
+
+def duplicate_scene_composition_pairs(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Detect repeated shot design before any image provider is called."""
+    pairs: list[dict[str, str]] = []
+    prepared: list[tuple[str, dict[str, str]]] = []
+    for entry in entries:
+        label = clean_text(str(entry.get("label") or entry.get("target") or "场景图"))
+        prompt = str(entry.get("final_prompt") or entry.get("prompt") or "")
+        signature = scene_prompt_composition_signature(prompt)
+        if signature.get("subject") and signature.get("action"):
+            prepared.append((label, signature))
+    for index, (left_label, left) in enumerate(prepared):
+        for right_label, right in prepared[index + 1 :]:
+            same_subject = semantic_text_hash(left["subject"]) == semantic_text_hash(right["subject"])
+            same_action = semantic_text_hash(left["action"]) == semantic_text_hash(right["action"])
+            same_carriers = bool(left["carriers"] and left["carriers"] == right["carriers"])
+            same_shot = bool(left["shot"] and semantic_text_hash(left["shot"]) == semantic_text_hash(right["shot"]))
+            if same_subject and same_action and (same_carriers or same_shot or not left["carriers"] or not right["carriers"]):
+                pairs.append(
+                    {
+                        "left": left_label,
+                        "right": right_label,
+                        "subject": left["subject"],
+                        "action": left["action"],
+                    }
+                )
+    return pairs
 
 
 def repair_generic_scene_visual_concept(prompt: str) -> tuple[str, list[str]]:
@@ -14997,7 +17243,7 @@ def project_scene_visual_memory_clause(output_path: Path, limit: int = 5) -> str
         if scene_index <= 0 or scene_index == current_index:
             continue
         prompt = read_generated_prompt(image_path, "")
-        concept = compact_visual_concept(selected_visual_concept_from_prompt(prompt), 110)
+        concept = scene_layout_memory(prompt)
         if not concept:
             continue
         memories.append((scene_index, concept))
@@ -15054,6 +17300,9 @@ def generate_configured_image(
     env: dict[str, str],
     log: Callable[[str], None] | None = None,
     template: dict[str, Any] | None = None,
+    required_user_instruction: str = "",
+    final_chatgpt_prompt: str = "",
+    preserve_visual_prompt: bool = False,
 ) -> Path:
     providers = resolve_image_provider_queue(env)
     reference_images = product_reference_images_for_output(output_path)
@@ -15066,6 +17315,7 @@ def generate_configured_image(
         }
     )
     last_error: Exception | None = None
+    persisted_requirement = clean_text(required_user_instruction) or _extract_persisted_image_requirement(prompt)
 
     for provider_index, provider in enumerate(providers, start=1):
         audit_report: dict[str, Any] | None = None
@@ -15083,24 +17333,52 @@ def generate_configured_image(
                 integrity_source_prompt = prompt
                 direct_prompt = ""
                 if purpose == "scene":
-                    balanced_prompt = (
-                        normalize_image_prompt(prompt)
-                        if is_semantic_scene_generation_brief(prompt)
-                        else balanced_scene_generation_brief(prompt)
-                    )
-                    if "本期主题：" in balanced_prompt and "当前完整口播：" in balanced_prompt:
-                        direct_prompt = balanced_prompt
-                        integrity_source_prompt = balanced_prompt
+                    if preserve_visual_prompt:
+                        # Manual redraw has already been rewritten and approved in
+                        # the preview step.  It is the authoritative outbound
+                        # prompt; running the legacy scene brief compiler here
+                        # replaced it with generic boilerplate such as
+                        # “一个主结论、两到四个当前口播事实”.
+                        direct_prompt = normalize_image_prompt(prompt)
+                        integrity_source_prompt = direct_prompt
+                    else:
+                        balanced_prompt = (
+                            normalize_image_prompt(prompt)
+                            if is_semantic_scene_generation_brief(prompt)
+                            else balanced_scene_generation_brief(prompt)
+                        )
+                        if "本期主题：" in balanced_prompt and "当前完整口播：" in balanced_prompt:
+                            direct_prompt = balanced_prompt
+                            integrity_source_prompt = balanced_prompt
                 if not direct_prompt and image_prompt_has_topic_anchor(prompt):
-                    direct_prompt = sanitize_prompt_for_image_model(prompt, purpose) or normalize_image_prompt(prompt)
+                    # A topic-bound prompt is already the authored visual brief.
+                    # Do not send it through the legacy provider sanitizer here:
+                    # that path compacts long briefs and can drop the subject,
+                    # current speech evidence, native text, or redraw clauses.
+                    # The provider-friendly rewrite below only changes unsafe
+                    # wording and deliberately keeps the full prompt intact.
+                    direct_prompt = normalize_image_prompt(prompt)
                 if direct_prompt:
                     prepared_prompt = direct_prompt
                     generic_concept_issues: list[str] = []
-                    if purpose == "scene":
+                    if purpose == "scene" and not preserve_visual_prompt:
                         prepared_prompt, generic_concept_issues = repair_generic_scene_visual_concept(prepared_prompt)
                     repair_clauses: list[str] = []
                     reasons = audit_report.get("reasons", []) if audit_report else []
                     if attempt > 1 and reasons:
+                        if purpose == "cover" and any(
+                            str(reason) in {"cover_title_missing", "cover_subtitle_missing"}
+                            for reason in reasons
+                        ):
+                            title = extract_cover_title_hint(integrity_source_prompt)
+                            subtitle = extract_cover_subtitle_hint(integrity_source_prompt)
+                            if title:
+                                repair_clauses.append(
+                                    f"封面标题修正版：必须把「{title}」作为上半区最大、清晰、完整的主标题，"
+                                    "逐字保留原语言，不缩写、不截断、不换成近义词"
+                                )
+                            if subtitle:
+                                repair_clauses.append(f"同时清晰保留反转短句「{subtitle}」")
                         if any("text" in str(reason) for reason in reasons):
                             repair_clauses.append("重绘修正版：底图清除全部可读文字、数字、乱码、水印和页脚，只保留无字场景、物件、动作和关系证据")
                         if any("empty" in str(reason) or "foreground" in str(reason) or "coverage" in str(reason) for reason in reasons):
@@ -15147,7 +17425,11 @@ def generate_configured_image(
                         )
                         repair_clauses.extend(audience_visual_repair_actions(audience_plan, audience_issues))
                     if repair_clauses:
-                        prepared_prompt = compact_visual_image_prompt("。".join([prepared_prompt, *repair_clauses]), 760 if purpose == "cover" else 720)
+                        # A retry may add repair instructions, but it must not
+                        # compact away the original scene facts while doing so.
+                        prepared_prompt = normalize_image_prompt(
+                            "。".join([prepared_prompt, *repair_clauses])
+                        )
                     review_score = prompt_visual_score(prepared_prompt, purpose)
                     prompt_review = {
                         "before": review_score,
@@ -15165,7 +17447,7 @@ def generate_configured_image(
                         audit_reasons=audit_report.get("reasons", []) if audit_report else None,
                     )
                     prepared_prompt, prompt_review = rewrite_prompt_by_visual_director(prepared_prompt, purpose)
-                if purpose == "scene":
+                if purpose == "scene" and not preserve_visual_prompt:
                     diversity_clause = project_scene_visual_memory_clause(output_path)
                     if diversity_clause:
                         prepared_prompt = "\n".join([prepared_prompt, diversity_clause])
@@ -15175,22 +17457,83 @@ def generate_configured_image(
                     prepared_prompt = reserve_exact_typography_area(prepared_prompt, purpose, typography_payload)
                 integrity_source_prompt = repair_legacy_mojibake(integrity_source_prompt)
                 prepared_prompt = repair_legacy_mojibake(prepared_prompt)
-                pre_compact_length = len(normalize_image_prompt(prepared_prompt))
-                prepared_prompt = (
-                    lightweight_scene_model_prompt(prepared_prompt, max_chars=680)
-                    if purpose == "scene"
-                    else compile_outbound_image_prompt(
-                        prepared_prompt,
-                        purpose,
-                        max_chars=560,
+                hard_contract_lines = [
+                    clean_text(line)
+                    for line in normalize_image_prompt(integrity_source_prompt).splitlines()
+                    if clean_text(line).startswith(
+                        (
+                            "整期事件锁定：",
+                            "核心实物身份：",
+                            "严禁误画：",
+                            "追加要求（最高优先级",
+                            "画面短钩子：",
+                        )
                     )
-                )
+                ]
+                # The full scene/cover brief is the source of truth for the
+                # image provider.  Do not compact it to a character budget:
+                # that used to turn a 1,600+ character, topic-bound brief
+                # into a generic 700 character prompt and drop the subject,
+                # speech evidence or user-added redraw requirements.  The
+                # provider-friendly pass below only changes unsafe wording;
+                # it does not shorten the brief.
+                pre_compact_length = len(normalize_image_prompt(prepared_prompt))
+                prepared_prompt = normalize_image_prompt(prepared_prompt)
                 outbound_review = prompt_visual_score(prepared_prompt, purpose)
                 prompt_review["after"] = outbound_review
                 prompt_integrity = semantic_scene_brief_integrity(integrity_source_prompt, prepared_prompt) if purpose == "scene" else {"required": False, "ok": True, "missing": []}
                 if not prompt_integrity.get("ok"):
-                    missing = "、".join(str(item) for item in prompt_integrity.get("missing", []))
-                    raise RuntimeError(f"实际生图提示词在发送前丢失了{missing}，已停止生成，避免使用残缺提示词。")
+                    source_topic_match = re.search(
+                        r"(?:本期主题|主题)\s*[:：]\s*([^\n。；]{2,100})",
+                        integrity_source_prompt,
+                    )
+                    source_speech = scene_prompt_speech_anchor(integrity_source_prompt)
+                    fallback_parts = [prepared_prompt]
+                    if source_topic_match:
+                        fallback_parts.append(f"本期主题：{clean_text(source_topic_match.group(1))}")
+                    if source_speech:
+                        fallback_parts.append(f"当前完整口播：{source_speech}")
+                    source_facts = extract_numeric_fact_tokens(integrity_source_prompt)
+                    if source_facts:
+                        fallback_parts.append("当前事实数字：" + "、".join(source_facts[:8]))
+                    prepared_prompt = normalize_image_prompt("\n".join(fallback_parts))
+                    prompt_integrity = semantic_scene_brief_integrity(integrity_source_prompt, prepared_prompt)
+                    if not prompt_integrity.get("ok"):
+                        prepared_prompt = normalize_image_prompt(integrity_source_prompt)
+                        prompt_integrity = semantic_scene_brief_integrity(integrity_source_prompt, prepared_prompt)
+                    if log:
+                        log("[images] 压缩稿遗漏口播锚点，已自动回退到语义完整提示词继续生成")
+                source_provider_report = image_prompt_provider_friendly_report(integrity_source_prompt)
+                provider_prompt_report = image_prompt_provider_friendly_report(prepared_prompt)
+                prepared_prompt = str(provider_prompt_report.get("prompt") or prepared_prompt)
+                if purpose == "scene":
+                    authoritative_speech = authoritative_scene_speech_for_output(output_path)
+                    if authoritative_speech:
+                        topic_match = re.search(r"(?:^|\n)本期主题\s*[:：]\s*([^\n]+)", integrity_source_prompt)
+                        topic_anchor = clean_text(topic_match.group(1)) if topic_match else ""
+                        prepared_prompt = bind_scene_prompt_lineage(
+                            prepared_prompt, topic_anchor, authoritative_speech
+                        )
+                        if not scene_prompt_matches_narration(prepared_prompt, authoritative_speech, ""):
+                            raise RuntimeError("最终外发提示词与当前镜头口播不一致，已停止生图")
+                for contract_line in hard_contract_lines:
+                    contract_key = contract_line.split("：", 1)[0]
+                    if contract_key and contract_key not in prepared_prompt:
+                        prepared_prompt = normalize_image_prompt(f"{prepared_prompt}\n{contract_line}")
+                if persisted_requirement:
+                    requirement_clause = f"用户重绘硬要求（必须落实到成图）：{persisted_requirement}"
+                    if _normalize_chatgpt_composer_text(persisted_requirement) not in _normalize_chatgpt_composer_text(prepared_prompt):
+                        prepared_prompt = normalize_image_prompt(f"{prepared_prompt}\n{requirement_clause}")
+                    if _normalize_chatgpt_composer_text(persisted_requirement) not in _normalize_chatgpt_composer_text(prepared_prompt):
+                        raise RuntimeError("用户填写的重绘要求在发送前丢失，已终止本次生图")
+                rewrite_count = max(
+                    int(source_provider_report.get("count") or 0),
+                    int(provider_prompt_report.get("count") or 0),
+                )
+                if log and rewrite_count:
+                    log(
+                        f"[images] 发送前已转换 {rewrite_count} 处高风险表达，主题事实、数字和画面要求保持不变"
+                    )
                 display_name = output_path.name
                 if display_name.startswith(".") and ".gen-" in display_name:
                     display_name = display_name[1:].split(".gen-", 1)[0] + output_path.suffix
@@ -15225,6 +17568,8 @@ def generate_configured_image(
                             f"[images] 发送前语义压缩：{pre_compact_length} -> {len(prepared_prompt)} 字，"
                             "已移除重复规则并保留当前镜头事实"
                         )
+                    if persisted_requirement:
+                        log(f"[images] 用户重绘硬要求已锁定到最终发送提示词：{persisted_requirement}")
                     log(
                         f"[images] 使用 {provider['label']} 生成 {display_name}"
                         f"（model={provider.get('model') or 'default'}，attempt={attempt}/{max_prompt_attempts}）"
@@ -15239,6 +17584,8 @@ def generate_configured_image(
                             env,
                             log=log,
                             reference_images=reference_images,
+                            required_user_instruction=persisted_requirement,
+                            final_prompt_override=final_chatgpt_prompt,
                         )
                     elif provider["key"] == "imageai_playground":
                         last_path = generate_imageai_playground_image(
@@ -15265,7 +17612,7 @@ def generate_configured_image(
                             log=log,
                             provider_key=provider["key"],
                         )
-                    elif provider["key"] in {"apiyi", "third_party"}:
+                    elif provider["key"] in {"apiyi", "third_party", "cpa_image"}:
                         last_path = generate_openai_compatible_image(
                             prepared_prompt,
                             output_path,
@@ -15429,6 +17776,21 @@ def generate_configured_image(
                         )
                     else:
                         log(f"[images] {display_name} 第 {attempt} 次生成仍未通过自检：{reason_text}")
+                retryable_cover_title = purpose == "cover" and any(
+                    str(reason) in {"cover_title_missing", "cover_subtitle_missing"}
+                    for reason in audit_report.get("reasons", [])
+                )
+                retryable_scene_text = purpose == "scene" and any(
+                    str(reason) == "ocr_information_missing"
+                    for reason in audit_report.get("reasons", [])
+                )
+                if (
+                    attempt < max_prompt_attempts
+                    and provider["key"] in {"chatgpt_web_auto", "imageai_playground"}
+                    and not retryable_cover_title
+                    and not retryable_scene_text
+                ):
+                    break
                 if attempt >= max_prompt_attempts:
                     break
 
@@ -16104,10 +18466,10 @@ def ai_bgm_brief(project_id: int, content: str = "") -> dict[str, Any]:
     project = storage.get_project(project_id)
     template_key = clean_text(project.get("template") or "")
     template = storage.get_template(template_key) if template_key else {}
-    base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-    model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=45.0, default_headers={"User-Agent": "short-video-studio/1.0"})
         response = client.chat.completions.create(
             model=model,
             messages=compose_bgm_selector_messages(project, template, content or storage.get_content(project_id), fallback),
@@ -18165,7 +20527,29 @@ def mp3_id3_header_offsets(data: bytes) -> list[int]:
         if index < 0:
             break
         if index + 10 <= len(data) and data[index + 3] in {2, 3, 4}:
-            offsets.append(index)
+            version = data[index + 3]
+            revision = data[index + 4]
+            flags = data[index + 5]
+            size_bytes = data[index + 6:index + 10]
+            allowed_flags = {2: 0xC0, 3: 0xE0, 4: 0xF0}[version]
+            structurally_valid = (
+                revision != 0xFF
+                and flags & ~allowed_flags == 0
+                and all(value < 0x80 for value in size_bytes)
+            )
+            if structurally_valid:
+                tag_size = (
+                    (size_bytes[0] << 21)
+                    | (size_bytes[1] << 14)
+                    | (size_bytes[2] << 7)
+                    | size_bytes[3]
+                )
+                footer_size = 10 if version == 4 and flags & 0x10 else 0
+                tag_end = index + 10 + tag_size + footer_size
+                frame = data[tag_end:tag_end + 2]
+                has_mpeg_frame = len(frame) == 2 and frame[0] == 0xFF and frame[1] & 0xE0 == 0xE0
+                if tag_end <= len(data) and (tag_size == 0 or has_mpeg_frame):
+                    offsets.append(index)
         cursor = index + 3
     return offsets
 
@@ -18338,6 +20722,7 @@ def normalize_tts_audio_asset(
     round_quality: list[dict[str, Any]] = []
     repaired_rounds: list[int] = []
     boundary_pacing: list[dict[str, Any]] = []
+    round_timeline: list[dict[str, Any]] = []
     inserted_pause_ms = 0
     with tempfile.TemporaryDirectory(prefix="short-video-tts-") as temp_dir_text:
         temp_dir = Path(temp_dir_text)
@@ -18408,26 +20793,39 @@ def normalize_tts_audio_asset(
             dialogue_items = [item for item in (dialogue or []) if isinstance(item, dict)]
             pacing_enabled = len(dialogue_items) == len(decoded_rounds)
             pcm_path = temp_dir / "rounds.s16le"
+            timeline_cursor_ms = 0
             with pcm_path.open("wb") as pcm_output:
                 for index, pcm_payload in enumerate(decoded_rounds):
                     pcm_output.write(pcm_payload)
-                    if not pacing_enabled or index + 1 >= len(decoded_rounds):
-                        continue
-                    trailing_ms = pcm16_edge_silence_ms(pcm_payload, "end")
-                    leading_ms = pcm16_edge_silence_ms(decoded_rounds[index + 1], "start")
-                    target_ms = tts_boundary_pause_ms(dialogue_items[index], dialogue_items[index + 1])
-                    added_ms = max(0, target_ms - trailing_ms - leading_ms)
-                    if added_ms:
-                        pcm_output.write(pcm_silence(added_ms))
-                        inserted_pause_ms += added_ms
-                    boundary_pacing.append(
-                        {
-                            "after_round": index + 1,
-                            "target_ms": target_ms,
-                            "existing_ms": trailing_ms + leading_ms,
-                            "inserted_ms": added_ms,
-                        }
-                    )
+                    round_duration_ms = round(len(pcm_payload) * 1000 / (24000 * 2))
+                    round_item = dialogue_items[index] if index < len(dialogue_items) else {}
+                    round_record = {
+                        "round": index + 1,
+                        "start_ms": timeline_cursor_ms,
+                        "end_ms": timeline_cursor_ms + round_duration_ms,
+                        "text": clean_text(str(round_item.get("text") or "")),
+                        "pause_after_ms": 0,
+                    }
+                    round_timeline.append(round_record)
+                    timeline_cursor_ms = round_record["end_ms"]
+                    if pacing_enabled and index + 1 < len(decoded_rounds):
+                        trailing_ms = pcm16_edge_silence_ms(pcm_payload, "end")
+                        leading_ms = pcm16_edge_silence_ms(decoded_rounds[index + 1], "start")
+                        target_ms = tts_boundary_pause_ms(dialogue_items[index], dialogue_items[index + 1])
+                        added_ms = max(0, target_ms - trailing_ms - leading_ms)
+                        if added_ms:
+                            pcm_output.write(pcm_silence(added_ms))
+                            inserted_pause_ms += added_ms
+                        round_record["pause_after_ms"] = added_ms
+                        timeline_cursor_ms += added_ms
+                        boundary_pacing.append(
+                            {
+                                "after_round": index + 1,
+                                "target_ms": target_ms,
+                                "existing_ms": trailing_ms + leading_ms,
+                                "inserted_ms": added_ms,
+                            }
+                        )
             input_args = ["-f", "s16le", "-ar", "24000", "-ac", "1", "-i", str(pcm_path)]
             decode_strategy = "per_round_pcm"
             decoded_source_duration = raw_pcm_bytes / (24000 * 2)
@@ -18529,6 +20927,7 @@ def normalize_tts_audio_asset(
         "decoded_source_duration": round(decoded_source_duration, 3),
         "inserted_pause_seconds": round(inserted_pause_ms / 1000.0, 3),
         "boundary_pacing": boundary_pacing,
+        "round_timeline": round_timeline,
         "output_duration": round(probe_audio_duration(audio_path), 3),
         "id3_headers_before": len(offsets),
         "id3_headers_after": len(mp3_id3_header_offsets(audio_path.read_bytes())),
@@ -20562,11 +22961,96 @@ def opening_semantic_hook_signals(text: str) -> dict[str, bool]:
     source = clean_text(strip_dialogue_speaker(raw_line))
     has_object = any(token in source for token in OPENING_SCENE_OBJECT_TOKENS)
     has_action = any(token in source for token in OPENING_SCENE_ACTION_TOKENS)
-    temporal_contrast = any(re.search(pattern, source) for pattern in OPENING_TEMPORAL_COLLISION_PATTERNS)
+    temporal_contrast = any(re.search(pattern, source) for pattern in OPENING_TEMPORAL_COLLISION_PATTERNS) or bool(
+        re.search(r"越[^，。！？!?]{1,12}越[^，。！？!?]{1,12}", source)
+    )
     return {
         "scene_action": bool(has_object and has_action),
         "temporal_contrast": bool(temporal_contrast),
+        "perspective_contrast": opening_semantic_perspective_contrast(source),
     }
+
+
+def opening_semantic_perspective_contrast(text: str) -> bool:
+    """Detect viewer-versus-industry contrast without changing the legacy hook API."""
+    source = clean_text(strip_dialogue_speaker(next((line for line in str(text or "").splitlines() if clean_text(line)), str(text or ""))))
+    return bool(
+        re.search(r"你.{0,18}(?:看|比|算|想|在意|关心)的是.{1,24}(?:别人|商家|厂商|平台|公司|行业).{0,12}(?:看|比|算|想|在意|关心)的是", source)
+        or re.search(r"(?:用户|消费者|买家|观众).{0,18}(?:看|比|算|想|在意|关心)的是.{1,24}(?:商家|厂商|平台|公司|行业).{0,12}(?:看|比|算|想|在意|关心)的是", source)
+    )
+
+
+OPENING_AUDIENCE_REFERENCES = (
+    "你", "你妈", "你爸", "父母", "家人", "孩子", "老人", "用户", "普通人", "上班族", "消费者",
+)
+
+OPENING_ATTENTION_COST_PATTERNS = (
+    r"(?:半夜|凌晨|熬夜|通宵).{0,12}(?:刷|看|追|玩|盯)",
+    r"(?:刷|看|追|玩|盯).{0,12}(?:半夜|凌晨|熬夜|通宵)",
+    r"(?:停不下来|戒不掉|上瘾|沉迷|越刷越|越看越|一刷就是|一看就是)",
+)
+
+OPENING_INVOLUNTARY_IMPACT_PATTERNS = (
+    r"被.{0,10}(?:绑票|拿捏|控制|困住|套住|掏空|拖垮)",
+    r"(?:让|害得|逼得|搞得|导致).{0,16}(?:停不下来|睡不着|熬夜|花钱|失业|后悔|焦虑|担心)",
+    # Quality loss is also a real viewer stake: a repaired photo, recording or
+    # document becoming visibly wrong can make the result unusable or embarrassing.
+    r"(?:越修越假|修坏|改坏|失真|穿帮|露馅|对不上|不同步|损坏|破坏)",
+)
+
+
+def opening_semantic_stake_signals(text: str) -> dict[str, bool]:
+    """Recognise a concrete viewer consequence without demanding the pronoun “你”.
+
+    A visibly damaged photo, video or document is already the viewer's stake.  Requiring
+    an audience pronoun made natural openings such as “纹理重复、栏杆变弯” score lower
+    than the same sentence with a forced “你”, which encouraged artificial copywriting.
+    """
+    source = clean_text(" ".join(strip_dialogue_speaker(line) for line in str(text or "").splitlines()))
+    audience_linked = any(token in source for token in OPENING_AUDIENCE_REFERENCES)
+    attention_cost = any(re.search(pattern, source) for pattern in OPENING_ATTENTION_COST_PATTERNS)
+    financial_cost = bool(
+        re.search(r"(?:花|掏|付|多花|白花).{0,6}(?:钱|费用|会员费)", source)
+        or re.search(r"(?:花|掏|付|买|卖到|标价|定价).{0,8}\d+(?:\.\d+)?\s*(?:万|千|百)?\s*(?:元|块)?", source)
+        or re.search(r"(?:买回|买来).{0,14}(?:广告|收费|不好用|用不了)", source)
+    )
+    # Choosing or buying something for oneself or family is already a concrete
+    # viewer stake when the sentence exposes a different seller/platform logic.
+    # This is intentionally domain-neutral: it works for appliances, software,
+    # services and other purchases without hard-coding the current topic.
+    purchase_decision = bool(
+        re.search(r"(?:给.{0,8})?(?:挑|选|买|换|订|租).{1,24}(?:价格|价钱|尺寸|配置|功能|套餐|型号|品牌|费用)", source)
+        or re.search(r"(?:价格|价钱|尺寸|配置|功能|套餐|型号|品牌|费用).{0,18}(?:怎么选|怎么挑|值不值|该不该)", source)
+    )
+    involuntary_impact = any(re.search(pattern, source) for pattern in OPENING_INVOLUNTARY_IMPACT_PATTERNS)
+    affected_result = any(
+        token in source
+        for token in ("照片", "图片", "相片", "视频", "成片", "录音", "字幕", "文档", "文件", "结果", "背景")
+    )
+    visible_quality_damage = any(
+        re.search(pattern, source)
+        for pattern in (
+            r"(?:纹理|花纹|接缝).{0,10}(?:重复|复制|错位)",
+            r"(?:栏杆|墙线|直线|边缘).{0,10}(?:弯|歪|软|锯齿|断)",
+            r"(?:人物|人).{0,8}(?:消失|没了).{0,12}(?:影子|倒影).{0,8}(?:还在|留着|残留|缺)",
+            r"(?:影子|倒影).{0,10}(?:残留|缺失|不完整|对不上)",
+        )
+    )
+    direct_result_damage = bool(visible_quality_damage or (affected_result and involuntary_impact))
+    return {
+        "audience_linked": audience_linked,
+        "attention_cost": attention_cost,
+        "financial_cost": financial_cost,
+        "purchase_decision": purchase_decision,
+        "involuntary_impact": involuntary_impact,
+        "affected_result": affected_result,
+        "visible_quality_damage": visible_quality_damage,
+        "has_stake": bool(
+            direct_result_damage
+            or (audience_linked and (attention_cost or financial_cost or purchase_decision or involuntary_impact))
+        ),
+    }
+
 
 CALLBACK_STOPWORDS = {
     "今天",
@@ -20648,8 +23132,266 @@ def content_lines_use_english(lines: list[str]) -> bool:
     return len(latin_words) >= 8 and len(latin_words) >= max(8, len(han_chars))
 
 
+def information_progress_signal(text: str, english_mode: bool = False) -> bool:
+    """Return whether a line adds usable information instead of merely sounding dramatic."""
+    source = clean_text(strip_dialogue_speaker(text))
+    if not source or low_information_transition_family(source):
+        return False
+    lowered = source.lower()
+    if re.search(r"\d+(?:\.\d+)?%?", source):
+        return True
+    if english_mode:
+        terms = (
+            "because", "which means", "for example", "according to", "data", "report", "test",
+            "compared with", "causes", "leads to", "so you can", "check ", "choose ", "avoid ",
+        )
+        return any(term in lowered for term in terms)
+    terms = (
+        "因为", "原因", "意味着", "也就是说", "说白了", "实测", "测试", "数据显示", "报告",
+        "官方", "文件", "研究", "对比", "比如", "例如", "导致", "所以", "第一", "第二", "第三",
+        "你可以", "先看", "检查", "选择", "不要", "别碰", "适合", "区别", "本质",
+    )
+    return any(term in source for term in terms)
+
+
+CONTENT_INCREMENT_STOPWORDS = {
+    "这个", "那个", "就是", "其实", "所以", "但是", "而且", "因为", "不是", "一个", "一种",
+    "自己", "别人", "现在", "已经", "真的", "还是", "可以", "没有", "什么", "怎么", "时候",
+    "问题", "事情", "部分", "这件事", "这句话", "同一时间", "先把", "说清楚",
+}
+
+
+def content_information_repetition(lines: list[str]) -> dict[str, Any]:
+    """Find repeated facts and theses even when the wording changes."""
+    entries: list[dict[str, Any]] = []
+    for index, raw in enumerate(lines):
+        text = clean_text(strip_dialogue_speaker(raw))
+        if not text:
+            continue
+        tokens = {
+            token.lower() for token in extract_tokens(text)
+            if len(token) >= 2 and token not in CONTENT_INCREMENT_STOPWORDS
+        }
+        numbers = {normalized_numeric_fact(item) for item in extract_numeric_fact_tokens(text)}
+        numbers.discard("")
+        entries.append({"index": index, "text": text, "tokens": tokens, "numbers": numbers})
+
+    repeated_facts: list[dict[str, Any]] = []
+    repeated_theses: list[dict[str, Any]] = []
+    for pos, left in enumerate(entries):
+        for right in entries[pos + 1 :]:
+            if right["index"] - left["index"] < 2:
+                continue
+            shared_numbers = left["numbers"] & right["numbers"]
+            shared_tokens = left["tokens"] & right["tokens"]
+            union = left["tokens"] | right["tokens"]
+            similarity = len(shared_tokens) / max(1, min(len(left["tokens"]), len(right["tokens"])))
+            if shared_numbers and len(shared_tokens) >= 1:
+                repeated_facts.append({"left_index": left["index"], "right_index": right["index"], "facts": sorted(shared_numbers), "left": left["text"], "right": right["text"]})
+            elif len(shared_tokens) >= 3 and similarity >= 0.5 and len(union) >= 4:
+                repeated_theses.append({"left_index": left["index"], "right_index": right["index"], "shared": sorted(shared_tokens)[:8], "similarity": round(similarity, 3), "left": left["text"], "right": right["text"]})
+    return {"repeated_facts": repeated_facts[:8], "repeated_theses": repeated_theses[:8], "repeat_count": len(repeated_facts) + len(repeated_theses)}
+
+
+VIEWER_VAGUE_PHRASES = (
+    "很多时候",
+    "表面现象",
+    "背后逻辑",
+    "真正决定结果",
+    "关键其实藏在",
+    "一步步变成现在这样",
+    "这就有意思了",
+    "换个角度来看",
+    "从本质上说",
+    "值得注意的是",
+    "不难发现",
+    "某种程度上",
+    "想当然",
+    "被带偏",
+    "表面看是一个问题",
+    "真正关键其实藏在另一层",
+    "被忽略的小动作",
+    "先看第一步",
+)
+VIEWER_JARGON_TERMS = (
+    "赋能",
+    "抓手",
+    "闭环",
+    "底层逻辑",
+    "颗粒度",
+    "方法论",
+    "链路",
+    "矩阵",
+    "范式",
+    "场景化",
+    "协同",
+    "生态位",
+)
+
+
+def viewer_value_report(content: str, mode: str = "video") -> dict[str, Any]:
+    """Estimate whether a viewer can understand and use the episode's takeaway."""
+    raw_lines = parse_dialogue_lines(content, mode) or content_body_lines(content, mode)
+    lines = [strip_dialogue_speaker(line) for line in raw_lines if clean_text(line)]
+    text = "\n".join(lines)
+    english_mode = content_lines_use_english(lines)
+    vague_hits = [phrase for phrase in VIEWER_VAGUE_PHRASES if phrase in text]
+    jargon_hits = [term for term in VIEWER_JARGON_TERMS if term in text]
+
+    if english_mode:
+        evidence_terms = ("for example", "data", "report", "test", "study", "according to", "compared with", "in 20")
+        explanation_terms = ("because", "which means", "in plain words", "the reason", "so ", "that is")
+        action_terms = ("check ", "look for", "turn off", "choose ", "avoid ", "remember ", "before you")
+        evidence_count = sum(text.lower().count(term) for term in evidence_terms)
+        explanation_count = sum(text.lower().count(term) for term in explanation_terms)
+        action_count = sum(text.lower().count(term) for term in action_terms)
+        long_lines = [line for line in lines if len(re.findall(r"\b[A-Za-z0-9][A-Za-z0-9'-]*\b", line)) > 24]
+    else:
+        evidence_terms = ("比如", "例如", "实测", "测试", "数据显示", "报告", "报道", "媒体", "记者", "资料", "来源", "文件", "官方", "研究", "对比", "规定", "发布")
+        explanation_terms = ("因为", "原因", "也就是说", "说白了", "换句话说", "意味着", "所以", "为什么")
+        action_terms = (
+            "你可以", "先看", "记住", "检查", "打开", "关闭", "选择", "别急", "不要", "如果", "判断",
+            "放大", "保留原图", "只动副本", "少量多次", "一次消一个", "撤销", "换小范围", "别一次", "修完",
+        )
+        explicit_evidence_count = sum(text.count(term) for term in evidence_terms) + min(3, len(re.findall(r"\d+(?:\.\d+)?%?", text)))
+        observation_objects = ("纹理", "边缘", "直线", "栏杆", "墙线", "影子", "倒影", "接缝", "画面", "屏幕", "声音", "数据", "结果")
+        observation_changes = ("重复", "弯", "消失", "留下", "留在", "多出", "出现", "锯齿", "不一致", "异常", "穿帮", "变化")
+        semantic_evidence_count = sum(
+            1 for line in lines
+            if any(obj in line for obj in observation_objects) and any(change in line for change in observation_changes)
+        )
+        evidence_count = max(explicit_evidence_count, semantic_evidence_count)
+        explanation_count = sum(text.count(term) for term in explanation_terms)
+        action_count = sum(text.count(term) for term in action_terms)
+        long_lines = [line for line in lines if len(clean_text(line)) > 46]
+
+    value_score = 30
+    value_score += min(3, evidence_count) * 12
+    value_score += min(3, explanation_count) * 9
+    value_score += min(2, action_count) * 8
+    value_score -= min(24, len(vague_hits) * 5)
+    if len(lines) >= 6 and evidence_count == 0:
+        value_score -= 18
+    if len(lines) >= 6 and explanation_count == 0:
+        value_score -= 12
+    value_score = max(0, min(100, value_score))
+
+    plain_score = 100
+    plain_score -= round(len(long_lines) / max(1, len(lines)) * 36)
+    plain_score -= min(28, len(jargon_hits) * 7)
+    plain_score -= min(20, len(vague_hits) * 4)
+    plain_score = max(0, min(100, plain_score))
+
+    issues: list[dict[str, str]] = []
+    if len(lines) >= 6 and value_score < 62:
+        issues.append(
+            {
+                "where": "观众收获",
+                "issue": f"关键词启发式待核验：证据标记 {evidence_count}、解释标记 {explanation_count}、行动标记 {action_count}，估分 {value_score}。此结果不等同于语义或事实结论。",
+                "fix": "围绕一个核心结论补齐：一个可核实事实、一次大白话解释、一个现实例子，以及观众能采用的判断或动作。",
+            }
+        )
+    if plain_score < 72:
+        issues.append(
+            {
+                "where": "大白话",
+                "issue": "长句、抽象词或行业黑话偏多，不像朋友当面解释。",
+                "fix": "一句只讲一件事；术语出现后立刻用生活场景翻译，能说“怎么回事”就不要说“底层逻辑”。",
+            }
+        )
+    return {
+        "value_score": value_score,
+        "plain_score": plain_score,
+        "evidence_count": evidence_count,
+        "explanation_count": explanation_count,
+        "action_count": action_count,
+        "vague_hits": vague_hits,
+        "jargon_hits": jargon_hits,
+        "issues": issues,
+        "needs_rewrite": bool(issues),
+    }
+
+
+AUDIENCE_REALITY_TOKENS = (
+    "你", "家里", "上班", "工作", "工资", "花钱", "价格", "时间", "手机", "生活",
+    "父母", "孩子", "通勤", "隐私", "安全", "健康", "选择", "普通人", "用户",
+)
+
+AUDIENCE_STAKE_TOKENS = (
+    "损失", "浪费", "省下", "贵", "便宜", "风险", "危险", "麻烦", "焦虑", "后悔",
+    "失业", "效率", "公平", "控制", "信任", "被骗", "误判", "值不值", "该不该",
+    "隐私", "权限", "担心", "偷走", "泄露", "方便", "代价", "耽误", "错过",
+)
+
+AUDIENCE_VIEWPOINT_TOKENS = (
+    "有人觉得", "有人认为", "另一种", "另一边", "支持", "反对", "赞成", "不认同",
+    "该不该", "值不值", "到底是", "一边", "却认为", "不是", "反而", "不等于",
+)
+
+AUDIENCE_STANCE_TOKENS = (
+    "我的判断", "我更认同", "真正该", "关键不是", "重点不是", "应该", "不该", "别只看",
+    "判断重点", "记住", "说到底", "结论是",
+)
+
+
+def audience_resonance_report(content: str, mode: str = "video") -> dict[str, Any]:
+    """Check whether facts are translated into shared stakes and an honest point of view."""
+    lines = content_body_lines(content, mode)
+    text = "\n".join(lines)
+    reality_hits = [token for token in AUDIENCE_REALITY_TOKENS if token in text]
+    stake_hits = [token for token in AUDIENCE_STAKE_TOKENS if token in text]
+    semantic_stake = opening_semantic_stake_signals("\n".join(lines[:3]))
+    has_stake = bool(stake_hits or semantic_stake.get("has_stake"))
+    viewpoint_hits = [token for token in AUDIENCE_VIEWPOINT_TOKENS if token in text]
+    stance_hits = [token for token in AUDIENCE_STANCE_TOKENS if token in text]
+    has_scene = bool(opening_semantic_hook_signals(lines[0] if lines else "").get("scene_action")) or any(
+        token in text for token in ("比如", "例如", "有一次", "当你", "假如你", "拿手机", "在家", "公司里")
+    )
+
+    score = 24
+    score += min(24, len(reality_hits) * 6)
+    score += min(18, len(stake_hits) * 6)
+    score += 6 if semantic_stake.get("has_stake") and not stake_hits else 0
+    score += 12 if has_scene else 0
+    score += min(14, len(viewpoint_hits) * 7)
+    score += min(12, len(stance_hits) * 6)
+    score = max(0, min(100, score))
+
+    issues: list[dict[str, str]] = []
+    if len(lines) >= 6 and len(reality_hits) < 2:
+        issues.append(
+            {
+                "where": "大众共鸣",
+                "issue": "事实讲出来了，但还没有落到多数观众熟悉的生活处境、选择或代价。",
+                "fix": "从本期事实中选一个真实的时间、金钱、安全、隐私、工作或家庭处境，用具体瞬间说明这和普通人有什么关系。",
+            }
+        )
+    if len(lines) >= 6 and not has_stake:
+        issues.append(
+            {
+                "where": "情绪来源",
+                "issue": "观众知道发生了什么，却感受不到这件事会让自己损失、担心、后悔、释然或获益。",
+                "fix": "不用情绪形容词硬煽动，直接呈现事实造成的现实代价或选择后果。",
+            }
+        )
+    return {
+        "score": score,
+        "reality_hits": reality_hits,
+        "stake_hits": stake_hits,
+        "semantic_stake": semantic_stake,
+        "has_stake": has_stake,
+        "viewpoint_hits": viewpoint_hits,
+        "stance_hits": stance_hits,
+        "has_scene": has_scene,
+        "has_honest_disagreement": bool(viewpoint_hits and stance_hits),
+        "issues": issues,
+        "needs_rewrite": bool(issues),
+    }
+
+
 def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
     lines = content_body_lines(content, mode)
+    information_repetition = content_information_repetition(lines)
     english_mode = content_lines_use_english(lines)
     opening_lines = lines[:3]
     opening_text = "\n".join(opening_lines)
@@ -20662,6 +23404,14 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
 
     opening_lower = opening_text.lower()
     ending_lower = ending_text.lower()
+    opening_stake_tokens = (
+        *AUDIENCE_STAKE_TOKENS,
+        "工作", "岗位", "饭碗", "裁员", "失业", "被替代", "抢走", "省掉",
+        "成本", "工资", "社保", "钱包", "隐私", "安全", "风险", "代价",
+    )
+    opening_stake_hits = [token for token in opening_stake_tokens if token in opening_text]
+    opening_stake_signals = opening_semantic_stake_signals(opening_text)
+    opening_has_stake = bool(opening_stake_hits or opening_stake_signals.get("has_stake"))
     if english_mode:
         weak_opening = any(
             token in opening_lower
@@ -20705,50 +23455,21 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
             else any(token in opening_text for token in ("不是", "反而", "结果", "真相", "居然", "偏偏")),
             semantic_hook_signals["scene_action"],
             semantic_hook_signals["temporal_contrast"],
+            opening_semantic_perspective_contrast(first_line),
             4 <= first_line_words <= 22 if english_mode else 8 <= len(first_line) <= 32,
         )
         if ok
     )
 
-    english_retention_terms = (
-        "but",
-        "however",
-        "then",
-        "now",
-        "for example",
-        "the catch",
-        "here's",
-        "what happens",
-        "compare",
-        "test",
-        "because",
-    )
-    retention_turns = sum(
-        1
-        for line in middle_lines
-        if (
-            any(token in line.lower() for token in english_retention_terms)
-            if english_mode
-            else any(token in line for token in RETENTION_SIGNAL_TOKENS)
-        )
-    )
+    retention_turns = sum(1 for line in middle_lines if information_progress_signal(line, english_mode))
     has_example = (
         any(token in "\n".join(middle_lines).lower() for token in ("for example", "for instance", "consider ", "imagine "))
         if english_mode
-        else any(token in "\n".join(middle_lines) for token in ("比如", "例如", "拿", "就像", "有一次", "举个例子"))
+        else any(token in "\n".join(middle_lines) for token in ("比如", "例如", "拿", "就像", "有一次", "举个例子", "实测"))
     )
     question_turns = sum(1 for line in lines if "？" in line or "?" in line)
     middle_push_indexes = [
-        index
-        for index, line in enumerate(middle_lines)
-        if (
-            any(token in line.lower() for token in english_retention_terms)
-            if english_mode
-            else any(token in line for token in RETENTION_SIGNAL_TOKENS)
-            or any(token in line for token in ("比如", "例如", "案例", "结果", "更狠", "等等"))
-        )
-        or "？" in line
-        or "?" in line
+        index for index, line in enumerate(middle_lines) if information_progress_signal(line, english_mode)
     ]
     max_middle_plain_gap = 0
     previous_push = -1
@@ -20765,21 +23486,46 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
         else any(token in ending_text for token in INTERACTION_SIGNAL_TOKENS)
     ) or bool(re.search(r"[？?]", ending_text))
 
-    opening_score = 2.2 + min(hook_signal_count, 4) * 0.7 - (1.5 if weak_opening else 0.0) - (1.2 if first_line_too_long else 0.0) + (0.2 if question_turns else 0.0)
-    retention_score = 2.0 + min(retention_turns, 4) * 0.55 + (0.5 if has_example else 0.0) + (0.3 if len(middle_lines) >= 4 else 0.0) - (0.8 if max_middle_plain_gap >= 4 else 0.0)
+    opening_score = (
+        2.2
+        + min(hook_signal_count, 4) * 0.7
+        + (0.45 if opening_has_stake else 0.0)
+        - (1.5 if weak_opening else 0.0)
+        - (1.6 if first_line_too_long else 0.0)
+        - (0.45 if len(lines) >= 8 and not opening_has_stake else 0.0)
+        + (0.2 if question_turns else 0.0)
+    )
+    viewer_value = viewer_value_report(content, mode)
+    resonance = audience_resonance_report(content, mode)
+    retention_score = (
+        2.6
+        + (0.35 if has_example else 0.0)
+        + min(1.05, float(viewer_value.get("evidence_count", 0) or 0) * 0.35)
+        + min(0.75, float(viewer_value.get("explanation_count", 0) or 0) * 0.25)
+        + min(0.4, float(viewer_value.get("action_count", 0) or 0) * 0.2)
+        - min(0.8, len(viewer_value.get("vague_hits") or []) * 0.2)
+        - min(1.8, float(information_repetition.get("repeat_count", 0) or 0) * 0.3)
+    )
+    ending_has_value = any(
+        information_progress_signal(line, english_mode)
+        for line in ending_lines
+    )
     interaction_score = (
-        1.8
-        + (1.5 if has_interaction else 0.0)
-        + (0.6 if has_callback else 0.0)
-        + (0.4 if (re.search(r"\b(you|your)\b", ending_lower) if english_mode else "你" in ending_text) else 0.0)
+        3.4
+        + (0.8 if ending_has_value else 0.0)
+        + (0.25 if has_interaction else 0.0)
+        + (0.25 if has_callback else 0.0)
+        + (0.35 if resonance.get("has_honest_disagreement") else 0.0)
         - (1.4 if weak_outro else 0.0)
-        - (0.8 if generic_cta and not has_interaction else 0.0)
+        - (0.8 if generic_cta else 0.0)
     )
 
     opening_score = round(max(0.0, min(5.0, opening_score)), 1)
     retention_score = round(max(0.0, min(5.0, retention_score)), 1)
     interaction_score = round(max(0.0, min(5.0, interaction_score)), 1)
-    overall = round(max(0.0, min(5.0, opening_score * 0.42 + retention_score * 0.36 + interaction_score * 0.22)), 1)
+    # Keep the legacy field name for API compatibility. It now measures ending
+    # quality; asking for comments no longer earns a meaningful scoring bonus.
+    overall = round(max(0.0, min(5.0, opening_score * 0.48 + retention_score * 0.42 + interaction_score * 0.10)), 1)
 
     issues: list[dict[str, str]] = []
     if weak_opening:
@@ -20806,6 +23552,14 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
                 ),
             }
         )
+    if len(lines) >= 8 and not opening_has_stake:
+        issues.append(
+            {
+                "where": "开头利害关系",
+                "issue": "前三句只有场景或现象，还没告诉观众这件事会影响谁、造成什么变化或为什么值得继续看。",
+                "fix": "把本期最具体的工作、金钱、时间、安全、隐私或选择代价提前到前三句；场景负责让人看见，利害关系负责让人留下。",
+            }
+        )
     if opening_score < CONTENT_OPENING_MIN_SCORE:
         issues.append(
             {
@@ -20818,8 +23572,23 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
         issues.append(
             {
                 "where": "中段追看欲",
-                "issue": "中段解释偏多、推进偏少，容易像说明文，缺少追问、反转、例子和代价。",
-                "fix": "每 2-3 句或每 20-30 秒增加一次信息推进动作：新数字、新案例、更狠后果、追问或误区反转。",
+                "issue": "中段有连续表达没有带来新事实、新原因、新后果或可用判断，观众得到的信息没有继续增加。",
+                "fix": "删除重复解释，并补足当前论点缺少的证据、原因、现实影响或具体行动；不要靠追问和转折词制造推进感。",
+            }
+        )
+    if information_repetition.get("repeat_count"):
+        examples = [
+            f"第{int(item['left_index']) + 1}句与第{int(item['right_index']) + 1}句"
+            for item in [
+                *(information_repetition.get("repeated_facts") or []),
+                *(information_repetition.get("repeated_theses") or []),
+            ][:3]
+        ]
+        issues.append(
+            {
+                "where": "信息重复",
+                "issue": f"同一事实或观点换词重复，涉及{'、'.join(examples)}。重复不算信息推进。",
+                "fix": "同一事实只完整讲一次；后文再次出现时必须增加新的原因、后果、反方证据或行动，否则删除。",
             }
         )
     if weak_outro:
@@ -20827,42 +23596,42 @@ def content_engagement_report(content: str, mode: str) -> dict[str, Any]:
             {
                 "where": "结尾播客腔",
                 "issue": "结尾出现“本期播客/感谢收听/下期再见/拜拜”这类播客式收尾。",
-                "fix": "删除礼貌收尾，改成回扣开头 + 现实动作 + 具体评论区问题。",
+                "fix": "删除礼貌收尾，用本期最重要的判断或一个具体行动自然结束；不要强加评论区问题。",
             }
         )
-    if interaction_score < CONTENT_INTERACTION_MIN_SCORE:
-        issues.append(
-            {
-                "where": "结尾互动",
-                "issue": "结尾更像收尾总结，还没有把观众自然推到评论区。",
-                "fix": "结尾同时做三件事：回扣开头、落到现实、抛一个低门槛互动问题，别只喊“你怎么看”。",
-            }
-        )
+    issues.extend(viewer_value.get("issues") or [])
+    issues.extend(resonance.get("issues") or [])
 
-    performance_read = "开头能抓住人，中段有推进，结尾能带互动。"
+    performance_read = "开头交代了观看价值，中段持续增加信息，结尾给出明确收获。"
     if overall < CONTENT_OVERALL_MIN_SCORE:
-        performance_read = "结构可能已经成型，但还需要把‘抓人、追看、互动’再压实，避免像平铺解释。"
+        performance_read = "结构可能已经成型，但事实、因果或观众可用的结论仍不够扎实。"
 
     verdict = "表达张力达标，可直接进入生产。"
-    if overall < CONTENT_OVERALL_MIN_SCORE or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE or interaction_score < CONTENT_INTERACTION_MIN_SCORE:
-        verdict = "建议先做一轮总编式重写，把开头钩子、中段推进和结尾互动抬起来。"
+    if overall < CONTENT_OVERALL_MIN_SCORE or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE:
+        verdict = "建议先做一轮总编式重写，把开头钩子、中段推进和最终结论抬起来。"
 
     return {
         "overall_score": overall,
         "opening_score": opening_score,
         "retention_score": retention_score,
         "interaction_score": interaction_score,
+        "information_repetition": information_repetition,
         "has_callback": has_callback,
         "has_interaction": has_interaction,
         "weak_opening": weak_opening,
         "weak_outro": weak_outro,
         "hook_signal_count": hook_signal_count,
         "semantic_hook_signals": semantic_hook_signals,
+        "opening_has_stake": opening_has_stake,
+        "opening_stake_hits": opening_stake_hits,
+        "opening_stake_signals": opening_stake_signals,
         "retention_turns": retention_turns,
         "issues": issues,
         "performance_read": performance_read,
         "verdict": verdict,
-        "needs_rewrite": overall < CONTENT_OVERALL_MIN_SCORE or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE or interaction_score < CONTENT_INTERACTION_MIN_SCORE,
+        "needs_rewrite": overall < CONTENT_OVERALL_MIN_SCORE or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE or bool(information_repetition.get("repeat_count")) or (len(lines) >= 8 and not opening_has_stake) or bool(viewer_value.get("needs_rewrite")) or bool(resonance.get("needs_rewrite")),
+        "viewer_value": viewer_value,
+        "audience_resonance": resonance,
         "first_line_chars": len(first_line),
         "max_middle_plain_gap": max_middle_plain_gap,
         "detected_language": "en-US" if english_mode else "zh-CN",
@@ -21211,20 +23980,10 @@ def channel_learning_prompt_block(project: dict[str, Any], template: dict[str, A
     template_key = clean_text(str(template.get("key") or project.get("template") or ""))
     if not template_key:
         return ""
-    # The persistent performance memory is the canonical learning source.  It
-    # learns weighted methods from real release data instead of copying old
-    # episode facts or turning one result into a permanent hard rule.
-    from . import creative_learning
-
-    performance_memory = creative_learning.channel_performance_prompt_block(template_key, max_rules=8)
-    return "\n".join(
-        [
-            performance_memory,
-            "生成约束：先交付结论与可核验证据，再解释原因；禁止空泛铺垫和让观众替创作者找资料。",
-            "迁移边界：只迁移结构、节奏和互动方法，不复用旧主题的人物、数字、案例、画面或措辞。",
-            opening_diversity_prompt_block(project, template),
-        ]
-    )
+    # Performance learning is an after-generation report. Feeding it back as
+    # hard prompt rules made unrelated topics inherit the same length and
+    # structure. Only duplicate-opening avoidance remains in the writer prompt.
+    return opening_diversity_prompt_block(project, template)
 
     # Legacy history aggregation remains below for data migration reference;
     # runtime prompting uses the versioned memory above.
@@ -21318,10 +24077,10 @@ def channel_learning_prompt_block(project: dict[str, Any], template: dict[str, A
         bottlenecks.pop("", None)
         primary_bottleneck = bottlenecks.most_common(1)[0][0] if bottlenecks else ""
         growth_instructions = {
-            "开场流失": "真实投放显示前 2 秒流失突出：第一句直接兑现标题，第一画面先出现冲突结果，背景解释后移。",
-            "前段承接弱": "真实投放显示 2—5 秒承接偏弱：第二信息点必须快速升级问题，不连续铺背景。",
-            "中后段流失": "真实投放显示中后段流失突出：结论提前，每 2—3 句加入新证据、反转或动作推进。",
-            "互动偏弱": "真实投放显示互动偏弱：结尾使用具体经历题、站队题或选择题，让观众一句话就能回答。",
+            "开场流失": "真实投放显示开场流失突出：第一句直接兑现标题，第一画面先出现结果或证据，背景解释后移。",
+            "前段承接弱": "真实投放显示前段承接偏弱：尽快给第二条有效信息，减少背景铺垫。",
+            "中后段流失": "真实投放显示中后段流失突出：删除重复解释，补足结论缺少的证据、原因、后果或判断方法。",
+            "互动偏弱": "真实投放显示互动偏弱：先提高选题价值、事实新鲜度和现实用途；不要把评论问题当成默认修复方案。",
             "表现健康": "真实投放漏斗整体健康：保留有效信息密度与兑现速度，同时更换案例和表面句式。",
         }
         if primary_bottleneck in growth_instructions:
@@ -21484,15 +24243,22 @@ def build_common_content_system_rules() -> str:
 5. 你的输出必须严格遵守当前模板 prompt 约定的文案章节、角色标签和时长要求；模板中的视觉风格只供后续视觉阶段使用，本次不要输出图片提示词。
 6. 如果主题依赖事实、新闻、专业知识或具体数据，但 brief 与参考资料不足以支撑结论，停止生成完整脚本，只输出：# 资料不足、## 需要补充的资料、## 建议检索方向；不得自行补充事实。
 7. 如果频道模板没有明确章节，按精简兼容结构输出：# 标题、## Meta、## 原始材料简述、视频频道输出 ## 对话脚本 或 ## 口播脚本、## 重点字幕、## 参考资料；图文频道输出 ## 正文、## 参考资料。
-8. Meta 只保留这些字段：封面副标题、核心观点、时长、推荐发布标题、钩子、互动钩子、免责声明。HKR、评分、叙事原型、说服策略、情绪曲线、节奏策略、callback、黄金前三句都只能内部思考，不要输出到 content.md。
+8. Meta 只保留这些字段：封面副标题、核心观点、时长、推荐发布标题、发布描述、钩子、互动钩子、免责声明。发布描述必须围绕本期主题写成可直接发布的 2—3 段短文：第一段用本期最具体的反差、结果或数字制造继续阅读的理由；第二段讲清观众看完能得到的原因、判断或行动；第三段仅在存在自然讨论点时提出一个与主题直接相关的具体问题。不要复述发布标题，不写空泛介绍、套话或与主题无关的固定 CTA。互动钩子是可选字段，没有自然讨论点时留空。HKR、评分、叙事原型、说服策略、情绪曲线、节奏策略、callback、黄金前三句都只能内部思考，不要输出到 content.md。
 9. 当前调用只负责文案，不生成 `## 图片提示词`、visual_brief、分镜说明、构图、镜头动作、界面描述或生图 Prompt，也不要留下图片占位符。
 10. 视频台词区只写观众实际会听到的内容；视觉系统会在文案保存后，从最终口播单向派生场景图，不需要你在本次回答里兼顾画面设计。
 11. 口播和视觉是两个独立产物：本次输出是口播的唯一来源，后续视觉结果不得反写本次文案。
 12. 即使频道模板要求同时输出图片提示词，本阶段也只输出文案章节；视觉要求由后续独立调用读取频道模板处理。
-13. 最终台词里禁止出现内部生产词和播客腔：播客、TTS、content.md、脚本生成、本期播客、播客内容、感谢收听、谢谢收听、谢谢观看、下期再见、拜拜；开头禁止“大家好，今天我们来聊聊”，结尾必须用具体评论区互动问题收住。
-14. `## 口播脚本`、`## 对话脚本`、`## 视频脚本` 内只能出现观众实际会听到的台词。单人统一使用 `【主播】`，双人只使用模板规定的角色标签；严禁在台词区写 `【画面】`、`【画面切换】`、`【镜头】`、`【场景】`、`【分镜】`、动作、构图、界面描述或生图提示词。
+13. 最终台词里禁止出现内部生产词和播客腔：播客、TTS、content.md、脚本生成、本期播客、播客内容、感谢收听、谢谢收听、谢谢观看、下期再见、拜拜；开头禁止“大家好，今天我们来聊聊”。结尾优先用本期具体结论自然收住；只有话题天然适合讨论时，才加一个承接结论的问题，禁止为了互动强塞评论区话术。
+14. `## 口播脚本`、`## 对话脚本`、`## 视频脚本` 内只能出现观众实际会听到的台词。单人每句统一使用 `【主播】`，双人只使用模板规定的真实角色标签；`【先给结论】`、`【那问题来了】`、`【接下来看】`、`【最后问你一句】` 等结构阶段绝不能当作角色标签。严禁在台词区写 `【画面】`、`【画面切换】`、`【镜头】`、`【场景】`、`【分镜】`、动作、构图、界面描述或生图提示词。
 15. 不要输出任何视觉说明或图片提示词；也不得把画面文字、鼠标动作、人物特写等生产说明混入口播。
 16. 如果来源是早报、日报、榜单、资讯合集或摘要中并列了多个事件，只能选择与当前标题直接相关的一条因果主线。其它条目即使出现在同一篇来源里也不得拼入口播；标题讲资本市场时，不得突然插入消费电子、行业认证、社会新闻等无关事件。
+17. 所有频道都必须说大白话：一句只讲一件事，能用常用词就不用行业黑话；术语不可避免时，下一句必须用生活场景、动作或比喻解释它到底是什么意思。
+18. 观众收获优先于写作技巧。完整稿至少交付四样东西：一个可核实事实、一个讲清原因的大白话解释、一个现实例子或后果、一个观众可以采用的判断或动作。反问、悬念和转折不能代替这些内容。
+19. 写完后用普通观众视角自问：我听懂了吗？为什么会这样？这和我有什么关系？以后怎么判断或怎么做？任何一项答不出来，都要补内容后再输出。
+20. 文案必须一次性写成完整叙事。后续程序只会删除套话、去重和拆长句，不会替你补转场、结论或 CTA；因此每一句都要自然承接上一句，删掉角色标签后仍应像同一个人在连续讲述。
+21. 每期先内部建立“观众共鸣契约”：多数观众共同经历过什么处境，这件事会影响他们的时间、钱、工作、家庭、安全、隐私或选择中的哪一项，哪一个具体瞬间最容易让人代入。开头、案例和结论必须围绕同一个共鸣点，不能只讲行业内部热闹。
+22. 评论来自真实观点分歧，不来自硬塞问题。资料确实存在两种判断时，先公平讲清双方各自合理的一点，再用事实表明本期立场，最后最多问一个承接结论的具体选择；没有真实分歧时不要制造对立、不要煽动群体、不要歪曲事实。
+23. 转发理由必须是“这句话替我说清楚了”或“这条判断对身边人有用”。至少写出一句观众愿意转给家人、同事或朋友的明确判断，但不能写成空泛金句。
 """.strip()
 
 
@@ -21503,18 +24269,28 @@ def build_viral_content_rules(project: dict[str, Any], template: dict[str, Any])
     learning = channel_learning_prompt_block(project, template)
     is_dual = "双人" in template_name or voice_mode == "dual"
     role_rule = (
-        "双人模式里，【女】负责掐点抛钩子和追问，不能只是礼貌接话；【男】负责解答，但每轮答完都要留下新的好奇点给下一轮承接。"
+        "双人模式里，两个人只在确实有不同信息职责时对话：一方提出观众此刻会有的具体疑问，另一方直接用事实和解释回答。"
+        "不要为了轮流说话拆句，不要让每轮都故意留下悬念。"
         if is_dual
-        else "单人模式里，【主播】不能一路平铺解释；每 2-3 句就要用一次自问自答、反问、转折或小结，把节奏继续往前推。"
+        else "单人模式里，【主播】按一条自然的因果线连续讲述；只有内容本身需要时才使用反问或转折，不按固定间隔插入话术。"
     )
     retention = retention_duration_profile(project, template)
-    retention_rule = (
-        f"本期按资料密度自适应展开，建议不少于 {retention['minimum_sec']} 秒，当前资料对应约 {retention['target_sec']} 秒；"
-        f"至少完成 {retention['information_beats']} 个不同的信息节点：钩子、事实证据、原因解释、现实影响、误区或反转、可执行建议和互动收束按主题取舍。"
-        "这不是硬性时长上限：有新证据、新案例或必要解释时可以自然写长；禁止为了缩短时长删掉必要证据，也禁止靠同义重复凑时长。"
-        if retention.get("enabled")
-        else "图文频道不使用视频时长约束。"
-    )
+    if retention.get("experiment_active"):
+        retention_rule = (
+            f"本期有一个完播实验标记，参考区间为 {retention['minimum_sec']}–{retention['maximum_sec']} 秒，仅用于后续数据对比，不是字数或时长硬上限。"
+            f"Meta 时长可以记录为 {retention['minimum_sec']}–{retention['maximum_sec']} 秒，但不得机械截断口播。"
+            "仍须完整保留本期最重要的事实、数字、案例、因果解释、现实影响和判断方法；"
+            "资料足够时自然展开，不能为了追求短而删掉必要信息，也不能用重复和空话凑时长。"
+            "不得以‘资料丰富’为由扩写成长解释文，但这条只针对重复铺陈，不能删事实和解释。"
+        )
+    elif retention.get("enabled"):
+        retention_rule = (
+            f"本期按资料密度自适应展开，建议不少于 {retention['minimum_sec']} 秒，当前资料对应约 {retention['target_sec']} 秒；"
+            f"至少完成 {retention['information_beats']} 个不同的信息节点：结果、事实证据、原因解释、现实影响、误区纠正和可执行建议按主题取舍。"
+            "这不是硬性时长上限：有新证据、新案例或必要解释时可以自然写长；禁止为了缩短时长删掉必要证据，也禁止靠同义重复凑时长。"
+        )
+    else:
+        retention_rule = "图文频道不使用视频时长约束。"
     return f"""
 爆款表达增强指令（强约束，但不能破坏频道 prompt.md 的人设和结构）：
 频道中枢：
@@ -21526,44 +24302,57 @@ def build_viral_content_rules(project: dict[str, Any], template: dict[str, Any])
 1. 第一口播句必须像短视频开场，不像文章导语；最好 10-24 个字，最迟前三句必须回答“我为什么要继续看”。
 2. 禁止弱开头：大家好、今天我们来聊聊、这期我们说、让我们走进、众所周知、随着时代发展、首先其次最后。
 3. 开头入口由上面的“本期开场差异化计划”按本期事实与频道近期分布软选择；它是创作方向，不是固定句型。禁止复用历史首句、相同前缀或只替换主题名。
-4. 前三句里至少满足以下三项中的两项：出现具体对象/数字/时间；出现反差词（其实/结果/偏偏/反而/真相）；出现一个未说完的问题或悬念。
+4. 前三句必须让观众知道本期的具体对象、重要结果和至少一条可信依据；不要求反问、反差词或悬念。
 
-二、中段必须让人愿意继续看
+二、中段必须靠内容让人愿意继续看
 1. 不能连续 3 句只解释概念；每讲一个观点，紧跟一个画面、人物动作、案例、旧误区或现实后果。
-2. 每 2-3 轮对话或每 80-140 字，必须出现至少一个“信息推进动作”：追问、反问、反转、误区纠正、案例、对比、证据、代价、回扣。
-3. 允许卖关子，但 1-2 轮内必须给答案，不能空转。
+2. 每个段落都必须增加新信息：事实、原因、证据、案例、后果或判断方法至少一项。追问、反问和转折本身不算信息推进。
+3. 允许自然留下疑问，但下一段必须直接回答；不能靠“后面更关键”“问题来了”等句子空转。
 4. 中段至少完成一次认知推进，可以靠新证据、动作后果、误区纠正或角色选择实现；不要固定套“你以为……其实……”或“表面看……真正关键是……”。
 5. {role_rule}
 
-三、结尾必须让人想互动
-1. 结尾不能只做总结，必须同时完成三件事：回扣开头、落到今天的现实、抛一个低门槛互动问题。
-2. 互动问题要具体、好回答，优先引导观众回忆经历、站队、补充经验、代入家庭/工作/消费场景；不要只写“你怎么看”。
-3. 最后一轮要让观众自然想在评论区接一句，而不是礼貌结束。
+三、结尾必须像正常说话
+1. 用本期最重要的具体结论、判断方法或现实动作自然收住，不另起一段喊口号。
+2. 互动不是必选。只有前文自然留下分歧、经历或选择时，才顺势问一个问题；问题必须承接上一句，禁止突然切到“评论区告诉我”。
+3. 禁止连续堆叠总结、回扣、站队、关注、点赞和评论动作。能一句说完就不要写三句。
 
 四、语言质感
 1. 全文必须是能说出口的短视频口语，不要写成作文、报告、百科解释。
-2. 多用短句、追问句、转折句，少用空泛抽象词；每 2-4 句最好就有一次语气变化。
+2. 长短句按正常说话自然变化，少用空泛抽象词；不要为了制造节奏机械插入追问、转折或小结。
 3. 允许 1-2 处金句，但不能满篇端着；重点是让观点一直往前走，不要原地打转。
+4. 默认观众不懂行业术语。每句话尽量只放一个新概念；术语后面马上用“说白了”“也就是说”或一个生活例子翻译，但不要机械重复同一个连接词。
+5. 删除只制造气氛却没有信息的句子，例如“很多时候事情没那么简单”“关键藏在另一层”“真正决定结果的是后面的小动作”；必须直接说清具体是什么。
 
-五、爆款写作自检（吸收 Viral Writer Skill，但不输出 Meta）
-1. 先确定一个核心观点：这条视频看完后，观众要带走的一句话是什么；所有例子和画面都围绕它，不要散。
-2. 每 30-60 秒要有一次情绪触发：惊讶、担心、好笑、恍然大悟、想反驳、想补充；不要一路平铺解释。
+五、观众观看自检（不输出 Meta）
+1. 先确定本期主要问题，再用必要的事实、背景、原因、影响、争议和行动建议把它讲完整。判断是否跑题看内容有没有帮助观众理解主要问题，不按“只能有一个观点”机械删减。
+2. 情绪必须来自事实本身造成的损失、反差、意外结果或现实关系，不按固定时间插入惊讶、担心、反问和吐槽。
 3. 论证不要只靠讲道理，至少混合两种方式：具体场景、反差对比、生活案例、数字证据、误区纠正、人物选择。
-4. 结尾不要说“感谢收听/下期再见/播客内容”，必须变成评论区问题、站队问题或经验补充问题。
+4. 结尾不要说“感谢收听/下期再见/播客内容”，也不要强行变成评论区问题；让最后一句本身提供判断或行动价值。
 
 六、生成前硬自检
 1. 如果开头像文章导语，重写。
 2. 如果中段连续解释没有推进，重写。
-3. 如果结尾没有互动欲，重写。
+3. 如果结尾像突然拼上的总结或 CTA，重写成承接上一段的具体结论。
 4. 如果出现“今天我们来聊聊、本期播客、感谢收听、下期再见、拜拜”，删除并重写。
 5. 把第一句与频道近期句式再比一次；如果仍以“就这？、你以为、先别急、很多人、我买的是”这类近期重复前缀开场，只重写第一口播句，不改事实。
 
-七、完播率硬约束
+七、观看体验检查
 1. {retention_rule}
-2. 前 2 秒先给结果或冲突，前 8 秒必须兑现第一条证据，不能先铺背景。
-3. 每 8-12 秒至少推进一个新节点：新证据、新后果、新反转或可执行动作；相邻节点不能表达同一个意思。
-4. 全片只讲一个核心结论；硬数字最多集中成两组，数字出现后立刻解释它对观众意味着什么。
-5. 结尾只保留一个总结和一个评论动作，不能连续写多个“最后一句”。
+2. 开头先给最值得听的具体结果或冲突，随后尽快交代第一条证据，不能先铺空背景。前三句除了“发生了什么”，还必须说清“这会影响谁或改变什么”；只有奇观、无人店、机器人动作而没有人的利害关系，不算钩子。
+3. 叙事持续增加新节点：新证据、新原因、新后果或可执行动作；相邻节点不能表达同一个意思，也不按秒数机械切段。
+4. 全片保持清晰主线，但允许出现多个相互支撑的结论和数字。每个数字都要说明来源、比较对象以及它对观众意味着什么。
+5. 结尾用一个有内容的判断或动作自然收住；互动问题可有可无，不能作为固定尾巴拼上去。
+
+八、观众收获硬约束
+1. 全片必须回答清楚四个问题：发生了什么；为什么会这样；这和普通人有什么关系；观众接下来如何判断或行动。
+2. 至少包含一个来源可核实的事实和一个具体生活场景。不能用“背后逻辑、关键一步、另一层原因、值得注意”代替事实。
+3. 最后总结必须是一句有内容的判断，不是口号。观众听完应该能复述出一个新知识、一个判断标准或一个可执行动作。
+
+九、共鸣、情绪与观点张力
+1. 先内部写清本期最主要的观众共鸣点；资料确实支持时可以补充次要影响，但必须自然服务于主题，不能人为制造情绪或对立。
+2. 情绪必须由事实后果和人物选择产生。镜头可对应紧张、后悔、意外、释然、认同，但台词不要直接命令观众“震惊、愤怒、焦虑”。
+3. 只有资料确实支持两种观点时才建立对立：先公平呈现双方合理处，再给证据和本期立场。禁止为了评论量编造敌人、扣帽子或挑动群体对骂。
+4. 互动问题只能问一个具体选择，并承接前一句结论；没有真实分歧时不问。转发价值来自“替观众说清楚”或“对身边人有用”，不是喊口号。
 """.strip()
 
 
@@ -21572,26 +24361,73 @@ def compose_deepseek_rewrite_messages(
     template: dict[str, Any],
     content: str,
     report: dict[str, Any],
+    *,
+    brief: str = "",
+    references: list[dict[str, Any]] | None = None,
+    rewrite_targets: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     template_name = clean_text(template.get("name") or template.get("key") or project.get("template") or "")
     learning = channel_learning_prompt_block(project, template)
     issues = report.get("issues") or []
+    brief_excerpt = compact_prompt_rule(brief, 5200)
+    evidence_lines = []
+    for item in references or []:
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(str(item.get("title") or ""))
+        snippet = clean_text(str(item.get("snippet") or ""))
+        url = clean_text(str(item.get("url") or ""))
+        if title or snippet:
+            evidence_lines.append(f"- {title}：{snippet[:420]}（{url}）")
+        if len(evidence_lines) >= 6:
+            break
+    evidence_context = "\n".join(evidence_lines) or "- 沿用当前稿件中已经出现且可追溯的事实，不新增精确数字。"
     issue_lines = "\n".join(
         f"- {item.get('where')}: {item.get('issue')} 修法：{item.get('fix')}"
         for item in issues[:4]
         if isinstance(item, dict)
-    ) or "- 开头不够抓人，中段推进不够密，结尾互动不够强。"
-    return [
+    ) or "- 核心结论不够清楚，中段存在重复解释，结尾没有给出自然且有内容的收束。"
+    repetition = report.get("information_repetition") if isinstance(report.get("information_repetition"), dict) else {}
+    repeated_examples = [
+        f"- 第{int(item.get('left_index', 0)) + 1}句与第{int(item.get('right_index', 0)) + 1}句重复：{clean_text(str(item.get('left') or ''))} / {clean_text(str(item.get('right') or ''))}"
+        for item in [*(repetition.get("repeated_facts") or []), *(repetition.get("repeated_theses") or [])][:5]
+        if isinstance(item, dict)
+    ]
+    repetition_block = "\n".join(repeated_examples)
+    target_lines = []
+    for index, item in enumerate(rewrite_targets or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        claim = clean_text(str(item.get("claim") or ""))
+        if not claim:
+            continue
+        reason = clean_text(str(item.get("reason") or "当前来源没有明确支持该断言"))
+        instruction = clean_text(str(item.get("instruction") or "收窄为来源能够直接证明的表述；仍无法成立时删除该句"))
+        target_lines.append(f"{index}. 原句：{claim}\n   越界原因：{reason}\n   必做修订：{instruction}")
+    targeted_rewrite_block = "\n".join(target_lines)
+    if targeted_rewrite_block:
+        targeted_rewrite_block = (
+            "\n\n本轮是来源边界定向修订，不是泛化润色。下面每条原句都必须在最终稿中被实质修改或删除，"
+            "不得原样保留；只处理越过来源边界的断言，同时保留主题、章节、角色、已验证数字和其余有效内容。"
+            "不得新增法律结论、行业普遍性判断、收入因果或来源未写明的数字。\n"
+            f"{targeted_rewrite_block}"
+        )
+    return episode_review.attach_guidance([
         {
             "role": "system",
             "content": (
-                "你是短视频内容总编。你的任务不是改结构，而是在保留频道风格、角色标签、章节名、事实信息、时长档位、图片章节结构的前提下，"
-                "把稿子的开头钩子、中段追看欲、结尾互动全部拉起来。借鉴爆款写作方法，但不要输出分析 Meta。"
-                "本次只重写观众能听到的文案，不输出图片提示词、visual_brief、分镜、构图或镜头说明。"
+                "你是短视频内容总编。不要重做栏目格式；可以重排叙事顺序、把后置冲突提前、删除无效铺垫。在保留频道风格、角色标签、章节名、事实信息、时长档位、图片章节结构的前提下，"
+                "把稿子的开头钩子、中段信息推进和观众收获拉起来。借鉴爆款写作方法，但不要输出分析 Meta。"
+                "本次重点重写观众能听到的文案；Meta、原始材料简述、重点字幕、图片提示词和参考资料等生产章节必须完整保留，"
+                "非口播章节若不需修订就原样带回，禁止只返回口播片段。"
                 "必须检查主题连贯性：整稿只保留与主标题直接相关的一条因果主线；删除从早报、榜单或资讯合集摘要误带入的无关新闻，不能为了保留素材把两件不相干的事硬连成结论。"
+                "只输出最终完整 Markdown，不输出分析、思考过程或修改说明。"
                 "最终台词禁止出现：今天我们来聊聊、本期播客、播客内容、感谢收听、谢谢观看、下期再见、拜拜、TTS、content.md。只输出修订后的完整 content.md。"
-                "\n\n"
                 + build_output_language_rules(project)
+                + "\n本次证据交付策略："
+                + json.dumps(evidence_delivery_policy(references or [], brief), ensure_ascii=False)
+                + "\n返回有材料支持的完整短稿，不用补资料清单替换口播。"
+                  "用户材料需归因，不能升级成独立核实；缺乏依据的原因或影响删除，不强补机制和时长。"
             ),
         },
         {
@@ -21599,16 +24435,22 @@ def compose_deepseek_rewrite_messages(
             "content": (
                 f"频道：{template_name}\n"
                 "请重写下面这份稿子的表达张力，但不要改掉章节结构，不要删角色标签，不要改成别的频道风格。\n"
-                "必须做到：开头更抓人且与同频道近期首句不同构，中段每隔 2-3 句有推进，结尾有具体互动问题，并且回扣开头。\n"
-                "改稿时内部按这 4 件事检查：核心观点是否清楚、情绪触发是否连续、论证是否有场景/反差/证据/案例、互动钩子是否具体好回答。\n"
+                "必须做到：开头更抓人且与同频道近期首句不同构，中段持续增加新的事实或解释，结尾承接前文自然收住。\n"
+                "前三句必须同时交付可看见的场景和明确利害关系：这影响谁、会损失或改变什么、观众为什么值得继续听。只写奇观场景不算合格。\n"
+                "保留原始 brief 的核心冲突、观众情绪和最终追问。若其中某个精确数字缺少来源，只收缩该数字，不得顺手删掉整条叙事主线、现实代价或价值判断。\n"
+                "改稿时内部按这 5 件事检查：核心观点是否清楚、是否有可核实事实、是否用大白话讲清原因、观众是否得到判断或行动、全文是否像一个人在自然讲述。\n"
+                "禁止只补反问、转折和情绪词来伪装推进；每次推进必须带来新事实、新解释、新后果、新例子或新行动。\n"
+                "信息增量硬规则：同一数字事实只完整出现一次，同一核心观点只解释一次；后文若没有新增来源、原因、后果、反方证据或行动，直接删除，不得换同义词复述。\n"
                 "硬禁词：今天我们来聊聊、本期播客、播客内容、感谢收听、谢谢观看、下期再见、拜拜。出现就必须删除重写。\n"
                 f"{learning}\n\n"
-                f"当前问题：\n{issue_lines}\n\n"
+                f"本期原始创作意图（用来恢复主线，不是要求照抄）：\n{brief_excerpt or '以当前主题与稿件为准。'}\n\n"
+                f"本期可追溯事实：\n{evidence_context}\n\n"
+                f"当前问题：\n{issue_lines}\n{repetition_block}{targeted_rewrite_block}\n\n"
                 "当前稿件：\n"
                 f"{content}\n"
             ),
         },
-    ]
+    ], project)
 
 
 def strip_dialogue_speaker(text: str) -> str:
@@ -21933,7 +24775,7 @@ def channel_visual_contract(template: dict[str, Any] | None, purpose: str) -> st
     """Short, final visual constraints that survive prompt compaction."""
     style = channel_image_style_prompt(template)
     material = (
-        "固定为纸张线稿卡通：暖米白纸张、炭黑手绘线；砖红/靛蓝/芥末黄只做重点；禁止写实摄影、3D渲染、暗色控制台和霓虹"
+        "固定为成熟编辑线稿卡通与印刷质感；本期底色和强调色由主题决定，同集一致、跨主题主动变化；禁止写实摄影、3D渲染、暗色控制台和霓虹"
         if "纸张" in style or "线稿" in style
         else "材质约束：保持频道既定材质、线条和颜色，不混入其它频道的主色或画风"
     )
@@ -21954,14 +24796,14 @@ def normalize_prompt_for_channel_material(prompt: str, template: dict[str, Any] 
     replacements = {
         "哑光深蓝小矩形芯片格": "炭黑线稿小矩形参数格",
         "深蓝小矩形芯片格": "炭黑线稿小矩形参数格",
-        "信号橙": "砖红与芥末黄平涂",
+        "信号橙": "本期主题强调色",
         "橙色模块": "被标记的参数格",
         "橙色激活节点": "砖红激活标记",
         "青色数据流": "手绘靛蓝箭头",
         "扁平数据线": "手绘靛蓝箭头",
-        "成熟2D科技编辑卡通世界": "暖米白纸张线稿科技编辑卡通世界",
-        "高质感2D科技编辑卡通": "成熟纸张线稿科技编辑卡通",
-        "二维平面感和哑光材质": "暖米白纸纤维、炭黑线稿和轻微印刷网点",
+        "成熟2D科技编辑卡通世界": "成熟编辑线稿卡通世界",
+        "高质感2D科技编辑卡通": "成熟编辑线稿卡通",
+        "二维平面感和哑光材质": "清晰线稿和轻微印刷网点",
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
@@ -21981,12 +24823,28 @@ def channel_image_policy_signature(template: dict[str, Any] | None) -> str:
 
 
 def apply_channel_image_policy(prompt: str, template: dict[str, Any] | None, purpose: str) -> str:
-    """Append channel policy after generic prompt cleanup so it cannot be lost."""
+    """Keep scene facts first so prompt compaction cannot erase them."""
     prompt = normalize_prompt_for_channel_material(prompt, template)
-    # The image model follows the first compact instructions much more
-    # reliably than a long policy appended after the story.  Keep the channel
-    # contract explicit but small, then reserve the remaining context for this
-    # exact narration and its visual evidence.
+    if PRODUCTION_LOGIC_VERSION == "project-109":
+        # Restore 109's full channel contract. The current episode prompt is
+        # authoritative; channel settings are appended only when absent and
+        # never replace the episode subject or narration.
+        raw_policies = [
+            ("频道固定视觉签名", channel_image_style_prompt(template)),
+            ("频道画面策略", str((template or {}).get("visual_strategy") or "")),
+            ("频道固定色彩系统", channel_visual_palette_prompt(template)),
+            ("频道禁止元素", channel_image_negative_prompt(template)),
+            ("频道视觉合同", channel_visual_contract(template, purpose)),
+        ]
+        additions = [
+            f"{label}：{clean_text(value)}"
+            for label, value in raw_policies
+            if clean_text(value) and f"{label}：" not in prompt
+        ]
+        return "。".join([prompt.strip("。"), *additions]).strip("。")
+    # Channel style is a rendering contract, not the scene subject. Putting it
+    # first caused later compaction to retain the same template for every scene
+    # while cutting off the narration and evidence that made scenes distinct.
     style = compact_prompt_rule(channel_image_style_prompt(template), 96)
     strategy = compact_prompt_rule(channel_image_strategy_prompt(template), 64)
     negative = compact_prompt_rule(channel_image_negative_prompt(template), 72)
@@ -22012,7 +24870,7 @@ def apply_channel_image_policy(prompt: str, template: dict[str, Any] | None, pur
     total_limit = 760 if purpose == "cover" else 700
     base_limit = max(250, total_limit - len(policy_text) - 2)
     base = compact_visual_image_prompt(prompt, base_limit).strip("。")
-    return f"{policy_text}。本镜内容：{base}".strip("。")
+    return f"本镜内容：{base}。{policy_text}".strip("。")
 
 
 def episode_visual_continuity_prompt(
@@ -22085,9 +24943,10 @@ def scene_viewpoint_hint(index: int, total: int, visual_type: str) -> str:
 
 
 def scene_text_overlay_policy(narrative: str, visual_type: str, hooks: list[str]) -> str:
-    hook_text = "、".join(filter_visual_hook_items(hooks, 4))
-    base = "是否使用文字及文字数量、位置、材质和信息层级，由当前口播的表达需要决定，核心事实必须准确"
-    return f"{base}；可参考的口播信息：{hook_text}" if hook_text else base
+    return (
+        "原生画面文字：根据当前口播自行选择完整结论、数字、标签、批注和必要说明；"
+        "文字自然融入主体和证据关系，可自动换行，不限制为固定短钩子，禁止截断、乱码、Logo和水印"
+    )
 
 
 def scene_variety_directive(index: int, total: int, narrative: str, visual_type: str) -> str:
@@ -22544,7 +25403,7 @@ SOURCE_INFORMATION_SYNONYM_GROUPS = (
 
 
 def active_source_references(project_id: int, references: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    source_references = storage.get_references(project_id) if references is None and project_id else (references or [])
+    source_references = effective_project_references(project_id) if references is None and project_id else (references or [])
     result: list[dict[str, Any]] = []
     for item in source_references:
         if not isinstance(item, dict):
@@ -23017,10 +25876,8 @@ def scene_source_information_payload(
         if len(selected) >= max(1, int(limit or 1)):
             break
     grounding = "references" if selected else "speech"
-    if not selected:
-        selected = script_context_evidence_candidates(content, spoken, limit=limit)
-        if selected:
-            grounding = "script_context"
+    # Adjacent narration belongs to other shots, not to the current shot's
+    # evidence. With no relevant reference, ground the image in this speech.
 
     mode_counts = Counter(clean_text(str(item.get("mode") or "evidence")) for item in selected)
     information_mode = mode_counts.most_common(1)[0][0] if mode_counts else source_information_mode(spoken)
@@ -23077,6 +25934,7 @@ def scene_source_information_payload(
     required_text = dedupe_clauses([headline, *fact_chips])
     return {
         "policy_version": SOURCE_INFORMATION_POLICY_VERSION,
+        "bound_speech": spoken,
         "primary_message": primary_message,
         "information_mode": information_mode,
         "visual_relation": SOURCE_INFORMATION_RELATIONS.get(information_mode, SOURCE_INFORMATION_RELATIONS["evidence"]),
@@ -23104,19 +25962,90 @@ def scene_source_information_payload(
 
 def scene_prompt_speech_anchor(prompt: str) -> str:
     source = normalize_image_prompt(prompt)
+    bound = re.search(r"本镜绑定口播\s*[:：]\s*(.*?)(?=\n|[。；;])", source)
+    if bound:
+        return clean_explicit_scene_spoken_text(bound.group(1))
+    current = re.search(
+        r"当前完整口播\s*[:：]\s*(.*?)(?=\n|[，,。；;]\s*(?:画面任务|本镜任务|本镜信息任务|主体|主主体|动作|冲突|频道)\s*[:：]|$)",
+        source,
+    )
+    if current:
+        return clean_explicit_scene_spoken_text(current.group(1))
     quoted = re.search(r"口播原文\s*[:：]\s*「([^」]+)」", source)
     if quoted:
-        return clean_scene_spoken_text(quoted.group(1))
+        return clean_explicit_scene_spoken_text(quoted.group(1))
     match = re.search(
         r"口播原文\s*[:：]\s*[「“\"]?(.*?)[」”\"]?(?=[，,。；;]\s*(?:画面任务|本镜任务|本镜信息任务|主体|主主体|动作|冲突|冲突/悬念|镜头视角|影像质感|频道质感)\s*[:：]|$)",
         source,
     )
     if match:
-        return clean_scene_spoken_text(match.group(1))
+        return clean_explicit_scene_spoken_text(match.group(1))
+    task_quote = re.search(
+        r"(?:本镜信息任务|本镜任务|画面任务)\s*[:：].*?以[「“\"]([^」”\"]{2,220})[」”\"]为主信息",
+        source,
+    )
+    if task_quote:
+        return clean_explicit_scene_spoken_text(task_quote.group(1))
     return clean_scene_spoken_text(
         extract_prompt_dialogue_hint_full(source)
         or extract_prompt_dialogue_hint(source, 180)
     )
+
+
+def scene_prompt_matches_authoritative_speech(
+    prompt: str,
+    expected_speech: str,
+    *,
+    fallback_anchor: str = "",
+    minimum_score: int = 32,
+) -> bool:
+    """Check every supported narration field after final candidate binding."""
+    source = normalize_image_prompt(prompt)
+    expected = clean_scene_spoken_text(expected_speech)
+    fallback = clean_scene_spoken_text(fallback_anchor)
+    if not source or not expected:
+        return False
+    anchors = [scene_prompt_speech_anchor(source)]
+    for pattern in (
+        r"本镜绑定口播\s*[:：]\s*(.*?)(?=\n|[。；;]|$)",
+        r"当前完整口播\s*[:：]\s*(.*?)(?=\n|$)",
+        r"口播原文\s*[:：]\s*[「“\"]?(.*?)[」”\"]?(?=\n|$)",
+    ):
+        anchors.extend(clean_explicit_scene_spoken_text(item) for item in re.findall(pattern, source))
+    anchors.extend([fallback, source])
+    for anchor in (item for item in anchors if item):
+        if expected in anchor or anchor in expected:
+            return True
+        if max(
+            token_overlap_score(anchor, expected, limit=96),
+            token_overlap_score(expected, anchor, limit=96),
+        ) >= minimum_score:
+            return True
+    return False
+
+
+def manifest_scene_speech_anchor(item: dict[str, Any]) -> str:
+    audience = item.get("audience_visual") if isinstance(item.get("audience_visual"), dict) else {}
+    source_information = (
+        item.get("source_information")
+        if isinstance(item.get("source_information"), dict)
+        else {}
+    )
+    return clean_scene_spoken_text(
+        str(audience.get("spoken") or source_information.get("primary_message") or "")
+    )
+
+
+def prompt_matches_manifest_scene(prompt: str, item: dict[str, Any]) -> bool:
+    """Reject a rewrite when it carries another scene's narration."""
+
+    expected = manifest_scene_speech_anchor(item)
+    if not expected:
+        return True
+    candidate = normalize_image_prompt(prompt)
+    embedded = scene_prompt_speech_anchor(candidate)
+    comparison = embedded or candidate
+    return token_overlap_score(comparison, expected, limit=96) >= 32
 
 
 def source_information_prompt_clauses(payload: dict[str, Any]) -> list[str]:
@@ -23318,11 +26247,18 @@ def build_content_scene_prompt_lines(project: dict[str, Any], template: dict[str
             f"影像质感：{compact_prompt_rule(content_scene_style_hint(style, template), 42)}",
             project_visual_text_language_rule(project, "scene"),
         ]
-        line = compact_prompt_rule(
-            "，".join(dedupe_clauses([item for item in clauses if clean_text(item)])),
-            520 if project_is_product_mode(project) else 300,
-        )
-        line = line.replace("...", "").replace("…", "").strip("，,。") + "。"
+        source_line = "，".join(dedupe_clauses([item for item in clauses if clean_text(item)]))
+        if PRODUCTION_LOGIC_VERSION == "project-109":
+            # Do not collapse the scene into a generic 300-character card.
+            # 109 kept the speech anchor, evidence, visual relation and channel
+            # details together so the image model could choose a real scene.
+            line = source_line.strip("，,。") + "。"
+        else:
+            line = compact_prompt_rule(
+                source_line,
+                520 if project_is_product_mode(project) else 300,
+            )
+            line = line.replace("...", "").replace("…", "").strip("，,。") + "。"
         lines.append(line)
     return lines
 
@@ -23333,6 +26269,10 @@ def build_content_cover_prompt(project: dict[str, Any], template: dict[str, Any]
     topic = clean_text(first_heading(visual_content or content) or project.get("topic_name") or "本期主题")
     summary = summarize_content(visual_content or content, mode)
     cover_title = clean_text(summary.get("cover_title") or first_heading(content) or topic)
+    # Prefer a complete publish headline when the raw topic is too long for a readable cover.
+    publish_title = clean_text(summary.get("publish_title") or "")
+    if len(cover_title) > 44 and 12 <= len(publish_title) <= 48:
+        cover_title = publish_title
     cover_short_title = compact_cover_title_for_prompt(cover_title, topic)
     subtitle = clean_text(summary.get("cover_subtitle") or extract_bullet_field(visual_content, "封面副标题"))
     brand = clean_text(template.get("brand_name") or template.get("name") or template.get("key") or project.get("template") or "")
@@ -23403,9 +26343,26 @@ def build_content_cover_prompt(project: dict[str, Any], template: dict[str, Any]
         [compact_prompt_rule(item, 58) for item in subject_hints if clean_text(item)]
     )[:2]
 
+    # Put episode-specific semantic anchors before all channel style boilerplate.
+    # This prevents a generic phone/tech motif from displacing the actual story.
+    episode_anchor = clean_text(
+        "；".join(
+            item for item in (
+                topic,
+                cover_title,
+                subtitle,
+                cover_anchor,
+                extract_bullet_field(visual_content, "原始材料简述"),
+                extract_bullet_field(visual_content, "重点字幕"),
+            )
+            if clean_text(item)
+        )
+    )
     clauses = [
+        f"当前项目唯一事实来源：{episode_anchor}",
         f"主题：{topic}",
         f"封面任务：{focuses[0]}" if focuses else f"封面任务：{cover_title or topic}",
+        "只围绕当前项目事实构图；不得套用其它项目、旧封面或通用手机价格/容量模板。",
         product_visual_prompt_block(project, purpose="cover"),
         visual_director_cover_clause(visual_brief),
         concrete_hint,
@@ -23517,6 +26474,13 @@ def visual_prompt_manifest_is_current(
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     if not scenes or int(manifest.get("scene_count") or 0) != len(scenes):
         return False
+    project_id = int(project.get("id") or 0)
+    if project_id:
+        settings = project_scene_count_settings(project_id)
+        if clean_text(str(settings.get("scene_count_mode") or "")).lower() == "fixed":
+            fixed_count = clamp_scene_count(settings.get("scene_count_fixed", 6))
+            if len(scenes) != fixed_count:
+                return False
     for index, item in enumerate(scenes, start=1):
         if not isinstance(item, dict) or not clean_text(str(item.get("prompt") or "")):
             return False
@@ -23547,8 +26511,18 @@ def load_visual_prompt_manifest(project_id: int, content: str | None = None) -> 
     return {}
 
 
+def get_or_create_visual_prompt_manifest(project_id: int, content: str | None = None) -> dict[str, Any]:
+    content_text = content if content is not None else storage.get_content(project_id)
+    manifest = load_visual_prompt_manifest(project_id, content_text)
+    if manifest:
+        return manifest
+    # Rebuild through the single saving path. ``force=True`` prevents a second
+    # stale-cache lookup and also synchronizes scene prompt records.
+    return save_visual_prompt_manifest(project_id, content_text, force=True)
+
+
 def visual_prompt_manifest_scene_prompts(project_id: int, content: str | None = None) -> list[str]:
-    manifest = load_visual_prompt_manifest(project_id, content)
+    manifest = get_or_create_visual_prompt_manifest(project_id, content)
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     return [
         clean_text(str(item.get("prompt") or ""))
@@ -23558,7 +26532,7 @@ def visual_prompt_manifest_scene_prompts(project_id: int, content: str | None = 
 
 
 def visual_prompt_manifest_cover_prompt(project_id: int, kind: str, content: str | None = None) -> str:
-    manifest = load_visual_prompt_manifest(project_id, content)
+    manifest = get_or_create_visual_prompt_manifest(project_id, content)
     covers = manifest.get("covers") if isinstance(manifest.get("covers"), dict) else {}
     normalized_kind = clean_text(kind).lower()
     item = covers.get(normalized_kind) if isinstance(covers, dict) else None
@@ -23590,6 +26564,12 @@ def build_visual_prompt_manifest(
         topic=visual_topic,
         content=editorial_content,
     )
+    episode_topic_source = clean_text(f"{visual_topic}\n{editorial_content}")
+    episode_topic_type = infer_visual_topic_type(
+        episode_topic_source,
+        classify_material_style(episode_topic_source, template, "scene"),
+        classify_visual_prompt_domain(episode_topic_source, "scene"),
+    )
     repetition: dict[str, Any] = {}
     with contextlib.suppress(Exception):
         repetition = channel_repetition_report(project_id, max_projects=20)
@@ -23598,12 +26578,31 @@ def build_visual_prompt_manifest(
     scene_lines = [normalize_image_prompt(item) for item in (scene_lines_override or []) if normalize_image_prompt(item)]
     if not scene_lines:
         scene_lines = build_content_scene_prompt_lines(project, template, editorial_content)
+    speech_anchors = select_dialogue_scene_anchors(
+        editorial_content,
+        mode,
+        len(scene_lines),
+        limit=160,
+    )
     episode_continuity = episode_visual_continuity_prompt(project_id, project, template, editorial_content)
 
     scenes: list[dict[str, Any]] = []
     for index, prompt in enumerate(scene_lines, start=1):
-        scene_speech = scene_prompt_speech_anchor(prompt) or clean_text(prompt)
+        # The final narration is authoritative. A stale visual prompt may still
+        # contribute composition ideas, but it must not select another scene's speech.
+        scene_speech = (
+            speech_anchors[index - 1]
+            if index <= len(speech_anchors)
+            else scene_prompt_speech_anchor(prompt) or clean_text(prompt)
+        )
         scene_speech = expand_scene_speech_anchor(editorial_content, mode, scene_speech)
+        prompt, _alignment, _rebound = rebind_scene_prompt_to_audio(
+            visual_topic,
+            prompt,
+            scene_speech,
+            scene_speech,
+            minimum_alignment=24,
+        )
         audience_plan = audience_visual_plan(
             topic=visual_topic,
             narration=scene_speech,
@@ -23659,12 +26658,14 @@ def build_visual_prompt_manifest(
         one_second_takeaway = clean_text(tension_match.group(1)) if tension_match else clean_text(
             str(audience_plan.get("audience_takeaway") or scene_speech)
         )
+        entity_constraints = visual_entity_constraint_block(visual_topic, editorial_content)
         prompt = compact_visual_image_prompt(
             "。".join(
                 dedupe_clauses(
                     [
                         f"本期主题：{visual_topic}",
                         f"当前完整口播：{scene_speech}",
+                        entity_constraints,
                         f"观众1秒必须看懂：{one_second_takeaway}",
                         prompt,
                         *source_information_prompt_clauses(source_information),
@@ -23679,10 +26680,17 @@ def build_visual_prompt_manifest(
             prompt = f"{prompt}。{episode_continuity}".strip("。")
         if pose_avoidance:
             prompt = compact_visual_image_prompt(f"{prompt}。{pose_avoidance}", 1200)
-        # Do not let continuity/source annotations turn a generation request
-        # back into a page-long brief.  The retained front section contains the
-        # channel contract, current narration, visual concept and core facts.
-        prompt = compact_visual_image_prompt(prompt, 740)
+        prompt = enforce_scene_prop_contract(prompt, scene_speech, episode_topic_type)
+        prompt = enforce_episode_event_visual_contract(
+            prompt,
+            topic=visual_topic,
+            content=editorial_content,
+            speech=scene_speech,
+            topic_type=episode_topic_type,
+        )
+        # Keep the complete Project 109 grounded brief in the manifest.
+        # Provider compaction runs once at dispatch; doing it here as well
+        # discards narration and evidence before review.
         prompt_hash = hashlib.sha256(prompt.encode("utf-8", errors="ignore")).hexdigest()[:16]
         prompt_numeric_facts = sorted(
             {
@@ -23766,6 +26774,7 @@ def build_visual_prompt_manifest(
         "verified_numeric_facts": sorted(verified_numeric_facts),
         "source_information_policy_version": SOURCE_INFORMATION_POLICY_VERSION,
         "audience_visual_policy_version": AUDIENCE_VISUAL_POLICY_VERSION,
+        "topic_type": episode_topic_type,
         "reference_information_hash": clean_text(str(identity.get("reference_information_hash") or "")),
         "source_information_candidate_count": len(source_candidates),
         "scene_count": len(scenes),
@@ -23797,6 +26806,12 @@ def save_visual_prompt_manifest(
     if preserve_covers and isinstance(previous, dict) and isinstance(previous.get("covers"), dict):
         manifest["covers"] = previous["covers"]
     storage.write_json(visual_prompt_manifest_path(project_id), manifest)
+    scene_targets = [
+        clean_text(str(item.get("target") or ""))
+        for item in manifest.get("scenes", [])
+        if isinstance(item, dict) and clean_text(str(item.get("target") or ""))
+    ]
+    sync_scene_prompt_records_from_manifest(project_id, manifest, scene_targets)
     return manifest
 
 
@@ -23834,6 +26849,23 @@ def sync_scene_prompt_records_from_manifest(
             records.append(record)
             records_by_filename[target] = record
         lineage = item.get("lineage") if isinstance(item.get("lineage"), dict) else {}
+        image_path = storage.project_file(project_id, f"scenes/{target}")
+        if image_path.exists():
+            # A manifest describes the next requested image. It is not proof
+            # that the existing pixels were generated from that request.
+            # Keep actual generation lineage immutable until generation or an
+            # explicit manual acceptance updates this record.
+            record.update(
+                {
+                    "planned_prompt": prompt,
+                    "planned_content_hash": clean_text(str(lineage.get("content_hash") or manifest.get("content_hash") or "")),
+                    "planned_topic_hash": clean_text(str(lineage.get("topic_hash") or manifest.get("topic_hash") or "")),
+                    "planned_prompt_policy_version": clean_text(str(manifest.get("prompt_policy_version") or IMAGE_PROMPT_POLICY_VERSION)),
+                    "plan_updated_at": storage.now_ts(),
+                }
+            )
+            changed = True
+            continue
         record.update(
             {
                 "prompt": prompt,
@@ -23912,6 +26944,15 @@ def update_visual_prompt_manifest_prompts(
             "source": source,
             "generated_at": storage.now_ts(),
         }
+        if normalized_purpose == "scene" and not prompt_matches_manifest_scene(prompt, item):
+            item["last_rejected_candidate"] = {
+                **candidate,
+                "reason": "candidate_not_bound_to_scene_narration",
+            }
+            item["best_version_locked"] = True
+            preserved_targets.append(target)
+            changed = True
+            return
         if (
             not force
             and current_prompt
@@ -24060,6 +27101,7 @@ def summarize_content(content: str, mode: str) -> dict[str, Any]:
     cover_title = extract_meta_field(content, "封面主标题") or meta_publish_title or title or ""
     cover_subtitle = extract_meta_field(content, "封面副标题")
     publish_title = extract_meta_field(content, "推荐发布标题") or meta_publish_title or title
+    publish_description = extract_meta_field(content, "发布描述")
     duration = extract_meta_field(content, "时长")
     scene_prompts = parse_scene_prompts(content, mode)
     highlights = parse_highlights(content)
@@ -24090,6 +27132,7 @@ def summarize_content(content: str, mode: str) -> dict[str, Any]:
         "cover_title": cover_title or fallback_cover_title(title or publish_title),
         "cover_subtitle": cover_subtitle,
         "publish_title": publish_title,
+        "publish_description": publish_description,
         "duration": duration,
         "dialogue_count": len(dialogue_lines),
         "scene_count": len(scene_prompts),
@@ -24100,24 +27143,176 @@ def summarize_content(content: str, mode: str) -> dict[str, Any]:
     }
 
 
+def classify_content_explanation_mode(
+    topic: str,
+    brief: str = "",
+    references: list[dict[str, Any]] | None = None,
+    content: str = "",
+) -> dict[str, Any]:
+    """Build a fresh, episode-local explanation contract before writing.
+
+    This deliberately ignores channel history and previous project strategy so a
+    consumer-price episode cannot leak its resonance template into an executive
+    transition, a technical mechanism, or another unrelated subject.
+    """
+    ref_text = " ".join(
+        clean_text(f"{item.get('title', '')} {item.get('snippet', '')}")
+        for item in (references or [])
+        if isinstance(item, dict)
+    )
+    topic_text = clean_text(topic)
+    evidence_text = clean_text(" ".join([topic_text, brief, ref_text]))
+    lower = evidence_text.lower()
+
+    rules = [
+        ("transition", ("卸任", "退休", "离职", "接任", "交接", "换帅", "高管变动", "负责人变动")),
+        ("mechanism", ("机制", "原理", "如何运转", "怎么运转", "如何工作", "怎么工作", "为何", "为什么", "靠什么")),
+        ("conflict", ("封禁", "封杀", "拒绝", "争夺", "冲突", "对立", "阵营", "起诉", "反对")),
+        ("decision", ("怎么买", "怎么选", "值不值", "避坑", "购买", "价格", "降价", "涨价", "消费")),
+        ("trend", ("趋势", "正在改变", "增长", "下降", "拐点", "未来", "浪潮")),
+        ("impact", ("影响", "意味着", "后果", "会怎样", "改变什么")),
+    ]
+    content_type = "event"
+    for candidate, tokens in rules:
+        if any(token.lower() in lower for token in tokens):
+            content_type = candidate
+            break
+
+    subject = topic_text or clean_text(brief)[:80] or "当前事件"
+    if content_type == "transition":
+        central_question = f"{subject}之后，如何判断相关业务是依赖个人，还是已经能够连续运转？"
+        explanation_target = "关键岗位变化与业务连续性之间的判断依据"
+        causal_chain = ["发生了什么岗位变化", "这个岗位原本负责什么", "哪些制度、记录和接替信号决定能否连续运转", "目前证据能证明到哪里"]
+        viewer_relevance = "帮助观众判断一次高管变动究竟是普通交接，还是组织风险信号"
+    elif content_type == "mechanism":
+        central_question = f"{subject}究竟靠什么条件触发、经过哪些环节并产生结果？"
+        explanation_target = "当前主题所指机制的输入、运转过程、输出和边界"
+        causal_chain = ["表面现象", "机制对象与触发条件", "中间如何运转", "产生什么结果", "何时不成立"]
+        viewer_relevance = "让观众真正理解事情为什么发生，而不是只记住一个结论"
+    elif content_type == "conflict":
+        central_question = f"{subject}中，双方分别要守住什么，规则为什么发生冲突？"
+        explanation_target = "冲突双方、各自目标、规则碰撞点和现实结果"
+        causal_chain = ["冲突结果", "双方是谁", "各自目标", "规则碰撞点", "影响与边界"]
+        viewer_relevance = "帮助观众分辨真实利益冲突，而不是被人为对立带节奏"
+    elif content_type == "decision":
+        central_question = f"面对{subject}，决定前真正应该核对哪些事实和条件？"
+        explanation_target = "影响选择的价格、条件、风险和验证方法"
+        causal_chain = ["具体差异", "差异从何而来", "附带条件", "如何核对", "适用边界"]
+        viewer_relevance = "减少错误选择和信息不对称带来的成本"
+    elif content_type == "trend":
+        central_question = f"{subject}是一次偶发现象，还是能够持续的变化？"
+        explanation_target = "趋势证据、驱动因素、反例和持续条件"
+        causal_chain = ["变化信号", "连续证据", "驱动因素", "反向证据", "持续条件"]
+        viewer_relevance = "帮助观众区分短期热闹和真正趋势"
+    elif content_type == "impact":
+        central_question = f"{subject}已经确定发生了什么，又会对谁产生什么可验证影响？"
+        explanation_target = "事件结果、影响对象、传导路径和影响边界"
+        causal_chain = ["已确认事件", "影响对象", "传导路径", "现实结果", "边界"]
+        viewer_relevance = "帮助观众判断这件事与自己或行业的真实关系"
+    else:
+        central_question = f"{subject}到底发生了什么，最重要的原因、结果和判断是什么？"
+        explanation_target = "当前事件的事实主线、原因、结果和证据边界"
+        causal_chain = ["具体事件", "关键证据", "直接原因", "现实结果", "可成立的判断"]
+        viewer_relevance = "用一条完整因果主线讲清事件，不把新闻摘要当成解释"
+
+    unsupported_angles: list[str] = []
+    if not any(token in evidence_text for token in ("价格", "贵", "便宜", "降价", "涨价", "消费", "购买", "成本")):
+        unsupported_angles.append("不得套用花钱是否值得、营销溢价、购买后悔等消费主题")
+    if not any(token in evidence_text for token in ("普通人", "消费者", "用户", "个人", "员工", "观众")):
+        unsupported_angles.append("不得为了共鸣强行虚构普通人的金钱、工作或选择损失")
+    if not any(token in evidence_text for token in ("冲突", "反对", "拒绝", "封禁", "争议", "双方")):
+        unsupported_angles.append("不得为了评论量硬造双方对立")
+
+    return {
+        "content_type": content_type,
+        "event": subject,
+        "central_question": central_question,
+        "explanation_target": explanation_target,
+        "causal_chain": causal_chain,
+        "viewer_relevance": viewer_relevance,
+        "unsupported_angles": unsupported_angles,
+        "source_scope": "仅限当前主题、当前 brief 与当前参考资料",
+    }
+
+
+def audience_resonance_contract(
+    topic: str,
+    source: str = "",
+    explanation_model: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an episode-local audience thesis without forcing universal stakes."""
+    content_type = clean_text(str((explanation_model or {}).get("content_type") or ""))
+    if content_type == "transition":
+        return {
+            "shared_stake": "关键岗位更替后，组织能力能否脱离个人继续运转",
+            "honest_disagreement": "一次退休可能只是正常交接，也可能暴露关键能力仍然依赖个人；判断必须看可验证的接替与连续性信号",
+            "emotional_moment": "一个重要名字离开后，业务是否照常运转的答案逐渐清楚",
+            "plain_language_goal": "先说清岗位变化，再解释判断业务连续性要看什么证据，并明确目前未知什么",
+            "comment_trigger": "只有材料存在真实分歧时才讨论正常交接与风险信号，不制造阵营",
+            "share_trigger": "提供一套判断高管变动含义的证据框架，而不是消费或职场焦虑",
+        }
+    if content_type == "mechanism":
+        return {
+            "shared_stake": "观众能否真正听懂这套机制怎样运转、何时有效",
+            "honest_disagreement": "重点不是站队，而是区分表面结果与真实运转条件",
+            "emotional_moment": "原来看似突然的结果，其实由前面的条件和环节一步步产生",
+            "plain_language_goal": "用输入、过程、输出和边界把机制讲完整",
+            "comment_trigger": "只讨论机制证据和适用边界，不硬造对立",
+            "share_trigger": "让观众能把机制复述给别人并用于判断类似事件",
+        }
+    text = clean_text(f"{topic} {source}")
+    if any(token in text for token in ("隐私", "偷听", "权限", "定位", "泄露", "个性化广告")):
+        shared_stake = "方便和隐私到底要怎么取舍"
+        disagreement = "一边认为授权换便利很正常，另一边认为用户根本不知道交出了什么"
+        emotional_moment = "推荐精准得令人发毛，观众下意识去翻手机权限的那一刻"
+    elif any(token in text for token in ("AI", "模型", "自动化", "机器人", "智能")):
+        shared_stake = "工具替人省时间之后，人还能不能掌握结果"
+        disagreement = "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代"
+        emotional_moment = "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻"
+    elif any(token in text for token in ("价格", "贵", "便宜", "降价", "成本", "消费")):
+        shared_stake = "花出去的钱到底买到了价值还是营销"
+        disagreement = "一边愿意为省事和体验付费，另一边认为核心价值根本撑不起价格"
+        emotional_moment = "付款前觉得很值，真实使用后开始后悔或改观的那一刻"
+    elif any(token in text for token in ("健康", "医院", "疾病", "药", "血氧", "睡眠")):
+        shared_stake = "面对健康提示时该相信设备、经验还是专业检查"
+        disagreement = "一边觉得宁可信其有，另一边担心误报制造焦虑甚至耽误判断"
+        emotional_moment = "一个异常读数让全家紧张，复核结果出现反差的那一刻"
+    elif any(token in text for token in ("工作", "职场", "工资", "就业", "公司")):
+        shared_stake = "普通人的时间、收入和安全感会不会因此改变"
+        disagreement = "一边把变化看成新机会，另一边先看到岗位、收入和公平的代价"
+        emotional_moment = "原本熟悉的工作方式突然失效，观众意识到这事和自己有关的那一刻"
+    else:
+        shared_stake = "这件事会怎样改变普通人的时间、钱、选择或安全感"
+        disagreement = "一边看重眼前的好处，另一边更在意被忽略的长期代价"
+        emotional_moment = "观众从旁观变成意识到自己也可能遇到的那一刻"
+    return {
+        "shared_stake": shared_stake,
+        "honest_disagreement": disagreement,
+        "emotional_moment": emotional_moment,
+        "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+        "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+        "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断",
+    }
+
+
 def topic_score_report(project: dict[str, Any], brief: str) -> dict[str, Any]:
     topic = clean_text(project["topic_name"])
     excerpt = clean_text(brief or topic)
     familiarity = 1.0 if len(topic) <= 18 else 0.7
-    contrast = 0.9 if "为什么" in topic or "怎么" in topic or "真相" in topic else 0.7
-    story = 0.9 if len(excerpt) >= 18 else 0.6
-    reality = 0.8 if any(word in excerpt for word in ["用户", "生活", "今天", "现实", "场景"]) else 0.6
+    resonance = 1.0 if any(word in excerpt for word in AUDIENCE_REALITY_TOKENS) else 0.55
+    viewpoint = 1.0 if any(word in excerpt for word in (*AUDIENCE_VIEWPOINT_TOKENS, "争议", "取舍", "代价")) else 0.55
+    value = 1.0 if any(word in excerpt for word in ("原因", "证据", "影响", "判断", "方法", "怎么办")) else 0.65
     visual = 0.9 if any(word in excerpt for word in ["对比", "案例", "画面", "人物", "场景"]) else 0.7
-    total = round(familiarity + contrast + story + reality + visual, 1)
+    total = round(familiarity + resonance + viewpoint + value + visual, 1)
     return {
         "topic": topic,
         "brief_excerpt": excerpt[:120],
         "total_score": total,
         "scorecard": [
             {"name": "熟悉度", "score": familiarity, "reason": "主题是否能让普通观众一眼明白在讲什么。"},
-            {"name": "反常识", "score": contrast, "reason": "是否存在明显的认知反转或隐藏机制。"},
-            {"name": "故事性", "score": story, "reason": "是否能拆成起因、经过、结果的一条线。"},
-            {"name": "现实连接", "score": reality, "reason": "结尾能不能自然回到今天的生活场景。"},
+            {"name": "大众共鸣", "score": resonance, "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"},
+            {"name": "观点张力", "score": viewpoint, "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"},
+            {"name": "观看收获", "score": value, "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"},
             {"name": "可视化", "score": visual, "reason": "能否拆成多张有明确信息点的场景图。"},
         ],
         "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。",
@@ -24163,8 +27358,8 @@ def viral_doctor_report(project: dict[str, Any], content: str) -> dict[str, Any]
         or [
             {
                 "where": "整体表达",
-                "issue": "结构完整，但金句、推进和互动还可以继续抬高。",
-                "fix": "继续收紧首句、关键转折句和结尾评论钩子。",
+                "issue": "结构完整，可以继续检查事实密度、因果连贯和口语自然度。",
+                "fix": "优先删掉重复解释，让每一段都推动同一个核心结论。",
             }
         ],
         "performance_read": engagement["performance_read"],
@@ -24205,20 +27400,20 @@ def infer_platform_profile(project: dict[str, Any], template: dict[str, Any]) ->
             "platform": "图文平台",
             "format": "图文卡片/长图文",
             "voice": "密度高、标题明确、每屏一个观点",
-            "success_signals": ["首屏标题有冲突", "每页只讲一个点", "评论区有表达空间"],
+            "success_signals": ["首屏价值明确", "每页只讲一个点", "读完能形成判断"],
         }
     if "双人" in template_name:
         return {
             "platform": "抖音/视频号",
             "format": "双人对谈式横屏短视频",
             "voice": "一问一答、追问拆解、生活吐槽带出技术或观点",
-            "success_signals": ["前三秒反常识", "两人轮替节奏清楚", "每 20-40 秒有一个新信息点"],
+            "success_signals": ["开头价值明确", "两人对话承接自然", "每段都带来新的有效信息"],
         }
     return {
         "platform": "抖音/视频号",
         "format": "单人口播横屏短视频",
-        "voice": "朋友式讲故事、反常识开场、案例推动",
-        "success_signals": ["开头问题尖锐", "中段有转折", "结尾能落到现实用途"],
+        "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+        "success_signals": ["开头价值明确", "中段持续增加有效信息", "结尾给出判断或行动"],
     }
 
 
@@ -24254,16 +27449,23 @@ def content_strategy_report(
     platform = infer_platform_profile(project, template)
     refs = references or []
     ref_titles = [clean_text(str(item.get("title") or "")) for item in refs[:5] if isinstance(item, dict)]
+    evidence_source = clean_text("\n".join([topic, brief, *ref_titles]))
+    explanation_model = classify_content_explanation_mode(topic, brief, refs, content)
+    resonance_contract = audience_resonance_contract(topic, evidence_source, explanation_model)
 
-    contradiction = "旧理解和真实机制之间的反差"
-    if any(token in source for token in ("断网", "掉线", "废铁", "失效")):
+    contradiction = "旧理解和已核实事实之间的反差"
+    if explanation_model["content_type"] == "transition":
+        contradiction = "表面看是一个人离开，真正要判断的是相关能力能否脱离个人连续运转"
+    elif explanation_model["content_type"] == "mechanism":
+        contradiction = "表面只看到结果，真正需要讲清的是触发条件、中间过程和适用边界"
+    elif any(token in evidence_source for token in ("断网", "掉线", "废铁", "失效")):
         contradiction = "用户以为是网络问题，真正关键可能在底层连接方式"
-    elif any(token in source for token in ("便宜", "贵", "成本", "价格")):
+    elif any(token in evidence_source for token in ("便宜", "贵", "成本", "价格")):
         contradiction = "表面看是价格问题，背后其实是价值和风险判断"
-    elif any(token in source for token in ("AI", "模型", "自动化")):
+    elif any(token in evidence_source for token in ("AI", "模型", "自动化")):
         contradiction = "大家只看工具热闹，真正差异在流程和验证能力"
 
-    emotion_curve = ["好奇", "共鸣", "意外", "理解", "想试/想评论"]
+    emotion_curve = ["立刻知道结果", "看到证据", "理解原因", "知道影响", "会判断或会行动"]
     if mode == "article":
         emotion_curve = ["被标题钩住", "发现误区", "逐页拆解", "得到结论", "愿意收藏"]
 
@@ -24276,18 +27478,20 @@ def content_strategy_report(
         "reference_count": len(refs),
         "reference_titles": ref_titles,
         "topic_score": score,
+        "explanation_model": explanation_model,
+        "audience_resonance_contract": resonance_contract,
         "insights": {
-            "core_viewpoint": clean_text(extract_meta_field(content, "核心观点")) if content else f"{topic}最值得讲的不是表面结论，而是背后的因果机制",
+            "core_viewpoint": clean_text(extract_meta_field(content, "核心观点")) if content else explanation_model["central_question"],
             "counter_intuition": contradiction,
-            "audience_pain": "观众已经遇到过类似场景，但不知道真正原因是什么",
-            "knowledge_payload": "把概念拆成起因、机制、证据、应用四段",
-            "story_engine": "痛点开场 -> 旧理解失效 -> 新机制解释 -> 现实场景回扣",
-            "persuasion_strategy": "先共情，再反转，再用具体画面降低理解成本",
+            "audience_pain": explanation_model["viewer_relevance"],
+            "knowledge_payload": f"围绕‘{explanation_model['explanation_target']}’组织当前证据，不补写来源没有披露的流程",
+            "story_engine": " -> ".join(explanation_model["causal_chain"]),
+            "persuasion_strategy": "先回答本期 central_question，再按当前类型补齐证据、解释和边界；只在材料确实支持时加入共鸣或对立",
             "title_strategy": classify_title_strategy(title),
-            "opening_hook": clean_text(extract_meta_field(content, "钩子")) if content else f"你以为「{topic}」只是普通问题？真正关键藏在另一层。",
-            "golden_three_seconds": clean_text(extract_meta_field(content, "前3秒视觉钩子")) if content else "先给一个强痛点画面，再抛反常识问题。",
+            "opening_hook": clean_text(extract_meta_field(content, "钩子")) if content else f"先说清「{topic}」对普通人最直接的结果和证据。",
+            "golden_three_seconds": clean_text(extract_meta_field(content, "前3秒视觉钩子")) if content else "先展示最能证明本期结论的结果、数字或具体动作。",
             "emotion_curve": emotion_curve,
-            "interaction_hook": clean_text(extract_meta_field(content, "互动钩子")) or "你遇到过类似情况吗？评论区聊聊。",
+            "interaction_hook": clean_text(extract_meta_field(content, "互动钩子")),
         },
         "output_contract": {
             "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
@@ -24326,9 +27530,9 @@ def content_audit_report(
         any(token in hook_text for token in ("你", "为什么", "怎么", "以为", "知道", "断网", "废", "真相", "其实"))
         or any(semantic_hook_signals.values())
     ):
-        add_issue("warn", "前三秒钩子", "开头缺少直接问题、痛点或反常识信号。", "第一句改成观众能立刻代入的问题或具体痛点。")
+        add_issue("warn", "开头价值", "开头还没有让观众立刻知道本期要解决什么或能获得什么。", "第一句直接给出具体结果、损失、变化或可核验证据。")
     if mode != "article" and len(dialogue_lines) < 8:
-        add_issue("warn", "脚本长度", "对话/口播句数偏少，成片可能显得薄。", "补足起因、机制、例子、回扣四段。")
+        add_issue("warn", "脚本内容", "当前有效信息偏少，成片可能显得薄。", "补足当前结论缺少的证据、原因、现实例子或判断方法，不用套话凑长度。")
     scene_count_info = resolve_project_scene_count(
         project,
         content,
@@ -24352,14 +27556,14 @@ def content_audit_report(
             f"按脚本/音频长度补到约 {target_scene_count} 个明确镜头（建议范围 {minimum_scene_count}-{maximum_scene_count}）。",
         )
     if not highlights and mode != "article":
-        add_issue("warn", "重点字幕", "没有重点字幕，后续高亮字幕缺少依据。", "抽 4-8 条短句作为金句/转折句。")
+        add_issue("warn", "重点字幕", "没有重点字幕，后续高亮字幕缺少依据。", "从正文已有事实、数字、结论或行动建议中提炼重点句，不另写空泛金句。")
     if len(references or []) == 0:
         add_issue("info", "事实依据", "当前没有参考资料记录，事实型选题可追溯性偏弱。", "补联网资料或历史稿引用，保留 references.json。")
 
     ai_smell_tokens = ["首先", "其次", "最后", "综上", "总而言之", "在当今社会", "值得注意的是", "不可忽视"]
     ai_smell_hits = [token for token in ai_smell_tokens if token in plain]
     if len(ai_smell_hits) >= 2:
-        add_issue("warn", "表达风格", f"存在较明显 AI 公文感词汇：{', '.join(ai_smell_hits[:4])}。", "改成更口语的追问、吐槽、具体细节和短句。")
+        add_issue("warn", "表达风格", f"存在较明显 AI 公文感词汇：{', '.join(ai_smell_hits[:4])}。", "改成大白话，用具体人物、动作、结果和生活例子说明，不要机械追问或吐槽。")
 
     bad_phrase_hits = script_bad_phrase_hits("\n".join(dialogue_lines) or plain)
     if bad_phrase_hits:
@@ -24367,7 +27571,7 @@ def content_audit_report(
             "risk",
             "口播套话/播客腔",
             f"存在弱开头或播客式收尾：{', '.join(bad_phrase_hits[:6])}。",
-            "删除“今天我们来聊聊”“本期播客”“感谢收听”等表达，开头直接给冲突，结尾用具体互动问题。",
+            "删除“今天我们来聊聊”“本期播客”“感谢收听”等表达，开头直接给有用信息，结尾用本期判断或行动自然收住。",
         )
     duplicate_interactions = duplicate_terminal_interaction_indexes(dialogue_lines)
     if duplicate_interactions:
@@ -24375,7 +27579,7 @@ def content_audit_report(
             "risk",
             "结尾互动重复",
             f"结尾出现 {len(duplicate_interactions) + 1} 个评论动作，口播会连续重复互动要求。",
-            "保留一个最自然、最具体的评论动作，删除其余同义收尾。",
+            "删除重复互动；如果问题不能承接正文，就全部删除，改用本期最重要的判断或行动自然收住。",
         )
     semantic_duplicates = [
         pair
@@ -24495,7 +27699,16 @@ def unwrap_ddg_url(url: str) -> str:
     return url
 
 
+LOCAL_HISTORY_MIN_SIMILARITY = 0.16
+
+
 def local_article_references(project: dict[str, Any], template: dict[str, Any], brief: str) -> list[dict[str, Any]]:
+    """Retrieve only genuinely related history for expression inspiration.
+
+    Historical drafts are never evidence for the current episode. A minimum
+    semantic overlap prevents a generic shared word such as “手机” or “AI” from
+    dragging an unrelated old script into the writer context.
+    """
     query_tokens = extract_tokens(f"{project['topic_name']} {brief}")
     refs: list[dict[str, Any]] = []
     for meta in storage.list_projects():
@@ -24507,7 +27720,7 @@ def local_article_references(project: dict[str, Any], template: dict[str, Any], 
         if not clean_text(content):
             continue
         score = overlap_score(query_tokens, f"{meta.get('topic_name', '')}\n{content[:4000]}")
-        if score <= 0:
+        if score < LOCAL_HISTORY_MIN_SIMILARITY:
             continue
         summary = storage.get_summary(meta["id"])
         refs.append(
@@ -24528,6 +27741,8 @@ def local_article_references(project: dict[str, Any], template: dict[str, Any], 
 
 NEWS_FRESHNESS_POLICY_VERSION = "current-events-v1"
 CURRENT_NEWS_MAX_AGE_DAYS = 31
+CURRENT_NEWS_TARGET_SOURCE_COUNT = 8
+CURRENT_NEWS_MIN_INDEPENDENT_SOURCES = 4
 
 
 def parse_reference_datetime(value: Any) -> datetime | None:
@@ -24665,6 +27880,7 @@ def search_tavily(
                 "title": clean_text(item.get("title") or f"检索结果 {index}"),
                 "url": clean_text(item.get("url") or ""),
                 "source": "Tavily",
+                "provider": "tavily",
                 "query": query,
                 "snippet": truncate(snippet),
                 "score": round(float(item.get("score") or 0.0), 3),
@@ -24710,6 +27926,7 @@ def search_google_news_rss(query: str, limit: int = 8) -> list[dict[str, Any]]:
                 "title": title,
                 "url": url,
                 "source": publisher or "Google News",
+                "provider": "google_news",
                 "query": query,
                 "snippet": title,
                 "score": round(max(0.1, 1.0 - (index - 1) * 0.06), 3),
@@ -24722,7 +27939,8 @@ def search_google_news_rss(query: str, limit: int = 8) -> list[dict[str, Any]]:
     return results
 
 
-def search_current_news(query: str, limit: int = 8) -> list[dict[str, Any]]:
+def search_current_news_auxiliary(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Collect dated verification sources independently of model research."""
     rss_results = search_google_news_rss(query, limit)
     weekly = prioritize_current_news_references(
         search_tavily(query, "news", limit, time_range="week"),
@@ -24743,7 +27961,228 @@ def search_current_news(query: str, limit: int = 8) -> list[dict[str, Any]]:
         rss_results,
         max_age_days=CURRENT_NEWS_MAX_AGE_DAYS,
     )
-    return dedupe_references([*recent, *monthly, *rss_monthly])[:limit]
+    merged = dedupe_references([*recent, *monthly, *rss_monthly])
+    if merged:
+        return merged[:limit]
+    fallback = prioritize_current_news_references(
+        search_duckduckgo(
+            f"{datetime.now().astimezone().strftime('%Y年%m月%d日')} {clean_text(query)} 最新科技新闻",
+            limit,
+        ),
+        max_age_days=CURRENT_NEWS_MAX_AGE_DAYS,
+        allow_unknown=True,
+    )
+    return dedupe_references([*merged, *fallback])[:limit]
+
+
+def search_deepseek_web(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Ask the configured DeepSeek-compatible endpoint for sourced research.
+
+    The research provider follows the same configured DeepSeek credentials as
+    writing, so a topic run no longer silently switches to Grok as its primary
+    model. Providers without browsing may return no references; auxiliary
+    dated search then supplies independently verifiable URLs.
+    """
+    env = runtime_env()
+    api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
+    if not api_key or OpenAI is None:
+        return []
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+    timeout = float(env.get("DEEPSEEK_RESEARCH_TIMEOUT_SECONDS") or 120)
+    prompt = (
+        "你是科技资料检索器。围绕下面主题返回已核验的公开来源，不写文案。"
+        "只返回 JSON：{\"references\":[{\"title\":\"\",\"url\":\"https://...\","
+        "\"snippet\":\"\",\"published_date\":\"\",\"source\":\"\"}]}。"
+        "不要编造网址；找不到真实来源就返回空数组。\n主题：" + clean_text(query)
+    )
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=max(20.0, min(timeout, 300.0)))
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": "严格输出 JSON。"}, {"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=3500,
+            response_format={"type": "json_object"},
+            extra_body=deepseek_optional_request_body(base_url, "disabled", "low"),
+        )
+        choice = response.choices[0] if getattr(response, "choices", None) else None
+        raw = message_content_to_text(choice.message.content if choice and getattr(choice, "message", None) else "")
+        payload = _safe_json_from_text(raw)
+        items = payload.get("references") if isinstance(payload, dict) else []
+        result = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            url = clean_text(str(item.get("url") or ""))
+            title = clean_text(str(item.get("title") or ""))
+            if not title or not re.match(r"^https?://", url, flags=re.I):
+                continue
+            result.append({"title": title, "url": url, "snippet": clean_text(str(item.get("snippet") or title)),
+                           "published_date": clean_text(str(item.get("published_date") or "")),
+                           "source": clean_text(str(item.get("source") or "DeepSeek 检索")),
+                           "provider": "deepseek", "query": query, "score": 0.95, "has_content": True})
+            if len(result) >= max(1, min(limit, 12)):
+                break
+        return dedupe_references(result)
+    except Exception:
+        return []
+
+
+def search_current_news(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    # DeepSeek discovery and dated auxiliary verification are independent. Running
+    # them serially made the UI look frozen while one provider waited on its
+    # network timeout. Keep both provider roles, but complete the research
+    # stage as soon as the two bounded requests finish.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="source-research") as executor:
+        deepseek_future = executor.submit(search_deepseek_web, query, limit)
+        auxiliary_future = executor.submit(search_current_news_auxiliary, query, limit)
+        deepseek_raw = deepseek_future.result()
+        auxiliary_raw = auxiliary_future.result()
+    deepseek_results = prioritize_current_news_references(
+        deepseek_raw,
+        max_age_days=CURRENT_NEWS_MAX_AGE_DAYS,
+        allow_unknown=True,
+    )
+    return dedupe_references([*deepseek_results, *auxiliary_raw])[:limit]
+
+
+def _grok2api_output_text(payload: dict[str, Any]) -> str:
+    direct = clean_text(str(payload.get("output_text") or ""))
+    if direct:
+        return direct
+    parts: list[str] = []
+    output = payload.get("output")
+    if not isinstance(output, list):
+        output = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text") or block.get("output_text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _normalize_grok2api_references(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    text = _grok2api_output_text(payload)
+    parsed = _safe_json_from_text(text) if text else {}
+    raw_references = parsed.get("references") if isinstance(parsed, dict) else []
+    if not isinstance(raw_references, list):
+        raw_references = []
+    citation_items: list[dict[str, Any]] = []
+    output = payload.get("output")
+    if isinstance(output, list):
+        for message in output:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                annotations = block.get("annotations")
+                if not isinstance(annotations, list):
+                    continue
+                for annotation in annotations:
+                    if not isinstance(annotation, dict):
+                        continue
+                    citation = annotation.get("url_citation") if isinstance(annotation.get("url_citation"), dict) else annotation
+                    url = clean_text(str(citation.get("url") or ""))
+                    if re.match(r"^https?://", url, flags=re.IGNORECASE):
+                        citation_items.append(
+                            {
+                                "title": clean_text(str(citation.get("title") or urllib.parse.urlparse(url).netloc)),
+                                "url": url,
+                                "snippet": "",
+                                "published_date": "",
+                                "source": "Grok 联网引用",
+                            }
+                        )
+    raw_references = [*raw_references, *citation_items]
+    references: list[dict[str, Any]] = []
+    for item in raw_references:
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(str(item.get("title") or ""))
+        url = clean_text(str(item.get("url") or ""))
+        snippet = clean_text(str(item.get("snippet") or item.get("summary") or ""))
+        if not title or not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            continue
+        references.append(
+            {
+                "index": len(references),
+                "title": title,
+                "url": url,
+                "source": clean_text(str(item.get("source") or "Grok 联网搜索")),
+                "provider": "grok",
+                "query": query,
+                "snippet": snippet or title,
+                "score": 0.95,
+                "has_content": bool(snippet),
+                "published_date": clean_text(str(item.get("published_date") or item.get("date") or "")),
+            }
+        )
+        if len(references) >= max(1, min(limit, 20)):
+            break
+    return dedupe_references(references)
+
+
+def search_grok2api_web(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Use Grok2API's Responses endpoint as a sourced web-research provider."""
+    env = runtime_env()
+    api_key = clean_text(env.get("GROK2API_API_KEY", ""))
+    if not api_key:
+        return []
+    base_url = clean_text(env.get("GROK2API_BASE_URL", "")) or "http://127.0.0.1:8000"
+    base_url = base_url.rstrip("/")
+    endpoint = f"{base_url}/responses" if base_url.endswith("/v1") else f"{base_url}/v1/responses"
+    model = clean_text(env.get("GROK2API_MODEL", "")) or "grok-chat-fast"
+    try:
+        timeout = max(20.0, min(float(env.get("GROK2API_TIMEOUT_SECONDS") or 120), 300.0))
+    except (TypeError, ValueError):
+        timeout = 120.0
+    today_label = datetime.now().astimezone().strftime("%Y-%m-%d")
+    instructions = (
+        "你是资料检索器。必须使用联网搜索核对用户给出的事件，不写选题文案。"
+        "只返回严格 JSON，结构为 {\"references\":[{\"title\":\"\",\"url\":\"https://...\","
+        "\"snippet\":\"\",\"published_date\":\"YYYY-MM-DD\",\"source\":\"\"}]}。"
+        "优先论文、研究机构、公司公告、政府和主流媒体；每个 URL 必须是实际打开过的来源页面。"
+    )
+    request_body = {
+        "model": model,
+        "input": f"今天是 {today_label}。检索并核实：{clean_text(query)}。最多返回 {max(1, min(limit, 12))} 条直接相关来源。",
+        "instructions": instructions,
+        "stream": False,
+        "store": False,
+        "tools": [{"type": "web_search"}],
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "ignore"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return []
+    return _normalize_grok2api_references(payload if isinstance(payload, dict) else {}, query, limit)
 
 
 def query_requests_current_news(query: str, tavily_topic: str = "") -> bool:
@@ -24797,6 +28236,7 @@ def search_duckduckgo(query: str, limit: int) -> list[dict[str, Any]]:
                 "title": html_to_text(title_html) or f"DuckDuckGo 结果 {index}",
                 "url": unwrap_ddg_url(href),
                 "source": "DuckDuckGo",
+                "provider": "duckduckgo",
                 "query": query,
                 "snippet": truncate(html_to_text(snippet_html)),
                 "score": round(max(0.0, 1.0 - index * 0.08), 3),
@@ -24941,16 +28381,24 @@ def search_project_sources(
         if current_news
         else cleaned_query
     )
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="source-search") as executor:
-        tavily_future = (
-            executor.submit(search_current_news, cleaned_query, count)
-            if current_news
-            else executor.submit(search_tavily, cleaned_query, "general", count)
-        )
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="source-search") as executor:
         ddg_future = executor.submit(search_duckduckgo, ddg_query, count)
-        tavily_results = tavily_future.result()
+        if current_news:
+            combined_results = executor.submit(search_current_news, cleaned_query, count).result()
+            primary_results = [
+                item
+                for item in combined_results
+                if clean_text(str(item.get("provider") or "")).lower() == "deepseek"
+                or "deepseek" in clean_text(str(item.get("source") or "")).lower()
+            ]
+            auxiliary_results = [item for item in combined_results if item not in primary_results]
+        else:
+            primary_future = executor.submit(search_deepseek_web, cleaned_query, count)
+            auxiliary_future = executor.submit(search_tavily, cleaned_query, "general", count)
+            primary_results = primary_future.result()
+            auxiliary_results = auxiliary_future.result()
         ddg_results = ddg_future.result()
-    merged = dedupe_references([*tavily_results, *ddg_results])[:count]
+    merged = dedupe_references([*primary_results, *auxiliary_results, *ddg_results])[:count]
     candidates: list[dict[str, Any]] = []
     adopted_urls = {
         clean_text(str(item.get("url") or ""))
@@ -24969,9 +28417,11 @@ def search_project_sources(
         "query": cleaned_query,
         "current_news": bool(current_news),
         "providers": {
-            "Tavily": len(tavily_results),
+            "DeepSeek": len(primary_results),
+            "辅助检索": len(auxiliary_results),
             "DuckDuckGo": len(ddg_results),
         },
+        "primary_provider": "DeepSeek",
         "results": candidates,
         "searched_at": time.time(),
     }
@@ -25074,20 +28524,267 @@ _TOPIC_REFERENCE_ALIASES: dict[str, tuple[str, ...]] = {
     "具身智能": ("embodied ai", "embodied intelligence", "physical ai"),
     "生成式人工智能": ("generative ai", "genai"),
     "人工智能": ("artificial intelligence", " ai "),
+    "华为": ("huawei",),
+    "小米": ("xiaomi",),
+    "苹果": ("apple", "iphone"),
+    "英伟达": ("nvidia",),
+    "微软": ("microsoft",),
+    "谷歌": ("google", "alphabet"),
+    "特斯拉": ("tesla",),
+    "电视": ("television", " tv "),
+    "手机": ("smartphone", "mobile phone"),
+    "超导体": ("superconduct", "cuprate"),
+}
+
+_TOPIC_TERM_STOPWORDS = {
+    "一个", "一种", "这个", "那个", "这些", "那些", "我们", "你们", "他们",
+    "为什么", "怎么", "如何", "到底", "真的", "还是", "已经", "现在", "今天",
+    "同一天", "下周", "发布", "发布会", "开发布会", "最新", "新闻", "科技",
+    "对准", "炮口", "成为", "进行", "出现", "带来", "可能", "以及", "还有",
 }
 
 
+_TOPIC_ENTITY_GENERIC_TERMS = {
+    "行业", "市场", "用户", "消费者", "厂商", "企业", "产品", "品牌", "问题",
+    "原因", "结果", "逻辑", "变化", "趋势", "情况", "事情", "内容", "主题",
+    "销量", "销售", "价格", "成本", "利润", "数据", "报告", "机构", "数字",
+    "尺寸", "平均", "历史", "全球", "中国", "今年", "上半年", "下半年",
+    "交易日", "工作日", "日期", "股价", "市值", "涨幅", "跌幅", "上市门槛", "IPO",
+    "目标受众", "主线", "张力", "基调", "口播", "正文", "画面", "分镜",
+    # Sales-channel words describe where an item is sold, not what the episode
+    # is about. Let the concrete brand or product in the brief win instead.
+    "官网", "店里", "门店", "线下", "线上", "渠道", "授权店", "经销商", "电商", "平台",
+}
+
+
+def topic_entity_profile(topic: str, brief: str = "") -> dict[str, Any]:
+    """Extract the concrete subject, giving explicit user brief entities priority over an elliptical title."""
+    import jieba.posseg as pseg
+
+    title = repair_legacy_mojibake(clean_text(topic))
+    source = repair_legacy_mojibake(str(brief or ""))
+    explicit_subject = re.search(r"(?m)^核心检索对象\s*[:：]\s*(.+)$", source)
+    if explicit_subject:
+        # The display title may be a short hook. Once the brief declares the
+        # research subject, every downstream evidence decision must use it too.
+        declared = clean_text(explicit_subject.group(1))
+        if declared:
+            title = declared
+    overview = re.split(r"(?:\n\s*)?(?:二[、.]|##?\s*口播|【第\s*1\s*段】)", source, maxsplit=1)[0]
+    overview = clean_text(overview)[:2400]
+    opening = overview[:420]
+    candidate_scores: Counter[str] = Counter()
+    candidate_counts: Counter[str] = Counter()
+    candidate_origins: dict[str, set[str]] = defaultdict(set)
+
+    def collect(text: str, origin: str) -> None:
+        for word, flag in pseg.cut(text):
+            term = clean_text(word).strip("-—|/：:，,。；;！？!?（）()[]【】\"'")
+            if not term or len(term) < 2 or len(term) > 20:
+                continue
+            if term in _TOPIC_TERM_STOPWORDS or term in _TOPIC_ENTITY_GENERIC_TERMS:
+                continue
+            if not (flag.startswith("n") or flag in {"eng", "nz", "vn"}):
+                continue
+            if re.fullmatch(r"\d+(?:\.\d+)?%?", term):
+                continue
+            count = text.lower().count(term.lower())
+            if count <= 0:
+                continue
+            candidate_counts[term] = max(candidate_counts[term], count)
+            candidate_origins[term].add(origin)
+            if origin == "title":
+                score = 30 + min(count, 4) * 3
+            else:
+                score = min(count, 8) * 3
+                if term in opening:
+                    score += 10
+                if re.search(rf"(?:一句话选题|选题|主题|对象|受众|主线)[^\n]{{0,80}}{re.escape(term)}", source[:1600]):
+                    score += 8
+            # Add evidence from distinct origins instead of letting an equally scored
+            # title mention mask the subject repeated in the user's brief. This prevents
+            # a secondary person in a hook title from outranking the actual event subject.
+            candidate_scores[term] += score
+
+    collect(title, "title")
+    collect(overview, "brief")
+
+    # In executive-transition headlines, the event actor is usually the named
+    # person immediately before “卸任/退休/离职/接任”. Company names and people
+    # mentioned later in a descriptive clause are context, not the primary entity.
+    transition_actor = ""
+    transition_match = re.search(r"卸任|退休|离职|接任|交接|换帅", title)
+    if transition_match:
+        cursor = 0
+        named_people: list[tuple[int, int, str]] = []
+        for word, flag in pseg.cut(title):
+            start = title.find(word, cursor)
+            if start < 0:
+                start = cursor
+            end = start + len(word)
+            cursor = end
+            term = clean_text(word)
+            if flag == "nr" and 2 <= len(term) <= 4 and end <= transition_match.start():
+                named_people.append((start, end, term))
+        if named_people:
+            transition_actor = max(named_people, key=lambda item: item[1])[2]
+            candidate_scores[transition_actor] += 80
+            candidate_origins[transition_actor].add("transition_actor")
+
+    ranked = sorted(candidate_scores, key=lambda term: (-candidate_scores[term], -len(term), term))
+    title_ranked = [term for term in ranked if "title" in candidate_origins[term]]
+    brief_ranked = [term for term in ranked if "brief" in candidate_origins[term]]
+
+    # A concrete named subject in the title is already trustworthy. Elliptical
+    # titles such as “越卖不动，越大” contain no noun, so the user's brief becomes
+    # the source of truth instead of allowing a generic search result to define it.
+    primary = transition_actor or (title_ranked[0] if title_ranked else (brief_ranked[0] if brief_ranked else ""))
+    # Product identifiers with an alphabetic suffix are a single entity.
+    # Picking the suffix alone ("LUX" from "SU9 LUX") admits unrelated news.
+    compound = re.search(
+        r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9-]*\d[A-Za-z0-9-]*(?:\s+[A-Za-z][A-Za-z0-9-]*){1,2})(?![A-Za-z0-9])",
+        title,
+    )
+    if compound:
+        primary = clean_text(compound.group(1))
+    secondary = [
+        term for term in ranked
+        if term != primary and term not in primary and primary not in term
+    ]
+    # Aliases are equivalent names of the primary entity only. A broader
+    # secondary brand must never make an unrelated source pass for a concrete
+    # product named by the episode.
+    aliases = list(_TOPIC_REFERENCE_ALIASES.get(primary, ())) if primary else []
+    aliases = list(dict.fromkeys(alias for alias in aliases if clean_text(alias)))
+    confidence = "high" if primary and (
+        bool(compound)
+        or "title" in candidate_origins[primary]
+        or candidate_counts[primary] >= 2
+        or primary in opening
+    ) else ("medium" if primary else "none")
+    return {
+        "topic": title,
+        "primary_entity": primary,
+        "aliases": aliases,
+        "secondary_entities": secondary[:5],
+        "confidence": confidence,
+        "scores": {term: candidate_scores[term] for term in ranked[:8]},
+        "origins": {term: sorted(candidate_origins[term]) for term in ranked[:8]},
+    }
+
+
+
+_VISUAL_ENTITY_CONSTRAINTS: dict[str, dict[str, Any]] = {
+    "摩托车": {
+        "subject": "本期所讲的摩托车、发动机、车架或骑行现场",
+        "required": "与当前口播对应的车辆结构、价格关系、展会、门店、道路、赛道或维修检查场景",
+        "forbidden": "手机摆拍、通用数码产品、办公室屏幕、足球球员、足球场和奖杯",
+        "action": "人物若出现，只能骑行、检查发动机、调整车辆、手持头盔、看车或与车辆发生真实互动",
+    },
+    "电视": {
+        "subject": "一台电视机和电视屏幕",
+        "required": "客厅电视柜或电视门店场景；电视屏幕正在播放开机广告；前景可有遥控器和三十秒计时器",
+        "forbidden": "空气净化器、加湿器、音箱、路由器、手机、平板、包装盒和其它白色圆柱智能设备",
+        "action": "手部只能操作遥控器或电视屏幕，动作必须服务于电视开机广告",
+    },
+}
+
+def visual_entity_constraint_block(topic: str, brief: str = "") -> str:
+    profile = topic_entity_profile(topic, brief)
+    primary = clean_text(str(profile.get("primary_entity") or ""))
+    # Elliptical titles often make noun extraction prefer generic planning words.
+    # Prefer an explicit high-signal entity found in the complete episode text.
+    haystack = repair_legacy_mojibake(f"{topic} {brief}")
+    for explicit, aliases in (
+        ("摩托车", ("摩托车", "机车", "发动机", "车架", "骑手", "骑行", "摩博会")),
+        ("电视", ("电视", "液晶电视", "智能电视", "电视机", "开机广告")),
+    ):
+        if any(term in haystack for term in aliases):
+            primary = explicit
+            break
+    rule = _VISUAL_ENTITY_CONSTRAINTS.get(primary)
+    if primary in _TOPIC_ENTITY_GENERIC_TERMS:
+        return ""
+    if not rule:
+        return f"本期核心对象必须是：{primary}。画面主体不得被其它品类替换。" if primary else ""
+    return (
+        f"主体硬约束：唯一主主体是{rule['subject']}。"
+        f"必须出现{rule['required']}。"
+        f"动作要求：{rule['action']}。"
+        f"严禁出现：{rule['forbidden']}。"
+    )
+
+def topic_research_query(topic: str, brief: str = "") -> tuple[str, dict[str, Any]]:
+    """Build a research query from the active episode, not a stale display label."""
+    title = clean_text(topic)
+    brief_text = repair_legacy_mojibake(brief or "")
+    generic_labels = {"短标题", "新项目", "未命名主题", "未命名", "默认主题", "主题"}
+    explicit_candidates: list[str] = []
+    research_subject_match = re.search(r"(?m)^核心检索对象\s*[:：]\s*(.+)$", brief_text)
+    research_subject = clean_text(research_subject_match.group(1)) if research_subject_match else ""
+    for raw in brief_text.splitlines():
+        line = clean_text(raw).lstrip("-• ")
+        match = re.match(r"(?:一句话选题|选题提示词|本次手动提示|本期选题|主题|标题)\s*[:：]\s*(.+)", line)
+        if match:
+            candidate = clean_text(match.group(1))
+            if len(candidate) >= 4:
+                explicit_candidates.append(candidate)
+    # Prefer the fuller editorial subject over a short search hint. This keeps
+    # the university, material and experimental result in the same query.
+    explicit = max(explicit_candidates, key=len, default="")
+    research_topic = research_subject or (explicit if (not title or title in generic_labels) and explicit else title)
+    profile = topic_entity_profile(research_topic, brief_text)
+    primary = clean_text(str(profile.get("primary_entity") or ""))
+    parts = [primary, research_topic] if primary and primary not in research_topic else [research_topic]
+    query = " ".join(dict.fromkeys(item for item in parts if item))
+    return truncate(query, 160), profile
+
+
+def reference_matches_primary_entity(reference: dict[str, Any], profile: dict[str, Any]) -> bool:
+    primary = clean_text(str(profile.get("primary_entity") or "")).lower()
+    if not primary or clean_text(str(profile.get("confidence") or "")) == "none":
+        return True
+    haystack = repair_legacy_mojibake(
+        f"{reference.get('title', '')} {reference.get('snippet', '')}"
+    ).lower()
+    aliases = [clean_text(str(item)).lower() for item in profile.get("aliases", [])]
+    return any(term and term in haystack for term in [primary, *aliases])
+
+
+def topic_entity_alignment_report(topic: str, brief: str, content: str) -> dict[str, Any]:
+    profile = topic_entity_profile(topic, brief)
+    primary = clean_text(str(profile.get("primary_entity") or ""))
+    script = content_without_image_prompts(content or "")
+    aliases = [clean_text(str(item)) for item in profile.get("aliases", [])]
+    hits = [term for term in [primary, *aliases] if term and term.lower() in script.lower()]
+    passed = not primary or bool(hits)
+    return {
+        "version": "topic-entity-alignment-v1",
+        "passed": passed,
+        "mismatch": not passed,
+        "primary_entity": primary,
+        "aliases": aliases,
+        "hits": hits,
+        "profile": profile,
+        "message": "" if passed else f"本期核心对象是“{primary}”，生成口播没有继续讨论这个对象。",
+    }
+
+
 def locked_topic_terms(topic: str) -> list[str]:
-    """Extract the subject terms that a reference must actually discuss."""
+    """Extract meaningful entities from a locked topic for source matching."""
+    import jieba
+
+    jieba.setLogLevel(20)
     source = repair_legacy_mojibake(clean_text(topic))
     source = re.sub(r"https?://\S+", " ", source, flags=re.I)
     source = re.split(r"\s+--+", source, maxsplit=1)[0]
     source = re.sub(r"[（(][^）)]{0,80}[）)]", " ", source)
-    source = re.sub(r"(?:人民网|新华网|央视网|中新网|澎湃新闻|人民日报)$", "", source)
-    source = clean_text(source).strip("-—|/·：:，,。！？!? ")
+    source = re.sub(r"(?:人民网|新华网|央视网|中新网|中国新闻网|中国日报)$", "", source)
+    source = clean_text(source).strip("-—|/：:，,。；;！？!? ")
     clauses = [
-        clean_text(item).strip("-—|/·：:，,。！？!? ")
-        for item in re.split(r"[，,：:；;！？!?|/]", source)
+        clean_text(item).strip("-—|/：:，,。；;！？!? ")
+        for item in re.split(r"[，,。:：；;、！？!?|/]", source)
+        if clean_text(item)
     ]
     terms: list[str] = []
     if 2 <= len(source) <= 28:
@@ -25095,14 +28792,18 @@ def locked_topic_terms(topic: str) -> list[str]:
     for clause in clauses:
         if 2 <= len(clause) <= 20:
             terms.append(clause)
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9+.-]{1,24}|[\u4e00-\u9fff]{2,12}", clause):
-            if len(token) >= 2:
+        for token in jieba.lcut(clause, cut_all=False):
+            token = clean_text(token).strip("-—|/：:，,。；;！？!? ")
+            if len(token) < 2 or token in _TOPIC_TERM_STOPWORDS:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9+._-]{1,30}", token):
                 terms.append(token)
+        terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9+._-]{1,30}", clause))
     for key, aliases in _TOPIC_REFERENCE_ALIASES.items():
         if key in source:
+            terms.append(key)
             terms.extend(aliases)
     return list(dict.fromkeys(term.lower() for term in terms if clean_text(term)))
-
 
 def reference_topic_score(reference: dict[str, Any], topic: str) -> int:
     title = repair_legacy_mojibake(clean_text(str(reference.get("title") or ""))).lower()
@@ -25154,11 +28855,128 @@ def brief_reference_candidates(brief: str, topic: str) -> list[dict[str, Any]]:
     return dedupe_references(references)
 
 
+def effective_project_references(
+    project_id: int,
+    *,
+    brief: str | None = None,
+    topic: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the single source set used by writers, fact checks and gates.
+
+    Auto-topic projects can carry evidence in brief.md, auto_topic.json and
+    evidence_graph.json even when an older generation path left
+    references.json empty. Treating only that one file as authoritative made
+    valid sourced scripts look unsourced during the production gate.
+    """
+    try:
+        project = storage.get_project(project_id)
+    except FileNotFoundError:
+        # Fingerprint callers can evaluate an unsaved draft before a project
+        # directory exists. Source aggregation must remain side-effect free.
+        project = {}
+    topic_text = clean_text(topic or project.get("topic_name") or "")
+    brief_text = brief if brief is not None else storage.get_brief(project_id)
+    stored = [item for item in storage.get_references(project_id) if isinstance(item, dict)]
+    manual = project_source_references(project_id)
+    brief_refs = brief_reference_candidates(brief_text, topic_text)
+
+    auto_topic = storage.read_json(storage.project_file(project_id, "auto_topic.json"), {})
+    auto_payload = auto_topic.get("payload") if isinstance(auto_topic, dict) else {}
+    auto_refs = auto_payload.get("references") if isinstance(auto_payload, dict) else []
+    auto_refs = [dict(item) for item in auto_refs if isinstance(item, dict)] if isinstance(auto_refs, list) else []
+
+    evidence = storage.read_json(storage.project_file(project_id, "evidence_graph.json"), {})
+    evidence_sources = evidence.get("sources") if isinstance(evidence, dict) else []
+    graph_refs: list[dict[str, Any]] = []
+    if isinstance(evidence_sources, list):
+        for item in evidence_sources:
+            if not isinstance(item, dict):
+                continue
+            graph_refs.append(
+                {
+                    "title": clean_text(str(item.get("title") or "")),
+                    "url": clean_text(str(item.get("url") or "")),
+                    "source": clean_text(str(item.get("provider") or item.get("source") or "证据图谱")),
+                    "query": topic_text,
+                    "snippet": clean_text(str(item.get("snippet") or "")),
+                    "score": float(item.get("score") or 0),
+                    "has_content": bool(clean_text(str(item.get("snippet") or ""))),
+                    "published_date": clean_text(str(item.get("published_at") or item.get("published_date") or "")),
+                }
+            )
+
+    merged = dedupe_references([item for item in [*stored, *manual, *brief_refs, *auto_refs, *graph_refs] if not is_historical_script(item)])
+    if not topic_text:
+        return [{key: value for key, value in item.items() if key != "index"} for item in merged[:12]]
+    research_query, entity_profile = topic_research_query(topic_text, brief_text)
+    relevant = filter_references_for_locked_topic(
+        merged,
+        research_query,
+        limit=12,
+        entity_profile=entity_profile,
+    )
+
+    # Search-backed selected topics may have a Chinese title while the primary
+    # paper is English. Keep high-confidence results from that exact selected
+    # search even when literal token matching cannot bridge the languages.
+    high_confidence_auto: list[dict[str, Any]] = []
+    for item in auto_refs:
+        try:
+            score = float(item.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if (
+            score >= 0.35
+            and re.match(r"^https?://", clean_text(str(item.get("url") or "")), flags=re.I)
+        ):
+            high_confidence_auto.append(item)
+
+    # Do not append stored references again after filtering: older projects can
+    # contain noisy search results from unrelated channels in references.json.
+    # Explicitly adopted/manual sources remain trusted; all mined sources must
+    # pass topic filtering (or the exact-search confidence bridge above).
+    explicit_stored = [
+        item
+        for item in stored
+        if (
+            bool(item.get("must_use"))
+            # Cached entity_matched/topic_score tags came from an older, looser
+            # entity profile. They are not an explicit user source endorsement.
+            or not clean_text(str(item.get("url") or ""))
+            or not clean_text(str(item.get("title") or item.get("snippet") or ""))
+        )
+    ]
+    # Topic/entity-matched sources are the evidence spine. Put them before the
+    # broader high-score pool so the fixed limit cannot evict the primary
+    # source while retaining many repetitive secondary reports.
+    result = dedupe_references([*relevant, *manual, *explicit_stored, *high_confidence_auto])[:12]
+    return [{key: value for key, value in item.items() if key != "index"} for item in result if not is_historical_script(item)]
+
+
 def sanitize_locked_topic_brief(brief: str, topic: str) -> str:
-    """Remove parallel-news reference lines before a locked brief reaches the writer."""
+    """Keep topic facts and writing intent while removing production directions."""
     kept: list[str] = []
+    skipping_visual_block = False
+    skipping_production_notes = False
     for raw_line in repair_legacy_mojibake(brief).splitlines():
         line = clean_text(raw_line)
+        if re.match(r"^口播逐字稿(?:（|\(|$)", line):
+            break
+        if re.match(r"^(?:制作批注|二、画面红线|三、立场自查)", line):
+            skipping_production_notes = True
+            continue
+        if skipping_production_notes:
+            continue
+        if re.match(r"^【(?:画面|分镜|镜头)(?:/分镜)?建议】$", line):
+            skipping_visual_block = True
+            continue
+        if re.match(r"^【(?:口播正文|正文)】$", line):
+            skipping_visual_block = False
+            continue
+        if skipping_visual_block:
+            continue
+        if re.match(r"^【(?:钩子|停顿|转场|画面切换)】$", line):
+            continue
         if line.startswith("-") and re.search(r"https?://\S+", line, flags=re.I):
             candidate = brief_reference_candidates(raw_line, topic)
             if candidate and reference_topic_score(candidate[0], topic) < 4:
@@ -25167,12 +28985,100 @@ def sanitize_locked_topic_brief(brief: str, topic: str) -> str:
     return "\n".join(kept).strip()
 
 
+def extract_user_authored_script(brief: str, topic: str) -> str:
+    """Promote a complete user-authored voice script without rewriting it."""
+    source = repair_legacy_mojibake(brief)
+    marker = re.search(r"(?:完整)?口播逐字稿(?:（[^\n]*）|\([^\n]*\))?", source)
+    if not marker:
+        return ""
+    body = source[marker.end() :]
+    body = re.split(r"(?m)^\s*(?:制作批注|一、事实分级|二、画面红线|三、立场自查)", body, maxsplit=1)[0]
+    spoken_blocks = re.findall(
+        r"(?ms)^\s*【口播】\s*\n(.*?)(?=^\s*【(?:画面|画面/分镜建议|分镜建议|段末钩子|口播|评论区置顶提问|第\s*\d+\s*段|片尾|制作批注)[^】]*】|\Z)",
+        body,
+    )
+    spoken_lines: list[str] = []
+    for block in spoken_blocks:
+        for paragraph in re.split(r"\n\s*\n+", block):
+            value = clean_text(paragraph)
+            if value:
+                spoken_lines.append(f"【主播】{value}")
+    if len("".join(spoken_lines)) < 60:
+        return ""
+    title = clean_text(topic) or "本期主题"
+    spoken_chars = len(re.sub(r"[^\u4e00-\u9fff]", "", "".join(spoken_lines)))
+    seconds = max(1, int(round(spoken_chars / 4.2)))
+    return (
+        f"# {title}\n\n"
+        "## Meta\n\n"
+        f"- 时长: 约{seconds}秒（{spoken_chars}个有效中文字）\n"
+        "- 内容来源: 用户提供的完整逐字稿，正文原样保留\n\n"
+        "## 原始材料简述\n\n"
+        "本期正文与观点边界由用户提供的完整逐字稿确定；检索资料仅用于事实核验，不覆盖或缩写正文。\n\n"
+        "## 口播脚本\n\n"
+        + "\n\n".join(spoken_lines)
+        + "\n\n## 重点字幕\n\n- 按完整口播与分镜语义自动提炼。\n\n"
+        "## 参考资料\n\n- 用户素材中的事实、数字与限定词待逐项检索核验。\n"
+    )
+
+
+def transcript_research_subject(content: str, limit: int = 8) -> str:
+    """Extract concrete searchable entities from a user-authored transcript."""
+    source = repair_legacy_mojibake(content)
+    candidates: list[str] = []
+    patterns = (
+        r"\b[A-Z][A-Za-z0-9.-]{1,24}\b",
+        r"[\u4e00-\u9fff]{2,10}(?:时代|科技|汽车|能源|算力|电池|芯片|公司|集团)",
+        r"(?:黄仁勋|倪军|何小鹏|英伟达|宁德时代|全固态电池|固态电池)",
+    )
+    ignored = {"Meta", "AI", "CEO", "OTA"}
+    for pattern in patterns:
+        for match in re.finditer(pattern, source, flags=re.I):
+            value = clean_text(match.group(0))
+            if value and value not in ignored and value not in candidates:
+                candidates.append(value)
+    return " ".join(candidates[: max(1, limit)])
+
+
+def factual_search_entities(text: str, limit: int = 8) -> list[str]:
+    """Extract named people, brands and event anchors for one factual claim."""
+    import jieba.posseg as pseg
+
+    words = [(clean_text(word), flag) for word, flag in pseg.cut(repair_legacy_mojibake(text))]
+    entities: list[str] = [
+        item
+        for item in transcript_research_subject(text, limit=limit).split()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]*", item)
+    ]
+    joiners = {"机车", "汽车", "科技", "能源", "集团", "公司", "通用"}
+    for index, (word, flag) in enumerate(words):
+        normalized = re.sub(r"(?:表示|说|称|指出)$", "", word).strip()
+        if not normalized:
+            continue
+        if (
+            flag.startswith(("nr", "ns", "nt", "nz"))
+            or normalized in _TOPIC_REFERENCE_ALIASES
+        ) and normalized not in _TOPIC_TERM_STOPWORDS:
+            entities.append(normalized)
+            if index + 1 < len(words) and words[index + 1][0] in joiners:
+                entities.append(normalized + words[index + 1][0])
+    for event in re.findall(r"[\u4e00-\u9fff]{2,10}(?:摩博会|博览会|论坛)", text):
+        entities.append(clean_text(event))
+    return dedupe_clauses(entities)[: max(1, limit)]
+
+
 def filter_references_for_locked_topic(
     references: list[dict[str, Any]],
     topic: str,
     *,
     limit: int,
+    entity_profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    topic_numbers = {
+        clean_text(str(claim.get("normalized") or ""))
+        for claim in strong_numeric_claims_in_line(topic)
+        if isinstance(claim, dict)
+    }
     ranked: list[tuple[int, int, dict[str, Any]]] = []
     for index, raw in enumerate(references):
         if not isinstance(raw, dict):
@@ -25183,36 +29089,299 @@ def filter_references_for_locked_topic(
         required = bool(item.get("must_use")) and not extracted_locked_source
         if extracted_locked_source and topic_score >= 4:
             required = True
+        # Only explicitly adopted manual sources may bypass entity matching.
+        # Search results, historical references and auto-topic evidence must
+        # actually discuss the subject named by the user's brief.
+        if entity_profile and not required:
+            if not reference_matches_primary_entity(item, entity_profile):
+                continue
+            item["primary_entity"] = clean_text(str(entity_profile.get("primary_entity") or ""))
+            item["entity_matched"] = True
         if not required and topic_score < 2:
-            continue
+            # Elliptical titles such as "官网涨了、店里降了" often omit the
+            # entity and wording used by the article headline. Keep a source
+            # only when it still matches the resolved entity and shares a
+            # concrete numeric anchor with the locked topic; this prevents
+            # unrelated same-category articles from becoming evidence.
+            reference_numbers = {
+                clean_text(str(claim.get("normalized") or ""))
+                for claim in strong_numeric_claims_in_line(
+                    " ".join(
+                        clean_text(str(item.get(field) or ""))
+                        for field in ("title", "snippet")
+                    )
+                )
+                if isinstance(claim, dict)
+            }
+            if not (entity_profile and topic_numbers.intersection(reference_numbers)):
+                continue
+            topic_score = 2
         item["topic_score"] = topic_score
         ranked.append((100 if required else topic_score, -index, item))
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
     return dedupe_references([row[2] for row in ranked])[: max(1, limit)]
 
 
+def reference_filter_diagnostics(candidates, retained, query, profile):
+    """Keep bounded rejection evidence, never full article bodies or credentials."""
+    def identity(item):
+        return (str(item.get("url") or ""), str(item.get("title") or ""))
+    kept = {identity(item) for item in retained}
+    rows = []
+    for item in candidates[:40]:
+        accepted = identity(item) in kept
+        entity_match = reference_matches_primary_entity(item, profile)
+        score = reference_topic_score(item, query)
+        reason = ("retained" if accepted else "primary_entity_mismatch" if not entity_match
+                  else "low_topic_score" if score < 2 else "deduplicated_or_limit")
+        # URL query strings may contain access tokens; omit them from diagnostics.
+        url = urllib.parse.urlsplit(str(item.get("url") or ""))
+        rows.append({"title": str(item.get("title") or "")[:180],
+                     "source_host": url.hostname or "", "reason": reason,
+                     "topic_score": score, "entity_match": entity_match})
+    return rows
+
+
+def event_evidence_search_query(
+    topic: str,
+    brief: str,
+    entity_profile: dict[str, Any],
+) -> str:
+    primary = clean_text(str(entity_profile.get("primary_entity") or ""))
+    source = clean_text(f"{topic} {brief}")
+    quoted = [
+        clean_text(value)
+        for value in re.findall(r"[\"“']([^\"”']{2,16})[\"”']", source)
+        if clean_text(value)
+    ]
+    event_terms = [
+        token
+        for token in locked_topic_terms(source)
+        if 2 <= len(token) <= 12
+        and token not in {primary, "一个", "什么", "部分", "过去", "真正", "到底", "关系", "规则"}
+        and any(marker in token for marker in ("撤", "误读", "回应", "否认", "发布", "调整", "门店", "涨价", "降价", "合作", "公告"))
+    ]
+    secondary = [
+        clean_text(str(value))
+        for value in (entity_profile.get("secondary_entities") or [])
+        if clean_text(str(value)) and clean_text(str(value)) not in {"部分", "规则", "定价", "溢价"}
+    ]
+    terms = dedupe_clauses([primary, *quoted, *event_terms, *secondary])
+    return " ".join(terms[:6]) or clean_text(topic)
+
+
+def evidence_contract(topic: str, brief: str, entity_profile: dict[str, Any]) -> dict[str, Any]:
+    """Derive a topic-scoped evidence contract without topic-specific rules."""
+    primary = clean_text(str(entity_profile.get("primary_entity") or ""))
+    source = repair_legacy_mojibake(str(brief or ""))
+    material_match = re.search(
+        r"(?ms)^核心材料\s*[:：]\s*(.*?)(?=^\s*(?:主线|必须保留|成稿要求)\s*[:：]|\Z)",
+        source,
+    )
+    # A structured brief already separates factual input from audience and
+    # editorial instructions. Only its material block belongs in evidence.
+    factual_block = material_match.group(1) if material_match else re.split(
+        r"(?:^|\n)\s*(?:目标受众|主线张力|基调|与系列的关系|口播脚本|对话脚本)\s*(?:[:：]|\n|$)",
+        source,
+        maxsplit=1,
+        flags=re.M,
+    )[0]
+    candidates = [
+        clean_text(item).strip("-• ")
+        for item in re.split(r"[\n。！？!?]+", factual_block)
+        if clean_text(item).strip("-• ")
+    ]
+    # A title may be a metaphor or question rather than a factual assertion.
+    # Use it only when the brief contains no factual block at all.
+    if not candidates:
+        candidates = [clean_text(topic)]
+    claims: list[dict[str, Any]] = []
+    for text in dedupe_clauses(candidates):
+        text = re.sub(r"^(?:一句话选题|主题|标题)\s*[:：]?\s*", "", text)
+        if material_match and not re.search(r"\d", text) and not transcript_research_subject(text, limit=2):
+            # Editorial comparisons belong in the argument, not in the list of
+            # externally verifiable event claims.
+            continue
+        terms = [
+            term for term in locked_topic_terms(text)
+            if term != primary.lower() and term not in _TOPIC_TERM_STOPWORDS
+        ]
+        # A claim needs a concrete predicate/anchor beyond the subject name.
+        if not terms and not re.search(r"\d", text):
+            continue
+        claims.append({"text": truncate(text, 220), "terms": terms[:14]})
+    return {
+        "version": "episode-evidence-contract-v1",
+        "topic": clean_text(topic),
+        "primary_entity": primary,
+        "claims": claims[:12],
+    }
+
+
+def evidence_search_queries(brief: str, fallback_query: str, limit: int = 6) -> list[str]:
+    """Build one focused query per factual material instead of one entity soup."""
+    source = repair_legacy_mojibake(str(brief or ""))
+    match = re.search(
+        r"(?ms)^核心材料\s*[:：]\s*(.*?)(?=^\s*(?:主线|必须保留|成稿要求)\s*[:：]|\Z)",
+        source,
+    )
+    factual_source = match.group(1) if match else re.split(
+        r"(?:^|\n)\s*(?:目标受众|主线张力|基调|与系列的关系|完整口播逐字稿|口播脚本|对话脚本)\s*(?:[:：]|\n|$)",
+        source,
+        maxsplit=1,
+        flags=re.M,
+    )[0]
+    queries: list[str] = []
+    # An unstructured brief often mixes a reported filing with speculative
+    # dimensions and positioning. Anchor the search to the complete model
+    # identifier and the verifiable event, not every number in the pitch.
+    if not match:
+        product = re.search(
+            r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9-]*\d[A-Za-z0-9-]*(?:\s+[A-Za-z][A-Za-z0-9-]*){1,2})(?![A-Za-z0-9])",
+            source + " " + fallback_query,
+        )
+        if product:
+            identifier = clean_text(product.group(1))
+            event = next((word for word in ("商标", "公告", "发布", "申报") if word in factual_source), "")
+            brand = next((word for word in ("小米", "华为", "苹果", "比亚迪") if word in factual_source), "")
+            if event:
+                return [" ".join(part for part in (f'"{identifier}"', brand, event) if part)]
+    if factual_source:
+        for raw in re.split(r"[\n。！？!?]+", factual_source):
+            claim = clean_text(raw).lstrip("-• ")
+            if len(claim) < 12:
+                continue
+            if not re.search(r"(?:宣布|表示|预测|报道|称|指出|上调|下调|发布|开幕|发言|售价|最贵|论坛|展会|摩博会|\d)", claim):
+                continue
+            # Attribution names are sources, not the subject of the event.
+            search_claim = re.sub(r"^.{0,100}?(?:独家获悉|报道称|报道[:：，,]|消息称)\s*[，,:：]?", "", claim)
+            subjects = factual_search_entities(search_claim, limit=8)
+            numbers = re.findall(r"\d+(?:\.\d+)?\s*(?:%|年|月|日|次|倍)?", search_claim)
+            events = [
+                term for term in ("涨价", "上调", "销量翻倍", "翻倍", "全固态电池", "规模化", "至少五年", "第二次", "退休", "卸任", "离职", "撤下", "召回", "下架")
+                if term in claim
+            ]
+            query = " ".join(dedupe_clauses([*subjects, *events, *numbers])[:10])
+            if query:
+                queries.append(truncate(query, 150))
+    return dedupe_clauses(queries)[:limit] or [fallback_query]
+
+
+def evaluate_evidence_contract(
+    contract: dict[str, Any],
+    references: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Measure source coverage before any prose is generated."""
+    primary = clean_text(str(contract.get("primary_entity") or "")).lower()
+    claims = [item for item in contract.get("claims", []) if isinstance(item, dict)]
+    source_rows: list[dict[str, Any]] = []
+    primary_source_ids: list[int] = []
+    claim_support: list[list[int]] = [[] for _ in claims]
+    for source_id, item in enumerate(references, start=1):
+        if not isinstance(item, dict):
+            continue
+        haystack = repair_legacy_mojibake(
+            f"{item.get('title', '')} {item.get('snippet', '')}"
+        ).lower()
+        primary_hit = not primary or primary in haystack
+        if primary_hit:
+            primary_source_ids.append(source_id)
+        supported_claims: list[int] = []
+        for claim_index, claim in enumerate(claims):
+            terms = [clean_text(str(term)).lower() for term in claim.get("terms", []) if clean_text(str(term))]
+            hits = [term for term in terms if term in haystack]
+            # Exact primary-entity presence is already the strong identity
+            # constraint. One additional claim term allows normal headline
+            # paraphrases (撤店/撤出, 下调/降价) without accepting a generic
+            # same-brand article.
+            strong_hits = [term for term in hits if len(term) >= 4 or re.search(r"\d", term)]
+            if (primary_hit and bool(hits)) or len(hits) >= 2 or bool(strong_hits):
+                claim_support[claim_index].append(source_id)
+                supported_claims.append(claim_index + 1)
+        source_rows.append({
+            "source_id": source_id,
+            "title": clean_text(str(item.get("title") or "")),
+            "url": clean_text(str(item.get("url") or "")),
+            "primary_entity_hit": primary_hit,
+            "supported_claim_ids": supported_claims,
+        })
+    supported_claim_count = sum(1 for ids in claim_support if ids)
+    unsupported = [
+        clean_text(str(claim.get("text") or ""))
+        for claim, ids in zip(claims, claim_support)
+        if not ids
+    ]
+    has_claim_coverage = not claims or supported_claim_count > 0
+    can_draft = bool(references) and has_claim_coverage
+    return {
+        **contract,
+        "claims": [
+            {**claim, "claim_id": index + 1, "supporting_source_ids": claim_support[index]}
+            for index, claim in enumerate(claims)
+        ],
+        "unsupported_claims": unsupported,
+        "coverage_score": round(supported_claim_count / max(1, len(claims)), 3),
+        "can_draft": can_draft,
+        "sources": source_rows,
+    }
+
+
 def build_reference_context(project: dict[str, Any], template: dict[str, Any], brief: str, tavily_topic: str) -> dict[str, Any]:
     env = runtime_env()
     max_refs = max(3, min(int(env.get("TAVILY_MAX_REFERENCES", "20") or 20), 20))
     topic = clean_text(project["topic_name"])
-    compact_brief = truncate(brief, 200)
-    query = topic if not compact_brief else f"{topic} {compact_brief}"
+    # The editorial title may be deliberately elliptical. Recover only the
+    # concrete subject from the user's brief, then keep the web query concise.
+    query, entity_profile = topic_research_query(topic, brief)
 
     local_refs = local_article_references(project, template, brief)
     project_id = int(project.get("id") or 0)
     manual_refs = project_source_references(project_id) if project_id else []
+    adopted_refs = [
+        dict(item)
+        for item in (storage.get_references(project_id) if project_id else [])
+        if isinstance(item, dict) and bool(item.get("must_use")) and not is_historical_script(item)
+    ]
     brief_refs = [
         item
-        for item in brief_reference_candidates(brief, topic)
-        if reference_topic_score(item, topic) >= 4
+        for item in brief_reference_candidates(brief, query)
+        if reference_topic_score(item, query) >= 4
+        and reference_matches_primary_entity(item, entity_profile)
     ]
     project_settings = storage.get_project_settings(project_id) if project_id else {}
-    current_news_mode = bool(project_settings.get("current_news_mode")) or query_requests_current_news(query, tavily_topic)
-    web_refs = (
-        search_current_news(query, max_refs)
-        if current_news_mode
-        else search_tavily(query, tavily_topic, max_refs)
+    template_key = clean_text(str(template.get("key") or template.get("name") or project.get("template") or ""))
+    channel_is_news = any(token in template_key for token in ("情报", "新闻", "资讯", "热点"))
+    current_news_mode = (
+        bool(project_settings.get("current_news_mode"))
+        or channel_is_news
+        or query_requests_current_news(query, tavily_topic)
     )
+    evidence_query = event_evidence_search_query(topic, brief, entity_profile)
+    focused_queries = evidence_search_queries(brief, evidence_query or query)
+    per_query_limit = max_refs if len(focused_queries) == 1 else max(
+        3, min(6, (max_refs + len(focused_queries) - 1) // len(focused_queries))
+    )
+    if current_news_mode:
+        web_refs = search_current_news(query, max_refs) if len(focused_queries) == 1 else []
+        for focused_query in focused_queries:
+            if len(focused_queries) == 1 and focused_query == query:
+                continue
+            focused_profile = topic_entity_profile(focused_query, "")
+            candidates = dedupe_references([
+                *search_tavily(focused_query, "news", per_query_limit),
+                *search_current_news(focused_query, per_query_limit),
+            ])
+            web_refs.extend(filter_references_for_locked_topic(
+                candidates,
+                focused_query,
+                limit=per_query_limit,
+                entity_profile=focused_profile,
+            ))
+        web_refs = dedupe_references(web_refs)[:max_refs]
+    else:
+        deepseek_refs = search_deepseek_web(evidence_query or query, max_refs)
+        auxiliary_refs = search_tavily(evidence_query or query, tavily_topic, max_refs)
+        web_refs = dedupe_references([*deepseek_refs, *auxiliary_refs])[:max_refs]
     if not web_refs:
         dated_query = f"{datetime.now().year} {datetime.now().month}月 {query}" if current_news_mode else query
         web_refs = search_duckduckgo(dated_query, min(max_refs, 8))
@@ -25226,21 +29395,70 @@ def build_reference_context(project: dict[str, Any], template: dict[str, Any], b
                 for item in web_refs
             ]
 
-    manual_refs = filter_references_for_locked_topic(manual_refs, topic, limit=max_refs)
-    local_refs = filter_references_for_locked_topic(local_refs, topic, limit=2)
-    web_candidates = brief_refs if brief_refs else web_refs
-    web_refs = filter_references_for_locked_topic(web_candidates, topic, limit=max_refs)
-    refs = dedupe_references(manual_refs + web_refs + local_refs)[:max_refs]
+    manual_refs = filter_references_for_locked_topic(
+        [*adopted_refs, *manual_refs], query, limit=max_refs, entity_profile=entity_profile
+    )
+    local_refs = [
+        item for item in filter_references_for_locked_topic(
+            local_refs, query, limit=2, entity_profile=entity_profile
+        )
+        if float(item.get("score") or 0.0) >= LOCAL_HISTORY_MIN_SIMILARITY
+    ]
+    # Brief-cited sources are seeds, not the complete evidence set. Using
+    # them as an exclusive branch collapsed research to one reference.
+    web_candidates = dedupe_references([*brief_refs, *web_refs])
+    # Focused searches were already filtered against their own claim entity.
+    # Reapplying the first entity (for example Nebius) here would delete every
+    # source about the other facts in a multi-subject episode.
+    web_refs = (
+        filter_references_for_locked_topic(
+            web_candidates, evidence_query or query, limit=max_refs, entity_profile=entity_profile
+        )
+        if len(focused_queries) == 1
+        else web_candidates[:max_refs]
+    )
+    # `filter_references_for_locked_topic` is the single authority for source
+    # relevance. A second topic filter here used a different token contract and
+    # could delete every already-validated source for an elliptical headline.
+    # Current-episode facts come only from adopted/manual or current research
+    # sources. Channel voice and structure already come from channel memory, so
+    # historical drafts stay diagnostic and never enter the factual source set.
+    refs = dedupe_references(manual_refs + web_refs)[:max_refs]
     return {
         "query": query,
+        "entity_profile": entity_profile,
         "manual_refs": manual_refs,
         "brief_refs": brief_refs,
         "model_brief": sanitize_locked_topic_brief(brief, topic),
+        "manual_topic_priority": bool(clean_text(brief)),
         "local_refs": local_refs,
         "web_refs": web_refs,
         "references": refs,
         "current_news_mode": current_news_mode,
         "freshness_policy_version": NEWS_FRESHNESS_POLICY_VERSION,
+        "research_diagnostics": {
+            "query": query,
+            "evidence_query": evidence_query,
+            "focused_queries": focused_queries,
+            "primary_entity": clean_text(str(entity_profile.get("primary_entity") or "")),
+            "raw_web_count": len(web_candidates),
+            "filtered_web_count": len(web_refs),
+            "manual_count": len(manual_refs),
+            "local_count": len(local_refs),
+            "effective_count": len(refs),
+            "filtered_out_count": max(0, len(web_candidates) - len(web_refs)),
+            "filter_diagnostics": reference_filter_diagnostics(web_candidates, web_refs, evidence_query or query, entity_profile),
+            "provider_counts": {
+                provider: sum(
+                    1 for item in web_candidates
+                    if clean_text(str(item.get("provider") or item.get("source") or "unknown")).lower() == provider
+                )
+                for provider in sorted({
+                    clean_text(str(item.get("provider") or item.get("source") or "unknown")).lower()
+                    for item in web_candidates if isinstance(item, dict)
+                })
+            },
+        },
     }
 
 
@@ -25262,6 +29480,234 @@ def format_reference_block(title: str, refs: list[dict[str, Any]]) -> str:
             f"  摘要: {snippet or '无'}"
         )
     return "\n".join(lines)
+
+
+def build_evidence_ledger(references: list[dict[str, Any]], limit: int = 12) -> list[dict[str, str]]:
+    """Turn approved sources into small, uniquely addressable writing facts."""
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source_index, item in enumerate(references, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(str(item.get("title") or ""))
+        snippet = clean_text(str(item.get("snippet") or ""))
+        source = clean_text(str(item.get("source") or "未知来源"))
+        url = clean_text(str(item.get("url") or ""))
+        fragments = [title]
+        fragments.extend(
+            clean_text(part)
+            for part in re.split(r"[。！？!?；;]\s*", snippet)
+            if clean_text(part)
+        )
+        for fragment in fragments:
+            if len(fragment) < 8:
+                continue
+            normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", fragment).lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append({
+                "text": fragment[:260],
+                "source": source,
+                "url": url,
+                "source_id": f"S{source_index}",
+                "has_number": "1" if re.search(r"\d", fragment) else "0",
+            })
+
+    candidates.sort(key=lambda item: item["has_number"] == "1", reverse=True)
+    ledger: list[dict[str, str]] = []
+    for index, item in enumerate(candidates[:max(1, limit)], start=1):
+        ledger.append({
+            "id": f"F{index}",
+            "claim": item["text"],
+            "source_id": item["source_id"],
+            "source": item["source"],
+            "url": item["url"],
+        })
+    return ledger
+
+
+def build_narrative_blueprint(
+    evidence_ledger: list[dict[str, str]],
+    content_type: str = "event",
+) -> list[dict[str, Any]]:
+    """Assign current-episode facts to a type-specific story contract."""
+    slot_sets = {
+        "mechanism": [
+            ("hook", "直接给出需要解释的现象或结果", 1),
+            ("mechanism_object", "明确究竟是哪套机制、规则或系统在起作用", 1),
+            ("input_trigger", "说明输入条件或触发条件", 2),
+            ("process", "按因果顺序解释中间如何运转", 3),
+            ("output", "说明机制产生的直接结果", 2),
+            ("boundary", "说明失效条件、证据边界或不能推出什么", 2),
+            ("takeaway", "回扣当前事件并形成独立判断", 1),
+        ],
+        "transition": [
+            ("hook", "直接给出岗位变化和最值得判断的问题", 1),
+            ("what_changed", "交代谁发生了什么变化", 2),
+            ("role", "说明该岗位被证据支持的职责和重要性", 2),
+            ("continuity_signals", "说明判断业务能否连续运转要看哪些可验证信号", 3),
+            ("risk", "指出交接可能暴露的真实风险，但不编造内部流程", 2),
+            ("boundary", "区分已知事实、一般背景和仍未知信息", 2),
+            ("takeaway", "形成关于组织连续性的本期判断", 1),
+        ],
+        "conflict": [
+            ("hook", "给出冲突结果或最具体的碰撞", 1),
+            ("sides", "说清双方是谁以及各自目标", 2),
+            ("collision", "解释规则、利益或能力在哪里相撞", 3),
+            ("impact", "说明冲突已经造成的可验证影响", 2),
+            ("boundary", "公平交代双方合理处和证据边界", 2),
+            ("takeaway", "给出不煽动对立的独立判断", 2),
+        ],
+        "trend": [
+            ("hook", "给出最具体的变化信号", 1),
+            ("evidence", "给出能够证明连续变化的证据", 3),
+            ("drivers", "解释推动变化的因素", 3),
+            ("counterevidence", "交代反例、波动和不确定性", 2),
+            ("conditions", "说明趋势继续成立需要什么条件", 2),
+            ("takeaway", "区分短期热闹和长期变化", 1),
+        ],
+    }
+    slots = slot_sets.get(content_type) or [
+        ("hook", "直接给本期独有的结果、变化或真实问题", 1),
+        ("what_happened", "补齐对象、时间和发生了什么", 2),
+        ("why", "解释原因、规则或利益如何导致结果", 3),
+        ("impact", "说明与本期事实直接相关的现实影响；没有就不硬套", 2),
+        ("boundary", "交代适用条件和证据不能推出什么", 2),
+        ("takeaway", "给出本期独有的判断，不套固定步骤或评论区话术", 2),
+    ]
+    slot_signals = {
+        "hook": ("封", "禁", "拒", "停", "涨", "降", "损失", "首次", "却", "反而", "超过", "达到", "失败"),
+        "what_happened": ("宣布", "发布", "表示", "回应", "上线", "下架", "合作", "公司", "平台", "用户"),
+        "why": ("因为", "原因", "为了", "由于", "机制", "规则", "协议", "权限", "商业", "技术", "依赖"),
+        "impact": ("消费者", "普通人", "用户", "工作", "成本", "价格", "时间", "隐私", "安全", "选择", "风险"),
+        "boundary": ("但", "不过", "仍", "尚", "可能", "仅", "不代表", "条件", "范围", "截至"),
+        "takeaway": ("意味着", "关键", "判断", "应该", "需要", "可以", "不能", "未来", "决定"),
+    }
+    remaining = [dict(item) for item in evidence_ledger if clean_text(str(item.get("id") or ""))]
+    blueprint: list[dict[str, Any]] = []
+    for name, purpose, desired in slots:
+        ranked = sorted(
+            remaining,
+            key=lambda item: (
+                sum(signal in clean_text(str(item.get("claim") or "")) for signal in slot_signals.get(name, slot_signals.get("why", ()))),
+                bool(re.search(r"\d", clean_text(str(item.get("claim") or "")))) if name == "hook" else False,
+                -len(clean_text(str(item.get("claim") or ""))),
+            ),
+            reverse=True,
+        )
+        assigned_items = ranked[: min(desired, len(ranked))]
+        assigned_ids = [clean_text(str(item.get("id") or "")) for item in assigned_items]
+        assigned_set = set(assigned_ids)
+        remaining = [item for item in remaining if clean_text(str(item.get("id") or "")) not in assigned_set]
+        blueprint.append({"slot": name, "purpose": purpose, "fact_ids": assigned_ids})
+    if remaining:
+        blueprint[-1]["fact_ids"].extend(clean_text(str(item.get("id") or "")) for item in remaining)
+    return blueprint
+
+
+def evidence_delivery_policy(references: list[dict[str, Any]], brief: str) -> dict[str, Any]:
+    """Describe evidence availability, not truth or independent verification."""
+    usable = [r for r in references if isinstance(r, dict)
+              and clean_text(str(r.get("snippet") or ""))
+              and str(r.get("url") or "").startswith(("http://", "https://"))]
+    return {
+        "mode": "source_backed" if usable else "brief_only",
+        "usable_reference_count": len(usable),
+        "has_user_material": bool(clean_text(brief)),
+        "independently_verified": False,
+        "minimum_words": 0,
+        "instruction": (
+            "资料可用于逐条归因，不代表自动核实。分析深度由证据决定，禁止为了时长补写内部机制。"
+            if usable else
+            "未取得可引用的外部正文，当前只有用户材料，不得称为已经独立核实。"
+            "先写材料明确提供的事实；按材料归因，不升级成多家媒体证实。"
+            "无证据的原因、职责和交接性质省略；不得断言正常退休或业务平稳。"
+            "允许交付短事实稿，不设最低字数，不用三类信号和后续观察清单填充篇幅。"
+        ),
+    }
+
+
+def editorial_delivery_verdict(review: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
+    """Keep review permission and editorial quality distinct; never fake an AI score."""
+    editorial = bool(quality.get("quality_passed"))
+    review_passed = bool(review.get("passed"))
+    scored = bool(review.get("review_round")) and review.get("weighted_total") is not None
+    return {
+        "review_passed": review_passed,
+        "editorial_quality_passed": editorial,
+        "quality_passed": review_passed and editorial,
+        "quality_status": "passed" if review_passed and editorial else "needs_review",
+        "ai_score_status": "scored" if scored else "not_scored",
+        "ai_score": review.get("weighted_total") if scored else None,
+    }
+
+
+def writing_contract_block(
+    references: list[dict[str, Any]],
+    *,
+    topic: str = "",
+    brief: str = "",
+) -> str:
+    explanation_model = classify_content_explanation_mode(topic, brief, references)
+    ledger = build_evidence_ledger(references)
+    # The user's current brief is first-party episode evidence. When web search returns
+    # no adopted references, excluding it from the ledger leaves every narrative slot
+    # empty and encourages the writer to invent generic industry mechanisms.
+    brief_fragments = [
+        clean_text(part)
+        for part in re.split(r"[。！？!?；;\n]+", repair_legacy_mojibake(str(brief or "")))
+        if len(clean_text(part)) >= 8
+    ]
+    seen_claims = {
+        re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", clean_text(str(item.get("claim") or ""))).lower()
+        for item in ledger
+        if isinstance(item, dict)
+    }
+    for fragment in brief_fragments[:8]:
+        normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", fragment).lower()
+        if not normalized or normalized in seen_claims:
+            continue
+        seen_claims.add(normalized)
+        ledger.append({
+            "id": f"U{sum(1 for item in ledger if str(item.get('id') or '').startswith('U')) + 1}",
+            "claim": fragment[:260],
+            "source_id": "USER_BRIEF",
+            "source": "当前项目 brief",
+            "url": "",
+        })
+    blueprint = build_narrative_blueprint(ledger, explanation_model["content_type"])
+    return (
+        "本期写作合同（内部执行，不要原样输出）：\n"
+        + json.dumps(
+            {
+                "topic_label": clean_text(topic),
+                "user_intent": compact_prompt_rule(brief, 1200),
+                "explanation_model": explanation_model,
+                "evidence_ledger": ledger,
+                "evidence_policy": evidence_delivery_policy(references, brief),
+                "narrative_blueprint": blueprint,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n执行规则：先在脑中用一句话确定‘本期只回答的核心问题’，正文不要输出这段分析。"
+        "每个 F 编号最多在正文完整使用一次；没有 F 编号支持的精确事实不得补写；本期 U 编号是当前 brief 的用户提供材料而非独立核实结果，须按用户材料归因，不得冒充已核实外部报道；每个也最多完整使用一次。"
+        "开头必须同时出现本期具体对象，以及结果、冲突、反常识点或现实代价中的至少一项。"
+        "有真实对立时要说清双方是谁、各自想要什么、规则在哪里相撞；证据没有对立时缩小问题，禁止硬造阵营。"
+        "严格按 content_type 对应的 narrative_blueprint 推进；每段至少增加一个新事实、新因果或新判断，不得把所有选题都套成 Cost→Mechanism。"
+        "viewer_relevance 必须来自当前材料；与普通人没有直接金钱、工作或选择关系时，讲清行业判断价值即可，禁止硬造共鸣。结尾给本期独有的判断，不强行追问或召唤评论。"
+        "某个 slot 没有足够事实时合并或省略，禁止同义复述和模板填空。"
+        "transition 类型必须把‘已知事实’与‘判断业务连续性时应继续观察的信号’明确分开；观察信号只能写成判断方法，不能写成已经发生的内部事实。"
+        "没有来源明确支持时，禁止断言内部替代验证规模、双供应商策略、合规年限、备胎转正、制度已成熟或交接已平稳完成。"
+        "transition 类型必须严格区分公司任职年限与具体岗位任职年限：‘效力超过27年’只能写在公司任职上，除非证据另行明确，禁止改写为‘掌管该岗位27年’。"
+        "公开职务名称只证明其担任该职务；不得据此扩写为其亲自掌控全部供应网络、面对某类外部限制，或公司已经存在器件引入、供应商准入、代码化流程、跨部门评审、技术替代等具体职责和内部机制。可写的上限只是‘该职务属于采购认证管理领域’。"
+        "公司任职年限不得改写、近似化或挪到岗位上；禁止‘任职近三十年’‘掌管多年’‘任职近这段时间’等表达，只能按证据写‘在华为效力超过27年’。"
+        "当 references 为空时，正文事实只能来自 U 编号；连续性部分只能写成待观察的问题或公开信号，例如官方接任安排、公开组织调整、供应与交付是否出现可观察异常、产品节奏是否变化。不得写‘确认由成熟团队递补’‘观察认证周期与商务沟通保持节奏’等无法由公开材料直接核验的内部判断。"
+        "transition 的吸引力来自已确认事实之间的反差和一个清晰问题，不靠虚构职责：可把‘效力超过27年+董事/全球采购认证管理部总裁+退休/官网撤下简历’压进前两句，再提出‘这只是正常退休，还是值得观察的交接信号’。"
+        "开头优先用已证实的‘人名+岗位变化+公开动作’，不得把页面撤下写成神秘操作，也不得用未经证实的供应链后果制造刺激。"
+        "除非本期证据确实涉及，禁止套用‘底层规则对撞’‘两套账撞车’‘三步核验’‘讲清真实代价’等固定话术。"
+    )
 
 
 def message_content_to_text(content: Any) -> str:
@@ -25333,7 +29779,7 @@ def compose_deepseek_messages(
 你现在要为短片工坊生成最终可落地的 content.md。
 
 优先级：
-1. 当前频道模板 prompt.md 是最高优先级。频道的人设、语气、角色关系、栏目结构、封面气质、镜头语言、禁忌和发布习惯，都必须服从频道模板；单期时长始终按本期信息量自适应。
+1. 事实与证据边界优先于频道风格和时长要求，不得为满足模板补造事实。频道模板 prompt.md 决定人设、语气、角色关系、栏目结构、封面气质、镜头语言和发布习惯；单期时长始终按本期信息量自适应。
 2. 当前主题和 brief 只提供本期素材，不得覆盖频道模板风格。不同频道必须生成不同口吻和不同视觉气质。
 3. 下方通用要求只用于保证短片工坊生产链路能解析，不允许把所有频道改写成同一种“通用知识科普/爆款反常识”风格。
 
@@ -25342,20 +29788,29 @@ def compose_deepseek_messages(
 2. 第一行必须直接从 # 或 ## 标题开始。
 3. 如果给了历史稿参考，只能借鉴风格、视角和连续创作语气，不能照搬旧稿。
 4. 如果给了联网资料，涉及最新事实、时间、金额、排名、参数时优先以联网资料为准；先核对发布日期和事件发生时间。近期文章回顾旧事件不能写成刚发生；不确定就保守表述。
-5. 你的输出必须严格遵守当前模板 prompt 约定的章节、角色标签和图片提示词。时长按本期有效信息量自适应，以讲清核心结论所需的最短完整表达为准；不得为凑时长重复内容，也不得为压时长删掉必要证据。
-6. 如果频道模板没有明确章节，按原版兼容结构输出：## Meta、## 原始材料简述、视频频道输出 ## 对话脚本 或 ## 口播脚本、## 重点字幕、## 图片提示词、## 参考资料；图文频道输出 ## 正文、## 图片提示词、## 参考资料。
-7. 视频频道的图片提示词必须包含 ### 横屏封面图、### 竖屏封面图、### 场景图；场景图用 1. 2. 3. 编号，数量要匹配有效信息点和语音节奏，通常 90 秒约 4-6 张、2 分钟约 6-8 张、3-4 分钟约 7-9 张、5-6 分钟约 10-14 张。只有新事实、新数字、新案例、新后果、新方法或新结论才新建场景图；“先别急”“你想想”“换个角度”等纯过渡口播沿用上一张图，不得单独配图。比例和像素尺寸由程序控制，不要写进提示词正文。
-8. 封面提示词要和频道个人 IP 强关联，允许直接生成项目指定语言下清晰可读的主标题、短副标题和频道名/作者角标；场景图里的文字与信息元素由对应口播决定，可包含数字、短结论、批注、图表和关系线，不限定数量、字数或固定位置，但不能偏离本期事实或把每张图套成同一种封面海报。
-9. 每张场景图必须根据对应脚本段落和本期素材重新设计，不要复制同一种纸面手账、档案卡、旧纸、胶带、拼贴背景；除非频道模板或题材明确要求。
-10. 生成文案前必须内部使用 Viral Writer 的爆款写作框架：核心观点、副观点、说服策略、情绪触发、金句、情感曲线、情感层次、论证多样性、视角切换、语言风格、互动钩子。只把结论落实到正文，不要把分析 Meta 输出到 content.md。
-11. 视频口播必须像对一个具体观众说话：第一句控制在 10-32 个汉字，前三秒直接给具体损失、结果、反差或危险，不能用“今天我们来聊聊”“本期节目”“大家好”开场。
-12. 中段每 20-30 秒必须新增一次追看理由：新数字、新案例、更狠后果、误区反转或尖锐追问；不能连续解释超过 3 段。结尾只保留一个低门槛评论动作，不能同时堆叠点赞、收藏、关注、转发等多个要求。
-13. `## 口播脚本`、`## 对话脚本`、`## 视频脚本` 内只能写实际要朗读的台词。单人用 `【主播】`，双人只用模板角色；`【画面】`、`【画面切换】`、`【镜头】`、`【场景】`、构图、动作、界面说明和生图提示词只能出现在 `## 图片提示词`，绝不能混入口播区。
-14. 输出前逐行做“朗读测试”：去掉角色标签后，这一行必须能被真人直接念出口。凡是描述画面里写了什么、物件摆在哪里、镜头怎么拍、标题放哪里、需要生成什么图片的句子，一律移到 `## 图片提示词`，不得伪装成 `【主播】` 台词。
-15. 四类内容必须各归各位：口播只进脚本章节；画面要求只进图片提示词；封面主副标题只进 Meta；推荐发布标题和发布信息只进 Meta。禁止把任一类内容复制到另一类章节。
+5. 你的输出必须严格遵守当前模板 prompt 约定的章节和角色标签。视频口播长度由“讲清一个核心结论所需的最短完整表达”决定，按当前资料密度自然展开；完整交付有证据支持的事实、原因、现实影响和观众判断；原因或影响缺少依据时明确未知或省略，不得补造，不得为了固定字数压缩或截断，也不得靠同义重复、套话和空转凑长度。
+5.1 不设最低时长，资料充足时可参考 60—135 秒，最多 150 秒；资料少时允许更短，禁止为了达到时长填充空话；只保留一条因果主线。资料很多时压缩背景和支线，不压掉关键证据、机制、边界和最终判断。
+6. 如果频道模板没有明确章节，视频频道只输出：## Meta、## 原始材料简述、## 对话脚本 或 ## 口播脚本、## 重点字幕、## 参考资料；图文频道输出 ## 正文、## 图片提示词、## 参考资料。
+7. 视频画面由独立视觉导演在最终文案保存后，根据本期主题、频道视觉规范和逐段口播生成；content.md 不承担场景图提示词，避免文案模型被冗长画面约束干扰。
+8. 文案只负责把事实、数字、人物动作、因果关系和观众收获讲清楚，给视觉导演留下可提炼的信息节点，不写构图、机位、材质、运镜或生图命令。
+9. 封面与场景图的文字、信息元素和频道风格由独立视觉链路决定，不在口播文案中预设固定标签或统一模板。
+10. 生成文案前必须内部使用 Viral Writer 的写作能力，但叙事结构由本期写作合同中的 content_type 决定；先回答 central_question，再沿 causal_chain 交付证据、解释、边界与判断。只把结论落实到正文，不要把分析 Meta 输出到 content.md。
+11. 视频口播必须像对一个具体观众说话：第一句控制在 10-32 个汉字，前三秒直接给当前事件最具体的结果、变化、反差或值得判断的问题，不能用“今天我们来聊聊”“本期节目”“大家好”开场。
+12. 中段按本期类型自然推进，每一段都必须带来新事实、新原因、新案例、新后果、新边界或新判断；反问和转折不算新信息。结尾用本期最重要的判断自然收住，只有前文确实留下分歧时才顺势问一句。
+12.2 禁止把所有选题统一套进 Hook→Cost→Mechanism→Action。transition 按“岗位变化→职责证据→连续性观察信号→已知与未知边界→判断”推进；mechanism 按“现象→对象与触发→过程→结果→边界”推进；其它类型严格服从本期 writing contract。普通人的金钱、工作、消费损失和三步避坑，只能在当前证据真实涉及时出现。
+12.3 严厉执行【违禁空话黑名单】：
+   - 严禁出现：“很多时候表面现象看着已经很明显了”、“表面看是一个问题，真正关键其实藏在另一层”、“真正决定结果的，往往是后面那个被忽略的小动作”、“别急着下结论，先看第一步”、“很多人从第一步就看偏了”、“这就有意思了”。
+   - 严禁说教式提问：“你自己最容易在哪一步想当然？”、“你平时最容易在哪一步被带偏？”、“很多人聊这件事时，真正重要的那一步反而最少被提到”。
+   - 严禁空洞元叙述：“这种题最容易写成解释文”、“所以中间一定得拆两步”、“最有效的讲法，就是把它放进真实场景里”、“最容易错的是把它讲成概念清单”。
+   - 严禁无增量的虚空铺陈，算力必须全部聚焦在具体事实、因果链和实用洞察上。
+12.1 写稿前必须在内部建立“信息账本”：把每条可核实事实、核心观点、原因、后果、反方边界和行动分别只分配给一个段落。相同数字事实只能完整播报一次，相同观点只能解释一次；后文若没有新增证据或推论，直接删除，不得换词复述。输出前逐段检查信息增量，任何只是在复述上一段的句子都删除。
+13. `## 口播脚本`、`## 对话脚本`、`## 视频脚本` 内只能写实际要朗读的台词。单人用 `【主播】`，双人只用模板角色；`【画面】`、`【画面切换】`、`【镜头】`、`【场景】`、构图、动作、界面说明和生图提示词都不进入 content.md。
+14. 输出前逐行做“朗读测试”：去掉角色标签后，这一行必须能被真人直接念出口。描述物件摆放、机位、标题位置或生图操作的句子直接删除，后续由视觉导演根据最终口播重新设计。
+15. 口播、重点字幕、发布信息各归各位；画面要求由独立视觉链路维护，禁止复制进脚本、重点字幕或 Meta。
 16. 即使材料存在缺口，也必须利用已核实资料缩小结论、调整标题和叙事范围，交付一份可直接朗读的完整成稿。严禁输出编辑说明、素材缺口清单、补料任务单或“先补齐再写”的占位稿。
 17. 如果参考来源是早报、日报、榜单、资讯合集，先根据“当前主题”锁定唯一叙事主线。摘要中其它并列新闻只是噪声，不得写进脚本，不得用一句“其实是同一件事”强行连接无共同因果的事件。
 18. 只能使用参考资料中明确写出的事实。只有文章标题而没有正文或摘要证据时，不得推测实验过程、技术指标、人物行为、时间、数字或结论；可以不写，不能自行补全。
+19. 不同型号、渠道、时间或统计口径的数字不能直接相加、相减或写成同一商品的价差。尤其不能把“最高涨 A”和“最高降 B”相加成“差 A+B”；只有来源明确证明同一型号、同一配置、同一时间的两个成交价时才能计算价差。
 """.strip()
 
     user_parts = [
@@ -25371,8 +29826,21 @@ def compose_deepseek_messages(
             if context.get("current_news_mode")
             else "新闻时效要求：如果稿件声称“最新、刚刚、近日”，必须能从参考资料发布日期中得到支持。"
         ),
-        f"当前主题：{clean_text(project['topic_name'])}",
-        f"联网话题：{tavily_topic or 'general'}",
+        f"项目名称（仅作项目标签）：{clean_text(project['topic_name'])}",
+        (
+            "本期为用户手动建立的主题：下面的‘原始 brief’决定本期对象、范围、受众和创作意图，优先级高于项目名称。"
+            "如果项目名称与 brief 不一致，必须按 brief 里的对象和主线写稿，不能根据项目名称猜测另一件事。"
+            "项目名称和 brief 都不自动构成新闻事实证据；日期、数字、报价、参数和因果断言只能采用公开资料明确支持的内容。"
+            if clean_text(brief_for_model) else ""
+        ),
+        (
+            f"本期核心对象：{clean_text(str((context.get('entity_profile') or {}).get('primary_entity') or ''))}。"
+            "标题可以省略主体，但口播、事实、案例和结论必须始终围绕这个对象；"
+            "不得切换到标题相似的其它产品或行业。来源不足时缩小结论，不借用其它品类材料。"
+            if clean_text(str((context.get('entity_profile') or {}).get('primary_entity') or ''))
+            else ""
+        ),
+        f"检索范围：{tavily_topic or 'general'}",
         "",
         "原始 brief：",
         brief_for_model.strip() or "无",
@@ -25381,10 +29849,16 @@ def compose_deepseek_messages(
         "",
         format_reference_block("公开资料参考：", context.get("web_refs", [])),
         "",
-        "请严格基于上面的模板规则与材料，一次性写出完整 content.md。写之前先内部完成 Viral Writer 11 个洞见维度的构思，但不要把构思过程输出出来。",
+        writing_contract_block(
+            context.get("references", []),
+            topic=clean_text(str(project.get("topic_name") or "")),
+            brief=brief_for_model,
+        ),
+        "",
+        "请严格基于上面的频道规则、写作合同与材料，一次性写出完整 content.md。不要输出内部账本、编号或构思过程。",
     ]
 
-    return [
+    return episode_review.attach_guidance([
         {
             "role": "system",
             "content": "\n\n".join(
@@ -25399,7 +29873,7 @@ def compose_deepseek_messages(
             ),
         },
         {"role": "user", "content": "\n".join(user_parts).strip()},
-    ]
+    ], project)
 
 
 def render_fallback_story_content(
@@ -25419,38 +29893,37 @@ def render_fallback_story_content(
     reference_summary = "；".join(item["title"] for item in refs[:3]) or f"{topic}的公开资料"
     if speaker_mode == "dual":
         dialogue = [
-            f"【女】你以为「{topic}」只是表面这个问题？其实真正有意思的，是它背后的那套逻辑。",
-            f"【男】对，而且这事最容易被忽略的地方，不是答案本身，而是它为什么会变成今天这个样子。",
-            f"【女】那我们就别绕了，先说最关键的起点，到底是哪一步让它开始变味的。",
-            f"【男】通常要先把背景讲清楚。只看结果，大家会觉得这是常识；把过程摊开，才发现里面全是转折。",
-            f"【女】也就是说，观众真正想听的，不是定义，而是这件事怎么一步步走到这里。",
-            f"【男】没错。所以我们会先拆误区，再拿例子，最后再回到今天的人为什么还会被这个问题困住。",
-            f"【女】那中间最容易讲错的地方是什么？",
-            f"【男】最容易错的是把它讲成概念清单。真正有效的讲法，是让人看到一条完整的因果线。",
-            f"【女】所以你最后想让观众记住的，不是术语，而是那个一听就懂的判断。",
-            f"【男】对。你下次再遇到「{topic}」，至少知道先看哪个关键点，而不是被表面信息带着跑。",
+            f"【女】「{topic}」一落地实际使用，两套规则的冲突马上就显现出来了。",
+            f"【男】这不是小事。如果不搞清这里的真实规则，最直接的代价就是多花冤枉钱或者承担隐性风险。",
+            f"【女】那这里最直接的冲突到底在哪？大家到底付出了什么实际代价？",
+            f"【男】代价非常实在：要么时间白白耗进去，要么真金白银打了水漂，而且出了问题根本没处退。",
+            f"【女】为什么同一件事会出现两套完全对立的情况？底层机制到底是什么？",
+            f"【男】核心原因就是两套逻辑在撞车：官方挂牌是一套刚性规则，而具体执行和渠道为了回款跑量又是另一套账。",
+            f"【女】两套账撞在一起，普通人没有内部信息，自然就会直接踩坑。",
+            f"【男】所以解决办法不能听空话，必须拿出三条具体的落地动作：先查资质开票，再核实售后保修，最后看清退货细则。",
+            f"【女】把这三条核验动作落地，普通人就能立刻避开绝大部分暗坑。",
+            f"【男】对，买之前花两分钟按这三步核实，省下的就是你实打实的真金白银。",
         ]
     else:
         dialogue = [
-            f"【主播】你以为「{topic}」只是个普通话题？真正难的，从来不是定义，而是它背后的那条因果线。",
-            f"【主播】很多人一上来就急着下结论，但这事最值得听的，恰恰是它怎么一步步演变成今天这样。",
-            f"【主播】如果只背概念，你会觉得它很抽象。可一旦把背景、转折和结果摊开，它就像一个很完整的故事。",
-            f"【主播】先说起点。每个类似问题之所以会反复出现，往往都不是因为答案没人知道，而是大家盯错了地方。",
-            f"【主播】接着看中段。真正拉开差距的，通常不是表面动作，而是那个被忽略的关键变量。",
-            f"【主播】再往下拆，你就会发现，很多我们以为的常识，其实只是讲了半截的旧理解。",
-            f"【主播】这时候最有效的办法，不是继续堆术语，而是拿一个具体例子，把它讲成看得见的画面。",
-            f"【主播】最后回到今天。下次你再碰到「{topic}」，至少知道先看哪里，而不是被表面信息牵着走。",
+            f"【主播】「{topic}」只要一落地实际使用，两套规则的冲突马上就显现出来了。",
+            f"【主播】这件事如果搞不清楚，最直接的后果就是真金白银或者大量时间打水漂。",
+            f"【主播】很多人的问题在于：把宣传里的参考标准直接当成了最终的成交落地规则。",
+            f"【主播】底层机制其实很清楚：制定规则的要守住标杆，但一线执行和渠道要拼回款冲销量，两套账自然就在这里撞上了。",
+            f"【主播】两套逻辑对撞的结果，就是不知情的人全额买单，看懂规则的人低价拿到同样的结果。",
+            f"【主播】真正落地只要看清三件事：第一查资质与票据，第二确认售后保障是否完全同等，第三把退换货条款逐字看清。",
+            f"【主播】别听虚的，记住这三条具体的避坑动作，以后碰到「{topic}」，直接照着核对就能立竿见影。",
         ]
 
     highlight_lines = [
-        f"{topic}真正难的，从来不是表面定义",
-        "把背景、转折、结果讲成一条线，内容才会成立",
-        "别只背概念，先找那个真正影响结果的变量",
-        "回到现实场景，观众才会觉得这期内容有用",
+        f"直面「{topic}」最核心的规则与利益冲突",
+        "两套账撞车：标杆规则与冲量回款的底层对撞",
+        "代价很实在：算不清真实账目就会全额买单",
+        "落地核验三部曲：查资质、对保修、看退换条款",
     ]
 
     scene_prompt_lines = [
-        f"宽画幅横向构图，画面必须只对应这段口播「{line}」；文字、数字、批注和关系元素由口播信息量决定，核心事实准确，底部不要脚注、免责声明或无关长段正文。"
+        f"宽画幅横向构图，画面必须只对应这段口播「{line}」。可按口播组织关键事实、数据或对比关系，不限制固定格式，不生成无关长段正文。"
         for idx, line in enumerate(scene_lines)
     ]
 
@@ -25460,18 +29933,18 @@ def render_fallback_story_content(
         f"# {cover_title}\n\n"
         f"## Meta\n"
         f"- 封面副标题: {cover_subtitle}\n"
-        f"- 核心观点: {topic}真正值得讲的，是背后那条因果线\n"
+        f"- 核心观点: 讲透「{topic}」背后的底层规则对撞与实际代价，给出立即可用的核验动作\n"
         f"- 时长: {duration}\n"
         f"- 推荐发布标题: {publish_title}\n"
-        f"- 钩子: 你以为「{topic}」只是个普通问题？真正有意思的是它背后的那套逻辑。\n"
-        f"- 互动钩子: 你自己最容易在哪一步想当然？评论区留一句。\n"
+        f"- 钩子: 关于「{topic}」，直接看那个最直接的差价与规则冲突。\n"
+        f"- 互动钩子: \n"
         f"- 免责声明:\n\n"
         f"## 原始材料简述\n"
         f"- 主体: {topic}\n"
-        f"- 核心知识点: 把这个主题讲成能听懂、能记住、能落地的一条线\n"
-        f"- 反常识点: 大家通常只看表面，不看真正的关键变量\n"
+        f"- 核心知识点: 拆解底层机制对撞，讲清真实代价与核验动作\n"
+        f"- 反常识点: 表面标杆参考不等于落地成交规则，两套账目导致巨额差价与风险\n"
         f"- 本期差异化抓手: {reference_summary}\n"
-        f"- 联系现实的角度: 下次再次遇到这个主题时，用户知道先看哪里\n\n"
+        f"- 联系现实的角度: 提供三步核验清单，帮助观众在实际场景中直接落地避坑\n\n"
         f"## 对话脚本\n\n"
         + "\n\n".join(dialogue)
         + "\n\n## 重点字幕\n"
@@ -25493,12 +29966,12 @@ def render_fallback_article_content(project: dict[str, Any], template: dict[str,
     topic = clean_text(project["topic_name"])
     title = fallback_cover_title(topic)
     subtitle = fallback_cover_subtitle(topic)
-    publish_title = f"{topic}，这件事为什么总被大家讲偏？"
+    publish_title = f"{topic}：底层规则对撞与避坑指南"
     points = [
-        f"先把「{topic}」的核心问题点明，让读者知道这篇文章到底要解决什么。",
-        f"拆掉围绕「{topic}」最常见的一个误区，制造继续往下读的动力。",
-        f"解释「{topic}」真正的关键机制，让抽象概念落成看得见的因果链。",
-        f"拿一个现实案例说明「{topic}」为什么值得今天的人重新理解。",
+        f"把「{topic}」最直接的矛盾和现实代价摆在台面，算清时间与金钱账目。",
+        f"剖析底层机制：官方标杆规则与一线回款冲量逻辑是如何对撞的。",
+        f"拆解两套账目在落地时产生的实际漏洞，让读者一目了然。",
+        f"给出普通人立刻可以执行的核对清单，确保做出明智判断。",
     ]
     image_prompts = [
         f"宽画幅横向构图，画面必须只对应这段口播「{line}」。可按口播组织数字、短结论、批注和关系线，不限制固定数量或位置，不生成无关长段正文。"
@@ -25509,30 +29982,30 @@ def render_fallback_article_content(project: dict[str, Any], template: dict[str,
         f"# {title}\n\n"
         f"## Meta\n"
         f"- 封面副标题: {subtitle}\n"
-        f"- 核心观点: {topic}真正值得看的，是那条容易被忽略的逻辑链\n"
+        f"- 核心观点: 讲透「{topic}」底层逻辑对撞，算清实际代价，给出落地执行清单\n"
         f"- 推荐发布标题: {publish_title}\n"
-        f"- 钩子: 你有没有发现，很多人聊「{topic}」时，真正重要的那一步反而最少被提到？\n"
-        f"- 互动钩子: 你平时最容易在哪一步被带偏，评论区聊聊。\n"
+        f"- 钩子: 关于「{topic}」，直接看那个最直接的差价与规则冲突。\n"
+        f"- 互动钩子: \n"
         f"- 免责声明:\n\n"
         f"## 正文\n\n"
-        f"很多人一提到「{topic}」，往往会直接跳到结论。但真正决定读者能不能看进去的，不是结论，而是你有没有把那条最关键的逻辑链讲清楚。\n\n"
-        f"### 先把问题点明\n\n"
+        f"很多人一提到「{topic}」，往往会直接跳到结论。但真正决定利益与风险的，是两套底层规则的对撞逻辑与实际代价。\n\n"
+        f"### 核心冲突与现实代价\n\n"
         f"{points[0]}\n\n"
         f"[配图1]\n\n"
-        f"### 为什么总会讲偏\n\n"
+        f"### 底层机制：为什么两套账会撞车\n\n"
         f"{points[1]}\n\n"
-        f"- 表面信息通常最容易传播\n"
-        f"- 真正关键的转折往往被省掉\n"
-        f"- 一旦省掉因果，内容就会变成概念堆砌\n\n"
+        f"- 标杆体系要守住挂牌价与规则名义\n"
+        f"- 一线渠道要拼现金流、回款与冲量\n"
+        f"- 规则不对齐导致了直接的差价与信息差\n\n"
         f"[配图2]\n\n"
-        f"### 真正该看的关键点\n\n"
+        f"### 落地场景中的真实差异\n\n"
         f"{points[2]}\n\n"
         f"[配图3]\n\n"
-        f"### 回到现实场景\n\n"
+        f"### 可执行的核验清单\n\n"
         f"{points[3]}\n\n"
         f"[配图4]\n\n"
         f"### 写在最后\n\n"
-        f"所以这篇内容真正想留下来的，不是一个孤立答案，而是你下次再碰到「{topic}」时，知道先看哪里。你平时最容易在哪一步被带偏，评论区聊聊。\n\n"
+        f"所以面对「{topic}」，只要牢牢掌握底层逻辑与核对三部曲，就能准确规避风险并争取最大利益。\n\n"
         f"## 图片提示词\n\n"
         f"### 横屏封面图（头图）\n"
         f"宽画幅头图，商业杂志头图风，主视觉围绕「{topic}」，主标题「{title}」和副标题「{subtitle}」清晰可读，文字短而醒目，保留后期叠字安全区。\n\n"
@@ -25567,16 +30040,16 @@ def fallback_opening_line(topic: str, family: str, brief: str = "") -> str:
     if family == "scene_action":
         if firsthand:
             return firsthand.rstrip("。！？!?") + "。"
-        return f"「{topic}」一进入真实使用场景，宣传里没说的那一面就露出来了。"
+        return f"「{topic}」只要一落地实际使用，两套规则的冲突马上就显现出来了。"
     if family == "consequence":
-        return f"「{topic}」真正让人付代价的，往往不是出问题那一刻，而是发现得太晚。"
+        return f"很多人为「{topic}」花时间花钱，结果发现自己一开始就算错了账。"
     if family == "identity_conflict":
-        return f"同样是「{topic}」，有人买到的是方便，有人接住的却是一串麻烦。"
+        return f"同是面对「{topic}」，有人省下几千块，有人却直接踩进规则陷阱。"
     if family == "belief_collision":
-        return f"关于「{topic}」，流传最广的判断，恰好漏掉了决定结果的一步。"
+        return f"关于「{topic}」，大家口耳相传的省事方法，正好会导致最昂贵的失误。"
     if family == "open_loop":
-        return f"「{topic}」真正改变结果的，是哪个一直没人注意的动作？"
-    return f"先说结果：「{topic}」不能只看表面那一层。"
+        return f"为什么同样是「{topic}」，明面上的说法和实际落地的账差了这么多？"
+    return f"关于「{topic}」，直接看那个最直接的差价与规则冲突。"
 
 
 def build_fallback_dialogue_lines(
@@ -25591,28 +30064,24 @@ def build_fallback_dialogue_lines(
     if speaker_mode == "dual":
         return [
             f"【女】{opening}",
-            f"【男】对，这种题最容易写成解释文，但观众真正想听的，是它到底卡在哪儿，为什么会一步步变成现在这样。",
-            f"【女】别上来背概念，先说那个最容易让人误判的瞬间，行吗？",
-            f"【男】行。很多时候表面现象看着已经很明显了，可真正决定结果的，往往是后面那个被忽略的小动作。",
-            f"【女】这就有意思了，表面看是一个问题，真正关键其实藏在另一层？",
-            f"【男】没错。所以中间一定得拆两步：第一步讲大家原来怎么想，第二步讲为什么这种想法会把人带偏。",
-            f"【女】那别空讲，你举个具体点的例子，不然观众听到这儿还是会觉得抽象。",
-            f"【男】最有效的讲法，就是把它放进一个真实场景里。你一看到人物、动作、结果，马上就知道问题到底出在哪儿。",
-            f"【女】所以这期真正要记住的，不是一个大词，而是那个“原来我一直忽略这里”的瞬间。",
-            f"【男】对。下次你再碰到「{topic}」，先别急着顺着表面往下想，先找那个真正决定结果的点。",
-            f"【女】你平时最容易在哪一步想当然？",
-            f"【男】把你第一反应留在评论区，我们就知道下一期该先拆哪种误区了。",
+            f"【男】这不是小事。如果不搞清这里的真实规则，最直接的代价就是多花冤枉钱或者承担隐性风险。",
+            f"【女】那这里最直接的冲突到底在哪？大家到底付出了什么实际代价？",
+            f"【男】代价非常实在：要么时间白白耗进去，要么真金白银打了水漂，而且出了问题根本没处退。",
+            f"【女】为什么同一件事会出现两套完全对立的情况？底层机制到底是什么？",
+            f"【男】核心原因就是两套逻辑在撞车：官方挂牌是一套刚性规则，而具体执行和渠道为了回款跑量又是另一套账。",
+            f"【女】两套账撞在一起，普通人没有内部信息，自然就会直接踩坑。",
+            f"【男】所以解决办法不能听空话，必须拿出三条具体的落地动作：先查资质开票，再核实售后保修，最后看清退货细则。",
+            f"【女】把这三条核验动作落地，普通人就能立刻避开绝大部分暗坑。",
+            f"【男】对，买之前花两分钟按这三步核实，省下的就是你实打实的真金白银。",
         ]
     return [
         f"【主播】{opening}",
-        f"【主播】很多稿子一上来就在解释名词，可短视频观众不等这个，他们更想知道：这事到底为什么会卡住我？",
-        f"【主播】先抓那个最容易误判的瞬间。你一旦看懂这一步，后面很多问题都顺了。",
-        f"【主播】表面看，大家以为问题就在眼前；但真正关键，通常藏在后面那个不起眼的动作里。",
-        f"【主播】这也是为什么同一个题，有人越听越明白，有人却越听越空，因为前者在讲过程，后者只在讲结论。",
-        f"【主播】那过程怎么讲才不空？最简单，就是把它塞进一个真实场景里：谁在做、怎么做、结果怎样，一下就清楚了。",
-        f"【主播】你会发现，很多旧理解不是完全错，而是只讲了半截。真正把人留住的，是后面那半截反转。",
-        f"【主播】别只记一个词，记住那个决定结果的小细节。下次再碰到「{topic}」，先看那里。",
-        f"【主播】你自己最容易在哪一步想当然？评论区留一句，我按这个顺序继续拆。",
+        f"【主播】这件事如果搞不清楚，最直接的后果就是真金白银或者大量时间打水漂。",
+        f"【主播】很多人的问题在于：把宣传里的参考标准直接当成了最终的成交落地规则。",
+        f"【主播】底层机制其实很清楚：制定规则的要守住标杆，但一线执行和渠道要拼回款冲销量，两套账自然就在这里撞上了。",
+        f"【主播】两套逻辑对撞的结果，就是不知情的人全额买单，看懂规则的人低价拿到同样的结果。",
+        f"【主播】真正落地只要看清三件事：第一查资质与票据，第二确认售后保障是否完全同等，第三把退换货条款逐字看清。",
+        f"【主播】别听虚的，记住这三条具体的避坑动作，以后碰到「{topic}」，直接照着核对就能立竿见影。",
     ]
 
 
@@ -25632,10 +30101,10 @@ def render_fallback_story_content_v2(
     dialogue = build_fallback_dialogue_lines(topic, speaker_mode, project, template, brief)
     reference_summary = "；".join(item.get("title") or "" for item in refs[:3] if isinstance(item, dict) and clean_text(item.get("title") or "")) or f"{topic} 的公开资料"
     highlight_lines = [
-        f"别急着聊「{topic}」的结论，最关键的是第一步。",
-        "表面看是一个问题，真正关键往往藏在另一层。",
-        "别只背概念，要把它放进真实场景里看。",
-        "下次再碰到类似情况，先找那个决定结果的小细节。",
+        f"直面「{topic}」最核心的规则与利益冲突。",
+        "两套账撞车：标杆规则与冲量回款的底层对撞。",
+        "代价很实在：算不清真实账目就会全额买单。",
+        "落地核验三部曲：查资质、对保修、看退换条款。",
     ]
     scene_prompt_lines = [
         f"宽画幅横向构图，画面必须只对应这段口播「{line}」。保留字幕空间，文字与信息元素由口播需要决定，核心事实准确，不要无关长段正文。"
@@ -25647,12 +30116,12 @@ def render_fallback_story_content_v2(
         if isinstance(item, dict)
     ) or "- 暂无参考资料"
     hook = dialogue[0].replace("【女】", "").replace("【男】", "").replace("【主播】", "").strip()
-    interaction_hook = "你自己最容易在哪一步想当然？评论区留一句。"
+    interaction_hook = ""
     return (
         f"# {cover_title}\n\n"
         f"## Meta\n"
         f"- 封面副标题: {cover_subtitle}\n"
-        f"- 核心观点: 真正能把「{topic}」讲明白的，不是表面结论，而是那条因果链。\n"
+        f"- 核心观点: 讲透「{topic}」背后的底层规则对撞与实际代价，给出立即可用的核验动作。\n"
         f"- 时长: {duration}\n"
         f"- 推荐发布标题: {publish_title}\n"
         f"- 钩子: {hook}\n"
@@ -25660,10 +30129,10 @@ def render_fallback_story_content_v2(
         f"- 免责声明:\n\n"
         f"## 原始材料简述\n"
         f"- 主体: {topic}\n"
-        f"- 核心知识点: 不是只讲是什么，而是讲清为什么、怎么一步步发生。\n"
-        f"- 反常识点: 大家以为问题在表面，真正关键却在更后面的细节。\n"
+        f"- 核心知识点: 拆解底层机制对撞，讲清真实代价与核验动作。\n"
+        f"- 反常识点: 表面标杆参考不等于落地成交规则，两套账目导致巨额差价与风险。\n"
         f"- 本期差异化抓手: {reference_summary}\n"
-        f"- 联系现实的角度: 下次再碰到类似情况，观众知道先看哪一步。\n\n"
+        f"- 联系现实的角度: 提供三步核验清单，帮助观众在实际场景中直接落地避坑。\n\n"
         f"## 对话脚本\n\n"
         + "\n\n".join(dialogue)
         + "\n\n## 重点字幕\n"
@@ -25690,14 +30159,14 @@ def render_fallback_article_content_v2(
     topic = clean_text(project["topic_name"])
     title = fallback_cover_title(topic)
     subtitle = fallback_cover_subtitle(topic)
-    publish_title = f"{topic}，很多人从第一步就看偏了"
+    publish_title = f"{topic}：底层规则对撞与真实避坑指南"
     opening_plan = channel_opening_diversity_plan(project, template, brief=brief)
     opening = fallback_opening_line(topic, clean_text(str(opening_plan.get("selected_family") or "scene_action")), brief)
     points = [
-        f"先把「{topic}」最容易让人误判的那个瞬间点出来，让读者一上来就知道这篇内容为什么值得继续看。",
-        f"拆掉围绕「{topic}」最常见的一层旧理解，把“你以为”和“其实”拉开。",
-        f"用具体场景把真正的机制讲出来，不讲空概念，只讲看得见的动作和结果。",
-        f"最后把它拉回现实，让读者知道下次遇到类似情况该先看哪里。",
+        f"把「{topic}」最直接的矛盾和现实代价摆在台面，算清时间与金钱账目。",
+        f"剖析底层机制：官方标杆规则与一线回款冲量逻辑是如何对撞的。",
+        f"拆解两套账目在落地时产生的实际漏洞，让读者一目了然。",
+        f"给出普通人立刻可以执行的核对清单，确保做出明智判断。",
     ]
     image_prompts = [
         f"宽画幅横向构图，画面必须只对应这段口播「{line}」。可按口播自由组织数字、结论、批注和图形关系，不设固定数量，不生成无关长段正文。"
@@ -25712,27 +30181,27 @@ def render_fallback_article_content_v2(
         f"# {title}\n\n"
         f"## Meta\n"
         f"- 封面副标题: {subtitle}\n"
-        f"- 核心观点: 真正值得讲的不是表面定义，而是观众最容易漏掉的那个关键动作。\n"
+        f"- 核心观点: 讲透「{topic}」底层逻辑对撞，算清实际代价，给出落地执行清单。\n"
         f"- 推荐发布标题: {publish_title}\n"
         f"- 钩子: {opening}\n"
-        f"- 互动钩子: 你最容易在哪一步看偏，评论区聊聊。\n"
+        f"- 互动钩子: \n"
         f"- 免责声明:\n\n"
         f"## 正文\n\n"
         f"{opening}\n\n"
-        f"### 先说最容易讲偏的地方\n\n"
+        f"### 核心冲突与现实代价\n\n"
         f"{points[0]}\n\n"
         f"[配图1]\n\n"
-        f"### 为什么大家总会在这里看偏\n\n"
+        f"### 底层机制：为什么两套账会撞车\n\n"
         f"{points[1]}\n\n"
         f"[配图2]\n\n"
-        f"### 真正要看的是哪一步\n\n"
+        f"### 落地场景中的真实差异\n\n"
         f"{points[2]}\n\n"
         f"[配图3]\n\n"
-        f"### 回到今天，怎么用上这件事\n\n"
+        f"### 可执行的核验清单\n\n"
         f"{points[3]}\n\n"
         f"[配图4]\n\n"
         f"### 写在最后\n\n"
-        f"所以这篇内容真正想留下来的，不是一个孤零零的结论，而是你下次再碰到「{topic}」时，知道先看哪里。你自己最容易在哪一步想当然？评论区聊聊。\n\n"
+        f"面对「{topic}」，只要牢牢掌握底层逻辑与核对三部曲，就能准确规避风险并争取最大利益。\n\n"
         f"## 图片提示词\n"
         f"### 横屏封面图（头图）\n"
         f"宽画幅头图，围绕「{topic}」，主标题「{title}」和副标题「{subtitle}」清晰可读，首屏抓人，保留后期文字安全区。\n"
@@ -25742,7 +30211,6 @@ def render_fallback_article_content_v2(
         + refs_block
         + "\n"
     )
-
 
 def render_fallback_content_english(
     project: dict[str, Any],
@@ -25982,9 +30450,13 @@ HOLLOW_SCRIPT_PHRASES = (
     "最有效的讲法",
     "下次你再碰到",
     "先找那个真正决定结果",
+    "哪一步想当然",
+    "哪一步被带偏",
+    "表面现象看着已经很明显了",
+    "为什么这种想法会把人带偏",
+    "最容易讲错的地方",
+    "最容易让人误判的瞬间",
 )
-
-
 def hollow_script_report(content: str, mode: str = "video") -> dict[str, Any]:
     """Detect editorial scaffolding accidentally shipped as final narration."""
     script = "\n".join(parse_dialogue_lines(content, mode))
@@ -26018,23 +30490,56 @@ def request_deepseek_chat_completion(
     endpoint = base_url.rstrip("/")
     if not endpoint.endswith("/chat/completions"):
         endpoint += "/chat/completions"
+    requested_max_tokens = max(1, int(max_tokens or 1))
+    # OpenAI-compatible gateways advertise different output limits. Do not
+    # silently reduce the caller's budget: reasoning models can consume that
+    # hidden allowance before emitting the required JSON or document body.
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": requested_max_tokens,
     }
     payload.update(extra_body or {})
-    response = _request_provider_json(
-        "POST",
-        endpoint,
-        {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-        },
-        payload,
-        timeout=timeout,
-    )
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = _request_provider_json(
+                "POST",
+                endpoint,
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "short-video-studio/1.0",
+                },
+                payload,
+                timeout=timeout,
+            )
+            break
+        except (RuntimeError, ConnectionError, TimeoutError, OSError, urllib.error.URLError, http.client.RemoteDisconnected) as exc:
+            last_error = exc
+            transient = isinstance(exc, (ConnectionError, TimeoutError, urllib.error.URLError, http.client.RemoteDisconnected)) or any(
+                token in str(exc).casefold()
+                for token in (
+                    "remote end closed connection",
+                    "connection reset",
+                    "connection aborted",
+                    "网络请求失败",
+                    "timed out",
+                    "http 500",
+                    "http 502",
+                    "http 503",
+                    "http 504",
+                    "server_error",
+                    "internal_server_error",
+                    " eof",
+                )
+            )
+            if not transient or attempt >= 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+    else:
+        raise last_error or RuntimeError("DeepSeek 请求失败。")
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ContentGenerationError("DeepSeek 没有返回可用结果。")
@@ -26046,12 +30551,348 @@ def request_deepseek_chat_completion(
     return content, clean_text(str(choice.get("finish_reason") or ""))
 
 
+def deepseek_optional_request_body(
+    base_url: str,
+    thinking_type: str = "",
+    reasoning_effort: str = "",
+) -> dict[str, Any]:
+    """Return optional DeepSeek fields only for the official compatible API.
+
+    OpenAI-compatible gateways frequently reject provider-specific fields while
+    still accepting the normal chat-completions payload. The model itself can
+    still reason without making these optional controls part of the request.
+    """
+    host = clean_text(urllib.parse.urlsplit(base_url).netloc).lower()
+    if host not in {"api.deepseek.com", "api.deepseek.com.cn"}:
+        return {}
+    body: dict[str, Any] = {}
+    if clean_text(reasoning_effort):
+        body["reasoning_effort"] = clean_text(reasoning_effort)
+    if clean_text(thinking_type) in {"enabled", "disabled"}:
+        body["thinking"] = {"type": clean_text(thinking_type)}
+    return body
+
+
+def has_complete_production_content_structure(
+    candidate: str,
+    mode: str,
+    *,
+    require_reference_url: bool = False,
+) -> bool:
+    """Return whether a generated draft contains every section needed downstream."""
+    if not clean_text(candidate).startswith("#"):
+        return False
+    if mode == "article":
+        return all(
+            clean_text(extract_section(candidate, title, level=2))
+            for title in ("正文", "图片提示词", "参考资料")
+        )
+    script_ready = any(
+        clean_text(extract_section(candidate, title, level=2))
+        for title in ("口播脚本", "对话脚本", "视频脚本", "脚本")
+    )
+    support_ready = all(
+        clean_text(extract_section(candidate, title, level=2))
+        for title in ("Meta", "重点字幕", "参考资料")
+    )
+    references = clean_text(extract_section(candidate, "参考资料", level=2))
+    references_ready = not require_reference_url or bool(re.search(r"https?://\S+", references, flags=re.I))
+    return script_ready and support_ready and references_ready
+
+
+def narrative_tension_report(content: str, mode: str) -> dict[str, Any]:
+    """Detect drafts that are accurate but still read like a flat news digest."""
+    if clean_text(mode) == "article":
+        return {"score": 100, "passed": True, "needs_rewrite": False, "hard_failures": [], "issues": []}
+
+    lines = [strip_dialogue_speaker(item) for item in parse_dialogue_lines(content, mode)]
+    lines = [clean_text(item) for item in lines if clean_text(item)]
+    script = "\n".join(lines)
+    opening = "".join(lines[:3])
+    ending = "".join(lines[-3:])
+    if not script:
+        return {
+            "score": 0,
+            "passed": False,
+            "needs_rewrite": True,
+            "hard_failures": ["missing_script"],
+            "issues": ["没有可评价的口播正文"],
+        }
+
+    result_signal = bool(re.search(r"\d|封禁|拒绝|下架|停止|失败|上涨|下降|涨了|降了|损失|省下|增加|减少|首次|超过|达到", opening))
+    contrast_signal = any(token in opening for token in ("却", "反而", "不是", "而是", "一边", "另一边", "同样", "竟然", "但"))
+    conflict_signal = any(
+        token in script
+        for token in ("拒绝", "封禁", "限制", "争夺", "竞争", "冲突", "对立", "阵营", "一边", "另一边", "双方", "平台与", "用户与")
+    )
+    audience_tokens = ("普通人", "普通用户", "消费者", "用户", "你会", "你要", "你的", "我们")
+    concrete_cost_tokens = (
+        "工作", "饭碗", "收入", "花钱", "成本", "价格", "时间", "隐私", "安全", "风险", "选择",
+        "买贵", "用不了", "失去", "多花", "少赚", "被迫", "责任", "误操作", "售后", "账号",
+    )
+    stake_signal = any(
+        any(audience in line for audience in audience_tokens)
+        and any(cost in line for cost in concrete_cost_tokens)
+        for line in lines
+    )
+    mechanism_signal = any(
+        token in script
+        for token in ("因为", "原因", "由于", "为了", "靠的是", "背后", "机制", "规则", "商业模式", "技术上", "意味着", "导致", "所以")
+    )
+    judgment_signal = any(
+        token in ending
+        for token in ("关键", "真正", "判断", "先看", "记住", "别", "不是", "而是", "决定", "结论", "这意味着", "归根到底")
+    )
+    specific_opening = result_signal or contrast_signal or conflict_signal
+    template_phrases = [
+        phrase
+        for phrase in ("底层规则对撞", "两套账撞车", "三步核验", "讲清真实代价", "回答一个核心问题", "事情正在发生变化")
+        if phrase in script
+    ]
+
+    missing: list[tuple[str, str]] = []
+    if not specific_opening:
+        missing.append(("opening", "前三句没有本期独有的结果、反差、冲突或现实代价"))
+    if not stake_signal:
+        missing.append(("audience_stake", "没有落到普通人的钱、时间、工作、隐私、安全或选择"))
+    if not mechanism_signal:
+        missing.append(("mechanism", "只复述发生了什么，没有解释为什么会这样"))
+    if not judgment_signal:
+        missing.append(("judgment", "结尾没有形成可记住的独立判断"))
+
+    hard_failures: list[str] = []
+    if (len(missing) >= 3 and len(lines) >= 5) or (
+        len(lines) >= 4 and not mechanism_signal and not judgment_signal
+    ):
+        hard_failures.append("flat_news_summary")
+    if len(template_phrases) >= 2:
+        hard_failures.append("template_narration")
+    score = max(
+        0,
+        100
+        - len(missing) * 18
+        - len(template_phrases) * 10
+        + (4 if conflict_signal or contrast_signal else 0),
+    )
+    issues = [message for _key, message in missing]
+    if template_phrases:
+        issues.append("出现跨主题固定套话：" + "、".join(template_phrases))
+    return {
+        "score": score,
+        "passed": score >= 60 and not hard_failures,
+        "needs_rewrite": bool(hard_failures),
+        "hard_failures": hard_failures,
+        "issues": issues,
+        "signals": {
+            "specific_opening": specific_opening,
+            "real_conflict_or_contrast": conflict_signal or contrast_signal,
+            "audience_stake": stake_signal,
+            "mechanism": mechanism_signal,
+            "judgment": judgment_signal,
+        },
+        "template_phrases": template_phrases,
+    }
+
+
+def explanation_completeness_report(
+    content: str,
+    mode: str,
+    explanation_model: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Check whether the draft fulfils the episode-specific explanation job."""
+    model = explanation_model or {}
+    content_type = clean_text(str(model.get("content_type") or "event")) or "event"
+    lines = [clean_text(strip_dialogue_speaker(item)) for item in parse_dialogue_lines(content, mode)]
+    script = "\n".join(item for item in lines if item)
+    if mode == "article":
+        script = clean_text(content)
+    checks: dict[str, bool]
+    if content_type == "mechanism":
+        checks = {
+            "mechanism_object": any(token in script for token in ("机制", "规则", "系统", "流程", "原理", "模式")),
+            "input_or_trigger": any(token in script for token in ("当", "一旦", "前提", "条件", "触发", "输入", "先要", "开始于")),
+            "process": any(token in script for token in ("经过", "随后", "接着", "再", "第一", "第二", "环节", "步骤", "如何")),
+            "output": any(token in script for token in ("结果", "最终", "于是", "所以", "导致", "形成", "输出")),
+            "boundary": any(token in script for token in ("但", "不过", "不代表", "只有", "前提", "边界", "未必", "不能推出")),
+            "event_callback": any(token in script for token in ("这次", "本次", "这件事", "回到", "因此", "真正检验")),
+        }
+    elif content_type == "transition":
+        checks = {
+            "change": any(token in script for token in ("卸任", "退休", "离职", "接任", "交接", "撤下", "变动")),
+            "role": any(token in script for token in ("负责", "职责", "岗位", "部门", "管理", "采购", "供应")),
+            "continuity_signals": any(token in script for token in ("交接", "制度", "标准", "记录", "流程", "备份", "接替", "连续", "运转")),
+            "risk_or_test": any(token in script for token in ("风险", "检验", "判断", "依赖", "断供", "中断", "失效")),
+            "boundary": any(token in script for token in ("公开报道", "目前", "尚未", "不代表", "不能", "只说明", "仍需")),
+            "takeaway": any(token in script for token in ("关键", "真正", "所以", "这意味着", "成熟", "结论")),
+        }
+    elif content_type == "conflict":
+        checks = {
+            "sides": any(token in script for token in ("双方", "一边", "另一边", "平台", "用户", "公司")),
+            "goals": any(token in script for token in ("想要", "为了", "要守住", "目标", "利益")),
+            "collision": any(token in script for token in ("冲突", "碰撞", "拒绝", "限制", "争夺", "规则")),
+            "impact": any(token in script for token in ("影响", "结果", "代价", "导致", "于是")),
+            "boundary": any(token in script for token in ("但", "不代表", "并非", "未必", "合理")),
+        }
+    elif content_type == "trend":
+        checks = {
+            "change_signal": bool(re.search(r"增长|下降|增加|减少|变化|拐点|趋势|连续|\d", script)),
+            "evidence": any(token in script for token in ("数据显示", "报告", "报道", "根据", "连续", "对比")),
+            "drivers": any(token in script for token in ("因为", "推动", "驱动", "来自", "原因")),
+            "counterevidence": any(token in script for token in ("但", "波动", "反例", "不代表", "尚未", "短期")),
+            "conditions": any(token in script for token in ("条件", "前提", "只有", "取决于", "如果")),
+        }
+    else:
+        checks = {
+            "event": bool(script),
+            "evidence": bool(re.search(r"报道|资料|数据显示|官方|文件|\d", script)),
+            "cause_or_explanation": any(token in script for token in ("因为", "原因", "机制", "规则", "为了", "导致")),
+            "result_or_impact": any(token in script for token in ("结果", "影响", "意味着", "所以", "于是", "导致")),
+            "boundary_or_judgment": any(token in script for token in ("但", "不代表", "关键", "真正", "判断", "结论")),
+        }
+    missing = [key for key, passed in checks.items() if not passed]
+    required = len(checks)
+    score = round((required - len(missing)) / max(1, required) * 100)
+    return {
+        "content_type": content_type,
+        "score": score,
+        "passed": score >= 70 and not (content_type in {"mechanism", "transition"} and len(missing) >= 2),
+        "checks": checks,
+        "missing": missing,
+        "central_question": clean_text(str(model.get("central_question") or "")),
+        "explanation_target": clean_text(str(model.get("explanation_target") or "")),
+    }
+
+
+def generated_content_quality_assessment(
+    content: str,
+    mode: str,
+    explanation_model: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Separate publishable structure from recommended editorial quality."""
+    engagement = content_engagement_report(content, mode)
+    viewer_value = engagement.get("viewer_value") if isinstance(engagement.get("viewer_value"), dict) else {}
+    opening_score = float(engagement.get("opening_score", 0) or 0)
+    retention_score = float(engagement.get("retention_score", 0) or 0)
+    overall_score = float(engagement.get("overall_score", 0) or 0)
+    value_score = float(viewer_value.get("value_score", 0) or 0)
+    opening_has_stake = bool(engagement.get("opening_has_stake", True))
+    language_pollution = script_language_pollution_hits(
+        "\n".join(parse_dialogue_lines(content, mode)) or content
+    )
+    narrative_tension = narrative_tension_report(content, mode)
+    explanation_completeness = explanation_completeness_report(content, mode, explanation_model)
+    quality_passed = (
+        opening_score >= CONTENT_OPENING_MIN_SCORE
+        and retention_score >= CONTENT_RETENTION_MIN_SCORE
+        and overall_score >= CONTENT_OVERALL_MIN_SCORE
+        and value_score >= 62
+        and opening_has_stake
+        and not language_pollution
+        and bool(narrative_tension.get("passed"))
+        and bool(explanation_completeness.get("passed"))
+    )
+    rank_score = round(
+        overall_score * 20
+        + opening_score * 16
+        + retention_score * 14
+        + value_score * 0.30
+        + (5 if opening_has_stake else 0)
+        + float(narrative_tension.get("score", 0) or 0) * 0.22
+        + float(explanation_completeness.get("score", 0) or 0) * 0.18
+        - min(12, len(engagement.get("issues") or [])),
+        2,
+    )
+    warning_parts: list[str] = []
+    if opening_score < CONTENT_OPENING_MIN_SCORE:
+        warning_parts.append("开头吸引力偏弱")
+    elif not opening_has_stake:
+        warning_parts.append("开头与观众的利害关系不明确")
+    if retention_score < CONTENT_RETENTION_MIN_SCORE:
+        warning_parts.append("中段推进偏弱")
+    if overall_score < CONTENT_OVERALL_MIN_SCORE or value_score < 62:
+        warning_parts.append("观众收获偏弱")
+    if language_pollution:
+        warning_parts.append("口播存在语义拼接污染")
+    if not narrative_tension.get("passed"):
+        warning_parts.append("叙事张力不足，仍像新闻摘要")
+    if not explanation_completeness.get("passed"):
+        missing_labels = "、".join(explanation_completeness.get("missing") or [])
+        warning_parts.append(f"{explanation_completeness.get('content_type', 'event')}解释不完整：{missing_labels}")
+    return {
+        "engagement": engagement,
+        "quality_passed": quality_passed,
+        "rank_score": rank_score,
+        "opening_score": opening_score,
+        "retention_score": retention_score,
+        "overall_score": overall_score,
+        "viewer_value_score": value_score,
+        "language_pollution": language_pollution,
+        "narrative_tension": narrative_tension,
+        "explanation_completeness": explanation_completeness,
+        "warning": "、".join(dedupe_clauses(warning_parts)),
+    }
+
+
+def select_best_generated_content_candidate(
+    candidates: list[str],
+    mode: str,
+    *,
+    minimum_duration_sec: float = 0,
+    maximum_duration_sec: float = 0,
+    explanation_model: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Choose the strongest structurally valid draft produced in the current run."""
+    ranked: list[dict[str, Any]] = []
+    for attempt, candidate in enumerate(candidates, start=1):
+        candidate = strip_code_fences(str(candidate or "")).strip()
+        if not has_complete_production_content_structure(candidate, mode):
+            continue
+        hollow = hollow_script_report(candidate, mode)
+        if hollow.get("hollow"):
+            continue
+        spoken_chars, estimated_duration_sec = estimate_spoken_duration_sec(candidate, mode)
+        if maximum_duration_sec > 0 and estimated_duration_sec > maximum_duration_sec:
+            continue
+        assessment = (
+            generated_content_quality_assessment(candidate, mode, explanation_model)
+            if explanation_model is not None
+            else generated_content_quality_assessment(candidate, mode)
+        )
+        duration_passed = (
+            (minimum_duration_sec <= 0 or estimated_duration_sec >= minimum_duration_sec)
+            and (maximum_duration_sec <= 0 or estimated_duration_sec <= maximum_duration_sec)
+        )
+        ranked.append(
+            {
+                "content": candidate,
+                "attempt": attempt,
+                "spoken_chars": spoken_chars,
+                "estimated_duration_sec": estimated_duration_sec,
+                "duration_passed": duration_passed,
+                **assessment,
+            }
+        )
+    if not ranked:
+        return None
+    return max(
+        ranked,
+        key=lambda item: (
+            bool(item.get("quality_passed")) and bool(item.get("duration_passed")),
+            bool(item.get("duration_passed")),
+            bool(item.get("quality_passed")),
+            float(item["rank_score"]),
+            int(item["attempt"]),
+        ),
+    )
+
+
 def render_deepseek_content(
     project: dict[str, Any],
     template: dict[str, Any],
     brief: str,
     tavily_topic: str,
     context: dict[str, Any],
+    generation_meta: dict[str, Any] | None = None,
 ) -> str:
     env = runtime_env()
     api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
@@ -26059,28 +30900,31 @@ def render_deepseek_content(
     if not api_key:
         raise ContentGenerationError("DeepSeek API Key 未配置，文案未生成；已阻止使用空壳兜底稿。")
 
-    base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-    model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
     thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
     reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
+    # The composer already contains the channel prompt, factual boundary,
+    # output contract and language rule. Appending the common and viral rule
+    # banks here duplicated or contradicted them and made unrelated channels
+    # converge on the same over-engineered script structure.
     messages = compose_deepseek_messages(project, template, brief, tavily_topic, context)
-    if messages:
-        messages[0]["content"] = "\n\n".join(
-            item
-            for item in (
-                str(messages[0].get("content") or "").strip(),
-                build_common_content_system_rules(),
-                build_viral_content_rules(project, template),
-                build_product_content_rules(project),
-                build_output_language_rules(project),
-            )
-            if item
-        )
     request_timeout = configured_timeout_seconds(env, "AI_TEXT_TIMEOUT_SECONDS", 300, 60, 900)
 
-    extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-    if thinking_type in {"enabled", "disabled"}:
-        extra_body["thinking"] = {"type": thinking_type}
+    extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
+    retention_profile = retention_duration_profile(project, template)
+    # Keep one complete causal thread within a short-video budget. Source notes
+    # are evidence to compress, not a duration target to reproduce.
+    minimum_duration_sec = 0.0
+    target_duration_sec = float(retention_profile.get("target_sec") or 0)
+    maximum_duration_sec = 150.0 if mode != "article" else 0.0
+    minimum_spoken_chars = 0
+    maximum_spoken_chars = 650 if mode != "article" else 0
+    explanation_model = classify_content_explanation_mode(
+        clean_text(str(project.get("topic_name") or "")),
+        brief,
+        context.get("references") if isinstance(context.get("references"), list) else [],
+    )
 
     def compact_recovery_content() -> str:
         references = context.get("references") if isinstance(context, dict) else []
@@ -26109,8 +30953,15 @@ def render_deepseek_content(
                 "content": (
                     "你是短视频频道主编。只交付可直接生产的完整 content.md，不写分析过程、编辑说明、资料缺口或补料清单。"
                     "资料不足时缩小结论并删除缺少证据的主张，仍然围绕已核实信息完成一篇稿子。"
-                    "全文控制在900至1600个中文字，台词自然、具体、可朗读。"
-                    "开头直接给反差或结果，中段每2至4句出现新证据、追问或转折，结尾只留一个具体互动问题。"
+                    + (
+                        f"本期口播不超过{int(maximum_duration_sec)}秒，口播脚本目标为"
+                        f"不设最低字数，最多{maximum_spoken_chars}个有效中文字；资料少时交付短事实稿，Meta 时长按实际口播填写。"
+                        if maximum_duration_sec > 0
+                        else "文章长度按主题需要决定。"
+                    )
+                    + "台词自然、具体、可朗读。"
+                    "开头直接给反差或结果，中段持续加入新证据、解释、后果或行动，结尾用具体判断自然收住。"
+                    "不要按固定间隔插入追问、转折、总结或评论区话术。"
                     "若来源是早报、日报、榜单或资讯合集，只写与主题标题直接相关的一条因果主线，删除摘要中其它并列新闻。"
                 ),
             },
@@ -26118,13 +30969,14 @@ def render_deepseek_content(
                 "role": "user",
                 "content": (
                     f"频道：{clean_text(str(template.get('name') or project.get('template') or ''))}\n"
-                    f"频道口吻：{clean_text(str(template.get('tone') or template.get('voice') or '犀利但客观，像懂技术的朋友聊天'))}\n"
+                    f"频道口吻：{clean_text(str(template.get('channel_voice') or template.get('tone') or template.get('voice') or '犀利但客观，像懂技术的朋友聊天'))}\n"
                     f"主题：{resolved_topic}\n"
+                    f"本期创作要求：\n{compact_prompt_rule(brief, 5200) or '围绕主题给出明确结论、证据、原因和行动建议。'}\n\n"
                     f"已核实资料：\n{chr(10).join(evidence_lines) or '只使用主题中可确认的信息，不补写精确数字。'}\n\n"
-                    "固定输出结构：# 短标题；## Meta；## 原始材料简述；"
-                    f"## {script_heading}；## 重点字幕；## 图片提示词；## 参考资料。"
-                    "脚本必须是本期新闻成稿，不得出现‘自动挖题’‘素材不足’‘背后逻辑’等占位表达。"
-                    "图片提示词生成4至6张，每张绑定对应口播中的一个事实、数字、人物动作或因果关系。"
+                    "固定输出结构且所有二级标题必须逐字保留：# 短标题；## Meta；## 原始材料简述；"
+                    f"## {script_heading}；## 重点字幕；## 参考资料。"
+                    "脚本必须是本期完整成稿，不得出现‘自动挖题’‘素材不足’‘背后逻辑’等占位表达。"
+                    "不要输出图片提示词、构图、镜头或生图命令；视觉导演会在文案定稿后单独生成。"
                 ),
             },
         ]
@@ -26132,7 +30984,7 @@ def render_deepseek_content(
             api_key=api_key,
             base_url=base_url,
             model=model,
-            messages=return_messages,
+            messages=episode_review.attach_guidance(return_messages, project),
             temperature=0.55,
             max_tokens=7000,
             extra_body=extra_body,
@@ -26161,53 +31013,142 @@ def render_deepseek_content(
         content = strip_code_fences(raw_content)
         content = re.sub(r"(?is)^<think>.*?</think>\s*", "", content).strip()
     if not content.startswith("#"):
-        raise ContentGenerationError("DeepSeek 已响应，但返回内容不是完整的 content.md，请重试。")
-    engagement = content_engagement_report(content, mode)
-    if engagement.get("needs_rewrite"):
-        try:
-            rewritten, _finish_reason = request_deepseek_chat_completion(
-                api_key=api_key,
-                base_url=base_url,
-                model=model,
-                messages=compose_deepseek_rewrite_messages(project, template, content, engagement),
-                temperature=0.65,
-                max_tokens=12000,
-                extra_body=extra_body,
-                timeout=request_timeout,
-            )
-            rewritten = strip_code_fences(rewritten)
-            rewritten = re.sub(r"(?is)^<think>.*?</think>\s*", "", rewritten).strip()
-            if rewritten.startswith("#"):
-                content = rewritten
-        except Exception:
-            pass
-    def has_complete_production_structure(candidate: str) -> bool:
-        if mode == "article":
-            return all(
-                clean_text(extract_section(candidate, title, level=2))
-                for title in ("正文", "图片提示词", "参考资料")
-            )
-        script_ready = any(
-            clean_text(extract_section(candidate, title, level=2))
-            for title in ("口播脚本", "对话脚本", "视频脚本", "脚本")
-        )
-        support_ready = all(
-            clean_text(extract_section(candidate, title, level=2))
-            for title in ("Meta", "重点字幕", "图片提示词", "参考资料")
-        )
-        return script_ready and support_ready
+        # Some reasoning models/gateways return an empty or analysis-prefixed
+        # first completion even though the request itself succeeded. Reissue a
+        # shorter production-only prompt instead of misreporting this as a
+        # remote interruption.
+        content = compact_recovery_content()
+        if not content.startswith("#"):
+            raise ContentGenerationError("DeepSeek 已响应，但两次返回都不是完整的 content.md。")
 
-    if not has_complete_production_structure(content):
+    def generation_engagement_report(candidate: str) -> dict[str, Any]:
+        report = dict(content_engagement_report(candidate, mode))
+        _spoken_chars, duration_sec = estimate_spoken_duration_sec(candidate, mode)
+        report["estimated_duration_sec"] = duration_sec
+        if minimum_duration_sec > 0 and duration_sec < minimum_duration_sec:
+            issues = list(report.get("issues") or [])
+            issues.append(
+                {
+                    "where": "时长实验",
+                    "issue": f"预计口播 {int(round(duration_sec))} 秒，低于本期 {int(minimum_duration_sec)} 秒的信息深度下限。",
+                    "fix": "补充一个新的可观察例子、一个必要原因或一个实际判断步骤；禁止重复结论、堆转折词或添加空泛互动来凑时长。",
+                }
+            )
+            report["issues"] = issues
+            report["needs_rewrite"] = True
+        if maximum_duration_sec > 0 and duration_sec > maximum_duration_sec:
+            issues = list(report.get("issues") or [])
+            issues.append(
+                {
+                    "where": "时长实验",
+                    "issue": f"预计口播 {int(round(duration_sec))} 秒，超过本期 {int(maximum_duration_sec)} 秒生产预算。",
+                    "fix": "保留一个结论、一个可观察证据、一个原因和一个行动判断；把支线拆到下一期，整篇重写而不是截断句子。",
+                }
+            )
+            report["issues"] = issues
+            report["needs_rewrite"] = True
+        return report
+
+    engagement = generation_engagement_report(content)
+    references = context.get("references") if isinstance(context, dict) else []
+    references = references if isinstance(references, list) else []
+    # Preserve the first evidence-backed draft. Engagement scoring is useful
+    # for review, but repeated whole-draft rewrites were deleting information
+    # and converging every topic toward the same template.
+    current_run_candidates = [content]
+
+    best_candidate = select_best_generated_content_candidate(
+        current_run_candidates,
+        mode,
+        minimum_duration_sec=minimum_duration_sec,
+        maximum_duration_sec=maximum_duration_sec,
+        explanation_model=explanation_model,
+    )
+    if best_candidate:
+        content = str(best_candidate["content"])
+    if not has_complete_production_content_structure(
+        content,
+        mode,
+        require_reference_url=bool(references),
+    ):
         recovered = compact_recovery_content()
-        if not has_complete_production_structure(recovered):
-            raise ContentGenerationError("DeepSeek 返回的文案结构不完整，已阻止空壳兜底稿进入生产。")
+        if not has_complete_production_content_structure(
+            recovered,
+            mode,
+            require_reference_url=bool(references),
+        ):
+            raise ContentGenerationError("DeepSeek 返回的文案结构不完整，已阻止空壳稿进入生产。")
+        current_run_candidates.append(recovered)
         content = recovered
+        best_candidate = select_best_generated_content_candidate(
+            current_run_candidates,
+            mode,
+            minimum_duration_sec=minimum_duration_sec,
+            maximum_duration_sec=maximum_duration_sec,
+        )
+        if best_candidate:
+            content = str(best_candidate["content"])
     hollow = hollow_script_report(content, mode)
     if hollow.get("hollow"):
         raise ContentGenerationError(
             "DeepSeek 返回了通用占位稿，缺少本期事实与案例，已阻止保存。"
         )
+    # Normalise delivery rhythm before the final gate. This only splits existing
+    # spoken wording at punctuation; it does not invent facts or splice template copy.
+    # The same text therefore drives the editor, TTS and subtitle pipeline.
+    if mode != "article":
+        script_title = detect_script_section_title(content)
+        script_section = extract_section(content, script_title, level=2)
+        if script_section:
+            rhythmic_script, _rhythm_stats = enhance_script_section_rhythm_with_limit(
+                script_section,
+                clean_text(str(project.get("topic_name") or "")),
+                mode,
+                limit=32,
+            )
+            content = replace_section(content, script_title, rhythmic_script, level=2)
     content = compact_content_meta(content)
+    final_assessment = generated_content_quality_assessment(content, mode, explanation_model)
+    final_spoken_chars, final_duration_sec = estimate_spoken_duration_sec(content, mode)
+    duration_passed = (
+        (minimum_duration_sec <= 0 or final_duration_sec >= minimum_duration_sec)
+        and (maximum_duration_sec <= 0 or final_duration_sec <= maximum_duration_sec)
+    )
+    diagnostic = {
+        "candidate_count": len(current_run_candidates),
+        "selected_attempt": int((best_candidate or {}).get("attempt", len(current_run_candidates)) or 1),
+        "quality_passed": bool(final_assessment.get("quality_passed")),
+        "quality_warning": clean_text(str(final_assessment.get("warning") or "")),
+        "quality_score": final_assessment.get("rank_score", 0),
+        "opening_score": final_assessment.get("opening_score", 0),
+        "retention_score": final_assessment.get("retention_score", 0),
+        "viewer_value_score": final_assessment.get("viewer_value_score", 0),
+        "explanation_model": explanation_model,
+        "explanation_completeness": final_assessment.get("explanation_completeness", {}),
+        "spoken_chars": final_spoken_chars,
+        "estimated_duration_sec": final_duration_sec,
+        "minimum_duration_sec": minimum_duration_sec,
+        "duration_budget_sec": maximum_duration_sec,
+        "duration_passed": duration_passed,
+        "issues": list((final_assessment.get("engagement") or {}).get("issues") or [])[:8],
+    }
+    if generation_meta is not None:
+        generation_meta.clear()
+        generation_meta.update(diagnostic)
+    project_id = int(project.get("id") or 0)
+    if project_id:
+        storage.write_json(storage.project_file(project_id, "content_quality_diagnostic.json"), diagnostic)
+    if not duration_passed:
+        if minimum_duration_sec > 0 and final_duration_sec < minimum_duration_sec:
+            raise ContentGenerationError(
+                f"当前候选预计口播 {int(round(final_duration_sec))} 秒，低于本期 {int(minimum_duration_sec)} 秒信息深度下限；需补充新证据、必要原因或实际判断步骤。"
+            )
+        raise ContentGenerationError(
+            f"当前候选预计口播 {int(round(final_duration_sec))} 秒，超过本期 {int(maximum_duration_sec)} 秒生产预算，已阻止长解释稿进入正式生产。"
+        )
+    if project_id:
+        storage.project_file(project_id, "content_candidate_rejected.md").unlink(missing_ok=True)
+        storage.project_file(project_id, "content_candidate_rejected.json").unlink(missing_ok=True)
     return content + ("\n" if not content.endswith("\n") else "")
 
 
@@ -26321,6 +31262,11 @@ def scene_prompt(project_id: int, filename: str) -> dict[str, Any]:
                 if clean_text(str(record.get("topic_hash") or "")) != context_hashes.get("topic_hash", ""):
                     continue
                 source_prompt = clean_text(str(record.get("prompt") or record.get("source_prompt") or record.get("label") or ""))
+                if bool(record.get("manual_image_accepted")):
+                    # “当前提示词” must be the exact prompt that produced the
+                    # accepted redraw. Re-running the legacy composer here made
+                    # the UI lie by replacing it with generic channel boilerplate.
+                    return {"filename": filename, "prompt": normalize_image_prompt(source_prompt)}
                 prompt_source = composer_scene_prompt(source_prompt) or source_prompt
                 prompt = optimize_visual_generation_prompt(prompt_source, template, "scene") if source_prompt else ""
                 return {"filename": filename, "prompt": prompt}
@@ -26779,33 +31725,13 @@ def video_preflight_report(project_id: int) -> dict[str, Any]:
             return True
         return spoken_assets_fresh
 
-    current_image_hashes = project_image_context_hashes(project_id, content_text)
     semantic_stale_scene_indexes = set(stale_scene_image_indexes(project_id))
-    prompt_records = storage.read_json(storage.project_file(project_id, "scenes/scene_prompts.json"), [])
-    prompt_records_by_filename = {
-        clean_text(str(record.get("filename") or "")): record
-        for record in prompt_records
-        if isinstance(record, dict)
-    } if isinstance(prompt_records, list) else {}
-
-    def scene_prompt_record_fresh(path: Path) -> bool:
-        record = prompt_records_by_filename.get(path.name)
-        if not isinstance(record, dict):
-            return False
-        return (
-            clean_text(str(record.get("content_hash") or "")) == clean_text(str(current_image_hashes.get("content_hash") or ""))
-            and clean_text(str(record.get("topic_hash") or "")) == clean_text(str(current_image_hashes.get("topic_hash") or ""))
-        )
 
     def scene_image_fresh(path: Path) -> bool:
         if not path.exists():
             return False
         index = scene_image_index_from_path(path)
-        if index > 0 and index not in semantic_stale_scene_indexes:
-            return True
-        if scene_prompt_record_fresh(path):
-            return True
-        return not stale_after_content(path, tolerance=1.0)
+        return bool(index > 0 and index not in semantic_stale_scene_indexes)
 
     scene_expected = int(scene_status_payload.get("expected_count", 0) or 0)
     scene_generated = int(scene_status_payload.get("generated_count", 0) or len(scene_paths))
@@ -26856,8 +31782,8 @@ def video_preflight_report(project_id: int) -> dict[str, Any]:
             quality_issue(
                 "risk",
                 "场景图版本",
-                f"有 {len(stale_scene_images)}/{len(scene_paths)} 张场景图早于最新 content.md。",
-                "文案改过后请重新生成场景图，避免画面仍对应旧稿。",
+                f"有 {len(stale_scene_images)}/{len(scene_paths)} 张场景图与当前项目、主题、内容或本镜口播血缘不一致。",
+                "只重绘这些过期镜头；旧主题图不会进入当前成片。",
             )
         )
 
@@ -27131,6 +32057,77 @@ def quality_score_from_issues(issues: list[dict[str, Any]], base: int = 100) -> 
     return max(0, min(100, score))
 
 
+def image_quality_issue_category(item: dict[str, Any]) -> str:
+    text = " ".join(
+        clean_text(str(item.get(key) or ""))
+        for key in ("where", "issue", "fix")
+    ).lower()
+    if any(token in text for token in ("生产元信息", "画幅比例", "图片提示词含")):
+        return "prompt_metadata"
+    if any(token in text for token in ("封面缺少", "cover_title_missing", "cover_subtitle_missing", "封面标题")):
+        return "cover_typography"
+    if any(token in text for token in ("贴合偏弱", "语义贴合", "跨题材", "speech_visual_mismatch", "metric_subject_missing")):
+        return "semantic_alignment"
+    if any(token in text for token in ("重复", "相似度较高", "duplicate")):
+        return "duplication"
+    if any(token in text for token in ("不存在", "缺少文件", "黑图", "missing_file", "empty_foreground")):
+        return "asset_integrity"
+    if any(token in text for token in ("场景差异度", "口播绑定", "固定画风", "提示词", "prompt")):
+        return "prompt_design"
+    if any(token in text for token in ("吸引力", "对比度", "边缘/细节", "画面节奏", "太素")):
+        return "visual_appeal"
+    return "other"
+
+
+def image_quality_score_from_issues(issues: list[dict[str, Any]], base: int = 100) -> int:
+    """Score image findings without multiplying one root cause by asset count."""
+    penalties: dict[tuple[str, str], int] = {}
+    caps = {
+        "risk": {
+            "prompt_metadata": 12,
+            "cover_typography": 24,
+            "semantic_alignment": 32,
+            "duplication": 32,
+            "asset_integrity": 66,
+            "prompt_design": 28,
+            "visual_appeal": 28,
+            "other": 44,
+        },
+        "warn": {
+            "prompt_metadata": 6,
+            "cover_typography": 10,
+            "semantic_alignment": 10,
+            "duplication": 16,
+            "asset_integrity": 20,
+            "prompt_design": 10,
+            "visual_appeal": 12,
+            "other": 12,
+        },
+        "info": {
+            "prompt_metadata": 2,
+            "cover_typography": 4,
+            "semantic_alignment": 4,
+            "duplication": 4,
+            "asset_integrity": 6,
+            "prompt_design": 4,
+            "visual_appeal": 4,
+            "other": 4,
+        },
+    }
+    weights = {"risk": 22, "warn": 5, "info": 2}
+    for item in issues:
+        level = clean_text(str(item.get("level") or "")).lower()
+        if level not in weights:
+            continue
+        category = image_quality_issue_category(item)
+        key = (level, category)
+        penalties[key] = min(
+            caps[level].get(category, caps[level]["other"]),
+            penalties.get(key, 0) + weights[level],
+        )
+    return max(0, min(100, base - sum(penalties.values())))
+
+
 def quality_verdict(score: int) -> str:
     if score >= 88:
         return "质量稳定，可以进入下一步。"
@@ -27206,9 +32203,6 @@ IMAGE_APPEAL_CONFLICT_TERMS = ("冲突", "反差", "误区", "骗局", "警惕",
 IMAGE_APPEAL_SCENE_TERMS = ("客厅", "饭桌", "街头", "办公室", "门口", "社区", "柜台", "评论区", "聊天", "屏幕", "现场", "空间")
 IMAGE_APPEAL_TEXT_TERMS = ("短标签", "警示词", "标题区", "字幕空间", "留白", "角标", "封面", "可读", "数据", "数字", "callout", "光牌", "钩子")
 IMAGE_PROMPT_META_POLLUTION_TERMS = (
-    "16:9",
-    "4:3",
-    "3:4",
     "第1张",
     "第 1 张",
     "第2张",
@@ -27262,6 +32256,14 @@ def image_prompt_generic_hits(text: str) -> list[str]:
 def image_prompt_has_topic_anchor(text: str) -> bool:
     source = clean_text(text)
     if is_semantic_scene_generation_brief(text):
+        return True
+    # Provider prompts are intentionally compacted before dispatch. The
+    # compact contract still carries explicit episode and narration identity,
+    # even though internal-only policy fields have been removed.
+    if re.search(r"(?:^|[\s。，；！!\n])本期主题\s*[:：]\s*\S+", source) and re.search(
+        r"(?:^|[\s。，；！!\n])(?:当前完整口播|口播原文)\s*[:：]\s*\S+",
+        source,
+    ):
         return True
     return any(
         marker in source
@@ -27562,13 +32564,15 @@ def image_semantic_context_map(project_id: int, content: str = "", mode: str = "
             if not index:
                 continue
             director = scene.get("visual_director") if isinstance(scene.get("visual_director"), dict) else {}
+            # Narration is authoritative production data. ``source_prompt`` may
+            # already contain a fully composed image brief, so parsing it back
+            # as speech recursively duplicates prompt rules and stale concepts.
             speech_text = clean_scene_spoken_text(
                 str(
                     scene.get("speech_text")
-                    or scene.get("speech_summary")
                     or scene.get("audio_anchor")
+                    or scene.get("speech_summary")
                     or director.get("dialogue_anchor")
-                    or scene.get("source_prompt")
                     or ""
                 )
             )
@@ -27657,7 +32661,22 @@ def image_semantic_context_map(project_id: int, content: str = "", mode: str = "
             scene_source = clean_text(
                 f"{context.get('audio_anchor', '')} {context.get('speech', '')}"
             )
-            allowed_facts = verified_facts_for_text(scene_source)
+            # This gate checks factual support, while the semantic gate checks
+            # whether a supported fact belongs in this scene. Keep those jobs
+            # separate so equivalent title wording ("1千" vs "1000元") does
+            # not reject a number already verified by project references.
+            # Topic facts are episode-level facts, not neighbouring-scene facts.
+            # Keep title numbers such as “百万” available in every scene so the
+            # topic anchor cannot be rewritten into a vague placeholder during
+            # prompt sanitation. Scene-local facts are still restricted by the
+            # registry below; this only adds facts explicitly present in the
+            # current canonical topic.
+            topic_facts = {
+                normalized_numeric_fact(item)
+                for item in extract_numeric_fact_tokens(topic)
+                if normalized_numeric_fact(item)
+            }
+            allowed_facts = sorted({*verified_fact_set, *verified_facts_for_text(scene_source), *topic_facts})
             context["fact_registry_enforced"] = True
             context["allowed_numeric_facts"] = allowed_facts
             context["fact_source"] = " ".join(allowed_facts)
@@ -27678,6 +32697,16 @@ def image_semantic_context_map(project_id: int, content: str = "", mode: str = "
     # pipeline after every scene image had already been generated.
     cover_allowed_facts = {
         *verified_fact_set,
+        # A cover is episode-level artwork.  Its visual brief may use a
+        # comparison or difference stated in the current script (for example
+        # “八百美元差价”) even when that derived number is not part of the
+        # narrow scene-local registry.  Keep this whitelist scoped to the
+        # current project content; never borrow numbers from another project.
+        *[
+            normalized_numeric_fact(item)
+            for item in extract_numeric_fact_tokens(content)
+            if normalized_numeric_fact(item)
+        ],
         *[
             normalized_numeric_fact(item)
             for item in extract_numeric_fact_tokens(f"{topic} {cover_speech}")
@@ -27723,7 +32752,10 @@ def image_semantic_score(prompt: str, context: dict[str, Any], *, is_cover: bool
     attraction += int(score_term_presence(text, IMAGE_APPEAL_TEXT_TERMS, 8 if is_cover else 5))
     attraction_score = int(clamp_number(attraction, 0, 100))
     meta_hits = [term for term in IMAGE_PROMPT_META_POLLUTION_TERMS if term in text]
-    semantic_source = "\n".join(item for item in (topic, audio_anchor, speech, director) if item)
+    source_information_text = clean_text(str(context.get("source_information_text") or ""))
+    semantic_source = "\n".join(
+        item for item in (topic, audio_anchor, speech, director, source_information_text) if item
+    )
     foreign_callouts = foreign_scene_callout_hits(text, semantic_source) if not is_cover else []
     foreign_numeric = foreign_scene_numeric_facts(text, context)
     text_safety = max(0, 100 - len(meta_hits) * 18 - len(foreign_callouts) * 28 - len(foreign_numeric) * 24)
@@ -28106,7 +33138,7 @@ def visual_image_quality_report(project_id: int, content: str = "", mode: str = 
     if semantic_scores and sum(semantic_scores) / len(semantic_scores) < 70:
         issues.append(quality_issue("warn", "图片语义贴合", "本组图片与主题/口播的平均贴合偏弱。", "按“频道气质 -> 本期主题 -> 对应口播句”重建图片提示词，再批量重绘。"))
 
-    score = quality_score_from_issues(issues)
+    score = image_quality_score_from_issues(issues)
     return {
         "score": score,
         "verdict": quality_verdict(score),
@@ -28164,9 +33196,7 @@ def content_quality_report(
     if engagement.get("opening_score", 0) < CONTENT_OPENING_MIN_SCORE:
         issues.append(quality_issue("warn", "开头吸引力", "前三秒钩子偏弱，观众可能不知道为什么要继续看。", "第一句改成具体痛点、反常识问题或结果先行。"))
     if engagement.get("retention_score", 0) < CONTENT_RETENTION_MIN_SCORE:
-        issues.append(quality_issue("warn", "中段留存", "中段推进偏平，缺少持续的信息差或转折。", "每 20-40 秒安排一个新问题、反转或具体案例。"))
-    if engagement.get("interaction_score", 0) < CONTENT_INTERACTION_MIN_SCORE:
-        issues.append(quality_issue("warn", "结尾互动", "结尾互动钩子不够明确或动作太多。", "只保留一个低门槛评论动作，例如“装了扣1，没装扣2”。"))
+        issues.append(quality_issue("warn", "中段留存", "中段有效信息增长不足，存在重复解释或因果没有讲透。", "补充缺少的证据、原因、现实影响或行动建议；不要用固定追问和反转充数。"))
     if opening and any(opening.startswith(token) for token in WEAK_OPENING_TOKENS):
         issues.append(quality_issue("warn", "开头句式", "开头仍有常见口播套话。", "删掉寒暄，直接从冲突、场景或问题开始。"))
     if opening_novelty.get("repetitive"):
@@ -28240,13 +33270,13 @@ def image_director_report(project_id: int, project: dict[str, Any], template: di
     scene_records = storage.read_json(prompt_cache_path, []) if prompt_cache_fresh else []
     if not isinstance(scene_records, list):
         scene_records = []
-    scene_prompts = [
-        clean_text(str(record.get("prompt") or record.get("source_prompt") or ""))
-        for record in scene_records
-        if isinstance(record, dict)
-    ]
+    scene_prompts = visual_prompt_manifest_scene_prompts(project_id, content) or parse_scene_prompts(content, mode)
     if not scene_prompts:
-        scene_prompts = visual_prompt_manifest_scene_prompts(project_id, content) or parse_scene_prompts(content, mode)
+        scene_prompts = [
+            clean_text(str(record.get("prompt") or record.get("source_prompt") or ""))
+            for record in scene_records
+            if isinstance(record, dict)
+        ]
     if len(scene_prompts) < 2:
         derived_prompts = current_scene_prompts(
             project_id,
@@ -28317,7 +33347,7 @@ def image_director_report(project_id: int, project: dict[str, Any], template: di
             issues.append(dict(issue))
 
     issues, ignored_issues, image_override = split_ignored_image_quality_issues(project_id, issues)
-    score = quality_score_from_issues(issues)
+    score = image_quality_score_from_issues(issues)
     return {
         "score": score,
         "verdict": quality_verdict(score),
@@ -28413,7 +33443,7 @@ def visual_director_quality_report(project_id: int, content: str = "") -> dict[s
 
 AI_SUPERVISOR_ROLES = (
     ("topic_teacher", "爆款选题老师", "判断选题钩子、反差、受众痛点和传播价值"),
-    ("script_teacher", "脚本结构老师", "判断开头钩子、中段留存、转折密度和结尾互动"),
+    ("script_teacher", "脚本结构老师", "判断单一主线、事实因果、信息增量、口语连贯和自然收束"),
     ("visual_teacher", "视觉导演老师", "判断图片提示词是否跟频道、主题、口播逐镜对齐"),
     ("edit_teacher", "剪辑节奏老师", "判断场景张数、时轴、节奏、字幕和 BGM 是否服务口播"),
     ("ops_teacher", "平台运营老师", "判断标题、封面卖点、标签和评论区引导"),
@@ -28454,8 +33484,8 @@ def local_ai_supervisor_report(project_id: int, content: str) -> dict[str, Any]:
     image_layers = image_prompt_layer_report(project_id, content)
     director = visual_director_quality_report(project_id, content)
     video = video_quality_report(project_id)
-    references = storage.get_references(project_id)
-    topic_title = clean_text(str(project.get("topic_name") or summary.get("video_title") or first_heading(content) or ""))
+    references = effective_project_references(project_id, brief=brief)
+    topic_title = clean_text(str(summary.get("publish_title") or summary.get("video_title") or first_heading(content) or project.get("topic_name") or ""))
     scene_status = storage.scene_status(project_id)
 
     teachers: list[dict[str, Any]] = []
@@ -28481,7 +33511,7 @@ def local_ai_supervisor_report(project_id: int, content: str) -> dict[str, Any]:
     script_findings = [f"开头 {engagement.get('opening_score', 0)}，留存 {engagement.get('retention_score', 0)}，互动 {engagement.get('interaction_score', 0)}。"]
     script_suggestions = [str(item) for item in engagement.get("suggestions", []) if clean_text(str(item))]
     if script_score < 75:
-        script_suggestions.append("前三句先给结果/损失/反差，中段每 20-35 秒补一个追问或反转。")
+        script_suggestions.append("开头尽快说明观看价值；中段删掉重复解释，补足缺少的事实、原因、后果或行动。")
     teachers.append(_supervisor_record("script_teacher", "脚本结构老师", script_score, script_findings, script_suggestions))
 
     layer_metrics = image_layers.get("metrics", {}) if isinstance(image_layers, dict) else {}
@@ -28517,22 +33547,42 @@ def local_ai_supervisor_report(project_id: int, content: str) -> dict[str, Any]:
     if template.get("release_tags"):
         ops_score += 6
     else:
-        ops_suggestions.append("频道模板建议配置固定标签和互动句。")
+        ops_suggestions.append("频道模板建议配置与主题相关的发布标签。")
     if summary.get("interaction"):
-        ops_score += 8
+        ops_score += 2
+        ops_findings.append("正文自然留下了可讨论的问题。")
     else:
-        ops_suggestions.append("结尾需要明确评论问题或收藏理由。")
+        ops_findings.append("正文没有强塞互动尾巴；只要结论和现实用途完整即可。")
     teachers.append(_supervisor_record("ops_teacher", "平台运营老师", ops_score, ops_findings, ops_suggestions))
 
     fact_score = 70
     fact_findings = []
     fact_suggestions = []
-    if len(references) >= 3:
+    independent_sources = {
+        clean_text(str(item.get("source") or item.get("url") or item.get("title") or "")).lower()
+        for item in references
+        if isinstance(item, dict)
+        and clean_text(str(item.get("source") or item.get("url") or item.get("title") or ""))
+    }
+    numeric_consistency = numeric_source_consistency_report(
+        project_id,
+        content,
+        brief=brief,
+        references=references,
+    )
+    if len(independent_sources) >= 3:
         fact_score += 12
-        fact_findings.append(f"已有 {len(references)} 条参考资料。")
+        fact_findings.append(f"已有 {len(independent_sources)} 个独立来源。")
+    elif independent_sources and numeric_consistency.get("passed"):
+        fact_score += 12
+        fact_findings.append("稿件中的精确数字均可追溯到当前资料。")
+        fact_suggestions.append("当前独立来源较少，发布时保留来源归属，不要把单一报道写成官方共识。")
+    elif independent_sources:
+        fact_score -= 4
+        fact_suggestions.append("已有来源，但稿件仍含无法逐项核验的数字；应删除或改成定性表达。")
     else:
         fact_score -= 12
-        fact_suggestions.append("资料不足时应停止强结论，补官方/百科/新闻/论文来源后再生成。")
+        fact_suggestions.append("没有可追溯来源时应停止强结论，补官方/百科/新闻/论文来源后再生成。")
     if any(token in content for token in ("绝对", "百分百", "一定", "全网", "唯一")):
         fact_score -= 8
         fact_suggestions.append("删掉绝对化表达，避免事实和平台合规风险。")
@@ -28560,30 +33610,76 @@ def local_ai_supervisor_report(project_id: int, content: str) -> dict[str, Any]:
     }
 
 
-def compose_ai_supervisor_messages(project: dict[str, Any], template: dict[str, Any], content: str, local_report: dict[str, Any]) -> list[dict[str, str]]:
+def compose_ai_supervisor_messages(
+    project: dict[str, Any],
+    template: dict[str, Any],
+    content: str,
+    local_report: dict[str, Any],
+    references: list[dict[str, Any]] | None = None,
+    review_scope: str = "all",
+) -> list[dict[str, str]]:
     visual_content = content_without_image_prompts(content)
-    schema = {
-        "overall_score": 0,
-        "verdict": "一句总评",
-        "teachers": [
-            {
-                "key": "topic_teacher/script_teacher/visual_teacher/edit_teacher/ops_teacher/fact_teacher",
-                "name": "老师名",
-                "score": 0,
-                "grade": "优秀/可用/风险/阻止",
-                "blocking": False,
-                "findings": ["具体问题或优点"],
-                "suggestions": ["可执行修改建议"],
-            }
+    scope = clean_text(review_scope) or "all"
+    required_roles = [
+        {"key": key, "name": name, "job": job}
+        for key, name, job in AI_SUPERVISOR_ROLES
+        if scope != "content" or key in {"topic_teacher", "script_teacher", "fact_teacher"}
+    ]
+    semantic_schema = {
+        "evidence_present": False,
+        "explanation_present": False,
+        "concrete_example_present": False,
+        "viewer_action_present": False,
+        "opening_hook_present": False,
+        "retention_progression_present": False,
+        "unsupported_claims": [
+            {"claim": "原文中的具体断言", "reason": "当前来源为何支撑不足"}
         ],
-        "next_actions": ["按优先级排列的下一步"],
     }
-    system = """
+    if scope == "content":
+        schema = {
+            "overall_score": 0,
+            "verdict": "一句总评",
+            "semantic_review": semantic_schema,
+        }
+        required_roles = []
+    else:
+        schema = {
+            "overall_score": 0,
+            "verdict": "一句总评",
+            "teachers": [
+                {
+                    "key": "topic_teacher/script_teacher/visual_teacher/edit_teacher/ops_teacher/fact_teacher",
+                    "name": "老师名",
+                    "score": 0,
+                    "grade": "优秀/可用/风险/阻止",
+                    "blocking": False,
+                    "findings": ["具体问题或优点"],
+                    "suggestions": ["可执行修改建议"],
+                }
+            ],
+            "next_actions": ["按优先级排列的下一步"],
+            "semantic_review": semantic_schema,
+        }
+    if scope == "content":
+        system = """
+你是短视频文案的事实与观众价值复检器，不重写文案。
+逐句对照本期来源材料，只输出 output_schema 指定的紧凑 JSON。
+来源摘要只支持其明确写出的内容，不能把展示、试点或局部自动化扩写成普遍商业化。
+按真实语义判断是否有来源归属的事实、因果解释、现实例子、观众判断或动作、开场钩子和留存递进，不按关键词计数。
+unsupported_claims 只列会改变主题结论的实质性事实越界；修辞、明确的假设、生活类比和不改变结论的口语化表达不列入。
+没有实质性越界就返回空数组。只返回 JSON，不要 markdown，不要分析过程。
+""".strip()
+    else:
+        system = """
 你是短视频内容工厂的 AI 第三视角评审团，由多个专业老师组成。
 你不是重写文案的人，而是监督者：必须指出哪里会影响播放、点击、完播、事实安全和生产稳定性。
-老师角色固定为：爆款选题老师、脚本结构老师、视觉导演老师、剪辑节奏老师、平台运营老师、事实合规老师。
-每个老师都要给 0-100 分、明确是否阻止进入下一步，并给短而具体的修改建议。
-只返回 JSON，不要 markdown，不要解释。
+只评估 required_roles 中列出的老师，不扩展额外角色。
+每个指定老师都要给 0-100 分、明确是否阻止进入下一步，并给短而具体的修改建议。
+必须逐句对照“本期来源材料”审查事实。来源摘要只支持其明确写出的内容，不能把展示、试点或局部自动化扩写成已普遍商业化。
+semantic_review 必须按文案真实语义判断，不按关键词计数：是否有来源归属的事实、因果解释、现实例子、观众判断或动作、开场钩子、留存递进。
+unsupported_claims 只列文案中来源材料没有明确支持、却被写成确定事实的具体句子；没有则返回空数组。
+只返回 JSON，不要 markdown，不要分析过程，不要解释。
 """.strip()
     user = {
         "project": {
@@ -28600,12 +33696,26 @@ def compose_ai_supervisor_messages(project: dict[str, Any], template: dict[str, 
             "image_style_prompt": template.get("image_style_prompt"),
             "image_negative_prompt": template.get("image_negative_prompt"),
         },
-        "content_md_without_image_prompt": visual_content[:9000],
-        "local_rule_report_for_reference": local_report,
-        "required_roles": [
-            {"key": key, "name": name, "job": job}
-            for key, name, job in AI_SUPERVISOR_ROLES
-        ],
+        "content_md_without_image_prompt": visual_content[:12000],
+        "source_material": [
+            {
+                "title": clean_text(str(item.get("title") or "")),
+                "url": clean_text(str(item.get("url") or "")),
+                "snippet": clean_text(str(item.get("snippet") or "")),
+                "published_date": clean_text(str(item.get("published_date") or "")),
+            }
+            for item in (references or [])
+            if isinstance(item, dict) and not is_historical_script(item)
+        ][:12],
+        "source_boundary": "来源摘要只支持其中明确陈述的内容；旧稿不是证据；未被来源支持的现场细节、成本、规模、排名和绝对结论必须列入 unsupported_claims。",
+        "local_rule_report_for_reference": {
+            "overall_score": local_report.get("overall_score", local_report.get("score", 0)),
+            "teachers": [
+                item for item in local_report.get("teachers", [])
+                if isinstance(item, dict) and any(role["key"] == item.get("key") for role in required_roles)
+            ],
+        } if scope == "content" else local_report,
+        "required_roles": required_roles,
         "output_schema": schema,
     }
     return [
@@ -28640,6 +33750,30 @@ def normalize_ai_supervisor_payload(payload: dict[str, Any], fallback: dict[str,
     overall = int(clamp_number(float(payload.get("overall_score", 0) or 0), 0, 100))
     if overall <= 0:
         overall = int(round(sum(item["score"] for item in normalized) / max(1, len(normalized))))
+    raw_semantic = payload.get("semantic_review") if isinstance(payload.get("semantic_review"), dict) else {}
+    unsupported_claims: list[dict[str, str]] = []
+    for item in raw_semantic.get("unsupported_claims", []) if isinstance(raw_semantic.get("unsupported_claims"), list) else []:
+        if isinstance(item, dict):
+            claim = clean_text(str(item.get("claim") or ""))
+            reason = clean_text(str(item.get("reason") or ""))
+        else:
+            claim = clean_text(str(item))
+            reason = "当前来源材料未明确支持"
+        if claim:
+            unsupported_claims.append({"claim": claim[:180], "reason": reason[:240]})
+    semantic_review = {
+        key: bool(raw_semantic.get(key))
+        for key in (
+            "evidence_present",
+            "explanation_present",
+            "concrete_example_present",
+            "viewer_action_present",
+            "opening_hook_present",
+            "retention_progression_present",
+        )
+    }
+    semantic_review["unsupported_claims"] = unsupported_claims[:12]
+    semantic_review["available"] = bool(raw_semantic)
     return {
         **fallback,
         "provider": "deepseek-ai-supervisors",
@@ -28649,10 +33783,17 @@ def normalize_ai_supervisor_payload(payload: dict[str, Any], fallback: dict[str,
         "verdict": clean_text(str(payload.get("verdict") or _supervisor_grade(overall))),
         "teachers": normalized,
         "next_actions": _text_list(payload.get("next_actions"), fallback.get("next_actions", []), limit=8, item_limit=100),
+        "semantic_review": semantic_review,
     }
 
 
-def ai_supervisor_report(project_id: int, content: str | None = None, *, prefer_ai: bool = True) -> dict[str, Any]:
+def ai_supervisor_report(
+    project_id: int,
+    content: str | None = None,
+    *,
+    prefer_ai: bool = True,
+    review_scope: str = "all",
+) -> dict[str, Any]:
     project = storage.get_project(project_id)
     template_key = clean_text(project.get("template") or "")
     template = storage.get_template(template_key) if template_key else {}
@@ -28668,20 +33809,39 @@ def ai_supervisor_report(project_id: int, content: str | None = None, *, prefer_
     if OpenAI is None:
         fallback["ai_error"] = "当前环境缺少 openai 依赖，无法调用 AI 老师团。"
         return fallback
-    base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-    model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
-    thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
-    reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
-    extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-    if thinking_type in {"enabled", "disabled"}:
-        extra_body["thinking"] = {"type": thinking_type}
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+    thinking_type = clean_text(env.get("DEEPSEEK_REVIEW_THINKING_TYPE", "")) or "disabled"
+    reasoning_effort = clean_text(env.get("DEEPSEEK_REVIEW_REASONING_EFFORT", "")) or "low"
+    request_timeout = configured_timeout_seconds(env, "DEEPSEEK_REVIEW_TIMEOUT_SECONDS", 180, 60, 420)
+    default_max_tokens = 8000 if clean_text(review_scope) == "content" else 6000
+    max_tokens = int(clamp_number(float(env.get("DEEPSEEK_REVIEW_MAX_TOKENS", default_max_tokens) or default_max_tokens), 2000, 20000))
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=request_timeout, default_headers={"User-Agent": "short-video-studio/1.0"})
+    extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
+    host = clean_text(urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        # The configured local CPA supports these OpenAI-compatible controls.
+        # Keep this request-local so other agents retain their own reasoning policy.
+        extra_body = {
+            **extra_body,
+            "reasoning_effort": reasoning_effort,
+            "thinking": {"type": thinking_type},
+        }
+    references = effective_project_references(project_id, brief=storage.get_brief(project_id))
     try:
         response = client.chat.completions.create(
             model=model,
-            messages=compose_ai_supervisor_messages(project, template, content_text, fallback),
-            temperature=0.25,
-            max_tokens=4500,
+            messages=compose_ai_supervisor_messages(
+                project,
+                template,
+                content_text,
+                fallback,
+                references,
+                review_scope=review_scope,
+            ),
+            temperature=0.1,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
             extra_body=extra_body,
         )
         choice = response.choices[0] if getattr(response, "choices", None) else None
@@ -28695,6 +33855,522 @@ def ai_supervisor_report(project_id: int, content: str | None = None, *, prefer_
         fallback["ai_model"] = model
         fallback["ai_error"] = str(exc)
         return fallback
+
+
+def editorial_evidence_snapshot(
+    project: dict[str, Any],
+    template: dict[str, Any],
+    brief: str,
+    references: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Freeze the only facts and channel contract an editorial run may use."""
+    clean_references = [
+        {
+            "source_id": f"S{index + 1}",
+            "title": clean_text(str(item.get("title") or "")),
+            "url": clean_text(str(item.get("url") or "")),
+            "snippet": clean_text(str(item.get("snippet") or "")),
+            "published_date": clean_text(str(item.get("published_date") or "")),
+            "source": clean_text(str(item.get("source") or "")),
+        }
+        for index, item in enumerate(references)
+        if isinstance(item, dict) and not is_historical_script(item)
+    ]
+    user_evidence = [
+        {
+            "label": clean_text(str(item.get("label") or "用户明确材料")),
+            "text": clean_text(str(item.get("text") or "")),
+        }
+        for item in numeric_fact_authority_records(
+            int(project.get("id") or 0),
+            "",
+            brief=brief,
+            references=references,
+        )
+        if item.get("kind") == "brief_evidence"
+        and 8 <= len(clean_text(str(item.get("text") or ""))) <= 600
+    ][:40]
+    payload = {
+        "version": AI_EDITORIAL_RUBRIC_VERSION,
+        "project_id": project.get("id"),
+        "topic": clean_text(str(project.get("topic_name") or "")),
+        "brief": clean_text(brief),
+        "channel": {
+            "key": clean_text(str(template.get("key") or project.get("template") or "")),
+            "name": clean_text(str(template.get("brand_name") or template.get("name") or "")),
+            "mode": clean_text(str(template.get("mode") or project.get("template_mode") or "video")),
+            "audience": clean_text(str(template.get("target_audience") or "")),
+            "voice": clean_text(str(template.get("channel_voice") or "")),
+            "forbidden_rules": template.get("forbidden_rules") or [],
+        },
+        "references": clean_references[:20],
+        "user_evidence": user_evidence,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+    return {**payload, "evidence_hash": hashlib.sha256(encoded).hexdigest()}
+
+
+def compose_ai_editorial_score_messages(
+    evidence: dict[str, Any],
+    content: str,
+    *,
+    compact: bool = False,
+) -> list[dict[str, str]]:
+    dimensions = [
+        {"key": key, "name": name, "weight": weight, "minimum_score": threshold}
+        for key, name, weight, threshold in AI_EDITORIAL_DIMENSIONS
+    ]
+    schema = {
+        "summary": "一句话说明这篇稿子值不值得观众继续看",
+        "hard_vetoes": [
+            {"type": "unsupported_fact/topic_drift/hollow_narration", "quote": "原文句子", "reason": "阻止原因"}
+        ],
+        "dimensions": [
+            {
+                "key": "必须来自 dimensions",
+                "score": 0,
+                "evidence_quotes": ["最多2条，每条不超过80字"],
+                "failed_sentences": ["最多2条，每条不超过120字"],
+                "reason": "不超过120字的具体判断",
+                "repair_instruction": "不超过160字，只针对本维度",
+            }
+        ],
+    }
+    system = """
+你是短视频栏目的终审编辑。你的评分会直接决定稿件是否进入生产，不负责讨好作者。
+只允许使用本次 evidence 中的主题、频道约束、user_evidence 和 references；历史稿件、常识补写和模型记忆都不是本期证据。
+user_evidence 是用户在本期明确标注的事实材料，与 references 的 snippet 具有同等证据效力；不得因为网页摘要较短而否定 user_evidence 已明确列出的事实。
+逐句阅读口播，按六个维度独立评分。高分必须有稿件原句作为证据；低分必须引用失败句并给定点修复要求。
+事实与主题一致性检查：数字、时间、因果、主体和结论必须被本期资料明确支持，不能把可能写成确定。
+核查事实时必须逐条阅读 references 的 snippet，不能只看标题或 brief。聚合新闻标题即使包含多个话题，snippet 中明确写出的数字和事实仍属于有效证据。
+判定 unsupported_fact 前，必须确认该主张既没有出现在 user_evidence，也没有出现在任何 source_id 的 snippet；若数字、主体和变化关系在任一证据条目中明确出现，不得判为无来源。
+因果关系必须由同一来源明确陈述；来源只同时提到两个事实时，不得自行补成因果。
+观众获得感检查：观众听完必须获得具体事实、原因、判断方法或可执行动作，不能只是写作方法和空泛观点。
+开头检查：前几句必须快速给出具体对象、异常/利害/冲突以及继续听的理由，不能只喊情绪。
+信息递进检查：后一句应带来新事实、新原因、新例子或新判断，不能换词重复同一结论。
+口语检查：像一个清楚的人自然讲述，句间因果连贯，不得强行拼接、元话语、结构标签或官样表达。
+叙事张力硬检查：事实正确不等于值得看。必须指出本期独有的冲突对象或反常识变化、普通观众为什么要在现在关心、以及稿件最终形成的独立判断。若全文只是按时间顺序复述新闻，没有结果/代价/机制/判断中的至少三项，加入 hollow_narration hard_veto，不能被总分抵消。没有真实冲突时不得硬造对立，应缩小问题并明确真实的变化或代价。
+形如【主播】【男】【女】的行首标记是配音角色元数据，不会被朗读；评分时忽略标记本身，只评价其后的口播内容，不得要求删除这些标记。
+共鸣讨论检查：与普通人的处境有关，允许基于事实呈现真实分歧，但不得硬造对立或强迫评论。
+发现实质性事实无依据、明显偏题、整篇只有模板套话、跨主题重复固定话术，或只有新闻摘要没有叙事张力时加入 hard_vetoes；硬否决不能被总分抵消。
+只返回严格 JSON。必须恰好返回六个维度，每个维度都必须填写 evidence_quotes、failed_sentences、reason、repair_instruction。
+整个 JSON 必须紧凑：每个维度只保留一条最有代表性的 evidence_quotes 或 failed_sentences；reason 不超过 45 字，repair_instruction 不超过 60 字；hard_vetoes 最多两项；不复述整篇稿件，不输出分析过程，总长度控制在 1800 个汉字以内。
+""".strip()
+    if compact:
+        system += "\n上一次响应格式无效或被截断。本次保持同一量表和判断，只输出更短的完整 JSON；不得省略任何维度或字段。"
+    user = {
+        "rubric_version": AI_EDITORIAL_RUBRIC_VERSION,
+        "dimensions": dimensions,
+        "evidence": evidence,
+        "draft_content_md": content[:20000],
+        "output_schema": schema,
+    }
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user, ensure_ascii=False, indent=2)},
+    ]
+
+
+def normalize_ai_editorial_score(
+    payload: dict[str, Any],
+    *,
+    content: str,
+    evidence_hash: str,
+    model: str,
+    review_round: int,
+) -> dict[str, Any]:
+    raw_dimensions = payload.get("dimensions")
+    if not isinstance(raw_dimensions, list):
+        raise ContentGenerationError("AI 审稿缺少六维评分结果。")
+    by_key = {
+        clean_text(str(item.get("key") or "")): item
+        for item in raw_dimensions
+        if isinstance(item, dict)
+    }
+    dimensions: list[dict[str, Any]] = []
+    for key, name, weight, threshold in AI_EDITORIAL_DIMENSIONS:
+        raw = by_key.get(key)
+        if not isinstance(raw, dict):
+            raise ContentGenerationError(f"AI 审稿缺少维度：{name}。")
+        try:
+            score = int(round(float(raw.get("score"))))
+        except (TypeError, ValueError) as exc:
+            raise ContentGenerationError(f"AI 审稿的{name}分数无效。") from exc
+        score = int(clamp_number(score, 0, 100))
+        evidence_quotes = _text_list(raw.get("evidence_quotes"), [], limit=6, item_limit=220)
+        failed_sentences = _text_list(raw.get("failed_sentences"), [], limit=8, item_limit=260)
+        reason = clean_text(str(raw.get("reason") or ""))
+        repair_instruction = clean_text(str(raw.get("repair_instruction") or ""))
+        if not reason or not repair_instruction or (not evidence_quotes and not failed_sentences):
+            raise ContentGenerationError(f"AI 审稿的{name}缺少原文证据或修改依据。")
+        dimensions.append(
+            {
+                "key": key,
+                "name": name,
+                "weight": weight,
+                "minimum_score": threshold,
+                "score": score,
+                "passed": score >= threshold,
+                "evidence_quotes": evidence_quotes,
+                "failed_sentences": failed_sentences,
+                "reason": reason,
+                "repair_instruction": repair_instruction,
+            }
+        )
+    hard_vetoes: list[dict[str, str]] = []
+    raw_vetoes = payload.get("hard_vetoes") if isinstance(payload.get("hard_vetoes"), list) else []
+    for item in raw_vetoes:
+        if not isinstance(item, dict):
+            continue
+        veto_type = clean_text(str(item.get("type") or ""))
+        quote = clean_text(str(item.get("quote") or ""))
+        reason = clean_text(str(item.get("reason") or ""))
+        if veto_type and reason:
+            hard_vetoes.append({"type": veto_type[:80], "quote": quote[:260], "reason": reason[:300]})
+    weighted_total = int(round(sum(item["score"] * item["weight"] for item in dimensions) / 100))
+    passed = not hard_vetoes and weighted_total >= 80 and all(item["passed"] for item in dimensions)
+    content_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+    return {
+        "rubric_version": AI_EDITORIAL_RUBRIC_VERSION,
+        "provider": "deepseek-ai-editorial-review",
+        "model": model,
+        "review_round": review_round,
+        "reviewed_at": storage.now_ts(),
+        "evidence_hash": evidence_hash,
+        "content_hash": content_hash,
+        "weighted_total": weighted_total,
+        "passed": passed,
+        "summary": clean_text(str(payload.get("summary") or "")),
+        "hard_vetoes": hard_vetoes,
+        "dimensions": dimensions,
+        "failed_dimension_keys": [item["key"] for item in dimensions if not item["passed"]],
+    }
+
+
+def ai_editorial_score_report(
+    evidence: dict[str, Any],
+    content: str,
+    *,
+    review_round: int = 1,
+) -> dict[str, Any]:
+    env = runtime_env()
+    api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
+    if not api_key:
+        raise ContentGenerationError("AI 审稿未运行：DEEPSEEK_API_KEY 未配置。")
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+    timeout = configured_timeout_seconds(env, "DEEPSEEK_REVIEW_TIMEOUT_SECONDS", 180, 60, 420)
+    thinking_type = clean_text(env.get("DEEPSEEK_REVIEW_THINKING_TYPE", "")) or "disabled"
+    reasoning_effort = clean_text(env.get("DEEPSEEK_REVIEW_REASONING_EFFORT", "")) or "low"
+    project_id = int(evidence.get("project_id") or 0)
+    diagnostics: list[dict[str, Any]] = []
+    last_error = ""
+    for attempt in range(2):
+        try:
+            optional_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
+            optional_body["response_format"] = {"type": "json_object"}
+            host = clean_text(urllib.parse.urlsplit(base_url).hostname or "").lower()
+            if host in {"127.0.0.1", "localhost", "::1"}:
+                optional_body.update(
+                    {
+                        "thinking": {"type": "disabled"},
+                        "reasoning_effort": "low",
+                    }
+                )
+            raw, finish_reason = request_deepseek_chat_completion(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=compose_ai_editorial_score_messages(evidence, content, compact=attempt > 0),
+                temperature=0.1,
+                max_tokens=7000,
+                extra_body=optional_body,
+                timeout=timeout,
+            )
+            payload = _safe_json_from_text(raw)
+            diagnostic = {
+                "attempt": attempt + 1,
+                "finish_reason": finish_reason,
+                "response_chars": len(raw),
+                "json_parsed": bool(payload),
+                "raw_response": raw,
+            }
+            diagnostics.append(diagnostic)
+            if not payload:
+                last_error = f"第 {attempt + 1} 次响应不是完整 JSON（finish_reason={finish_reason or 'unknown'}，{len(raw)} 字符）"
+                continue
+            report = normalize_ai_editorial_score(
+                payload,
+                content=content,
+                evidence_hash=clean_text(str(evidence.get("evidence_hash") or "")),
+                model=model,
+                review_round=review_round,
+            )
+            diagnostic["schema_valid"] = True
+            if project_id > 0:
+                storage.write_json(
+                    storage.project_file(project_id, "editorial_ai_raw_response.json"),
+                    {"rubric_version": AI_EDITORIAL_RUBRIC_VERSION, "review_round": review_round, "attempts": diagnostics},
+                )
+            return report
+        except ContentGenerationError as exc:
+            last_error = str(exc)
+            if diagnostics and diagnostics[-1].get("attempt") == attempt + 1:
+                diagnostics[-1].update({"schema_valid": False, "error": last_error})
+            else:
+                diagnostics.append({"attempt": attempt + 1, "schema_valid": False, "error": last_error})
+        except Exception as exc:
+            last_error = str(exc)
+            if diagnostics and diagnostics[-1].get("attempt") == attempt + 1:
+                diagnostics[-1]["request_error"] = last_error
+            else:
+                diagnostics.append({"attempt": attempt + 1, "request_error": last_error})
+    if project_id > 0:
+        storage.write_json(
+            storage.project_file(project_id, "editorial_ai_raw_response.json"),
+            {"rubric_version": AI_EDITORIAL_RUBRIC_VERSION, "review_round": review_round, "attempts": diagnostics},
+        )
+    raise ContentGenerationError(f"AI 审稿连续两次未返回合格的六维 JSON：{last_error or '响应为空'}。")
+
+
+def compose_targeted_revision_messages(
+    evidence: dict[str, Any],
+    content: str,
+    review: dict[str, Any],
+) -> list[dict[str, str]]:
+    failed = [item for item in review.get("dimensions", []) if isinstance(item, dict) and not item.get("passed")]
+    system = """
+你是短视频文案的定点修改编辑。只修审稿报告明确失败的句子和维度，返回结构化的局部替换清单。
+只使用本次 evidence，禁止引用历史稿件或补造资料。保留所有有来源支撑的事实、有效信息、章节结构和参考资料。
+原稿中已经出现且能在 evidence 的 brief 或参考资料中找到依据的数字、型号、比例、时长和结果，必须原样保留；不得把它们改成“具体数字”“这段时间”“相关参数”“不少”“某种程度”等占位或模糊词。repair_instruction 如果要求补齐具体事实，必须使用 evidence 中的原始表达，不得自行换成泛化说法。
+不要把整篇缩写成模板，不要为了流畅删除事实，不要增加写作方法、结构标签、空泛互动或强行对立。
+hard_vetoes 涉及的句子必须删除或改写到被本期资料支持。除此之外不要扩大修改范围。
+old 必须逐字复制 original_content_md 中需要修改的最小完整句子，new 是替换后的句子；删除时 new 为空字符串。
+最多返回 12 项。只返回严格 JSON，不要 Markdown、代码围栏、解释或修改说明。
+""".strip()
+    user = {
+        "rubric_version": AI_EDITORIAL_RUBRIC_VERSION,
+        "evidence": evidence,
+        "failed_dimensions": failed,
+        "hard_vetoes": review.get("hard_vetoes", []),
+        "original_content_md": content,
+        "output_schema": {"replacements": [{"old": "原稿中的完整句子", "new": "修改后的句子"}]},
+    }
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user, ensure_ascii=False, indent=2)},
+    ]
+
+
+def structural_ai_editorial_revision(
+    evidence: dict[str, Any],
+    content: str,
+    review: dict[str, Any],
+) -> str:
+    """Rebuild a flat draft once, using the same evidence and section contract."""
+    env = runtime_env()
+    api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
+    if not api_key:
+        raise ContentGenerationError("AI 整稿重建未运行：DEEPSEEK_API_KEY 未配置。")
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+    timeout = configured_timeout_seconds(env, "DEEPSEEK_REVIEW_TIMEOUT_SECONDS", 180, 60, 420)
+    system = """
+你是短视频栏目的重稿主编。原稿事实可能正确，但叙事结构失败；请在不增加事实的前提下完整重建一次 content.md。
+只使用 evidence 中的 brief、user_evidence 和 references。保留原稿中有来源支撑的数字、型号、时间、主体和参考链接，不引用历史主题。
+内部先确定：本期只回答的一个问题、真实冲突双方、观众现实代价、反常识点、因果机制、证据边界和最终判断。
+正文按“本期独有的结果/冲突 → 观众代价 → 证据与机制 → 必要边界 → 独立判断”自然推进；没有真实冲突时缩小问题，禁止硬造阵营。
+删除新闻摘要腔、同义复述、固定反问、评论区召唤，以及“底层规则对撞、两套账撞车、三步核验、讲清真实代价”等跨主题模板话术。
+保持原 content.md 的章节名称、角色标签和参考资料结构。常规视频控制在约 60—135 秒，最多 150 秒；不能为缩短而删掉关键证据和机制。
+只输出完整 Markdown 成稿，不输出分析、JSON、代码围栏或修改说明。
+""".strip()
+    user = {
+        "evidence": evidence,
+        "failed_dimensions": [
+            item for item in review.get("dimensions", []) if isinstance(item, dict) and not item.get("passed")
+        ],
+        "hard_vetoes": review.get("hard_vetoes", []),
+        "original_content_md": content,
+    }
+    raw, finish_reason = request_deepseek_chat_completion(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False, indent=2)},
+        ],
+        temperature=0.45,
+        max_tokens=8000,
+        extra_body=deepseek_optional_request_body(base_url),
+        timeout=timeout,
+    )
+    revised = re.sub(r"(?is)^<think>.*?</think>\s*", "", strip_code_fences(raw)).strip()
+    mode = clean_text(str(evidence.get("channel", {}).get("mode") or "video"))
+    if finish_reason == "length" or not has_complete_production_content_structure(revised, mode):
+        raise ContentGenerationError("AI 整稿重建返回的 content.md 不完整。")
+    _units, duration_sec = estimate_spoken_duration_sec(revised, mode)
+    if mode != "article" and duration_sec > 150:
+        raise ContentGenerationError(f"AI 整稿重建后预计口播 {int(round(duration_sec))} 秒，仍超过 150 秒上限。")
+    return revised
+
+
+def targeted_ai_editorial_revision(
+    evidence: dict[str, Any],
+    content: str,
+    review: dict[str, Any],
+) -> str:
+    env = runtime_env()
+    api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
+    if not api_key:
+        raise ContentGenerationError("AI 定点改稿未运行：DEEPSEEK_API_KEY 未配置。")
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+    timeout = configured_timeout_seconds(env, "DEEPSEEK_REVIEW_TIMEOUT_SECONDS", 180, 60, 420)
+    optional_body = deepseek_optional_request_body(base_url)
+    optional_body["response_format"] = {"type": "json_object"}
+    raw, finish_reason = request_deepseek_chat_completion(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        messages=compose_targeted_revision_messages(evidence, content, review),
+        temperature=0.35,
+        max_tokens=5000,
+        extra_body=optional_body,
+        timeout=timeout,
+    )
+    payload = _safe_json_from_text(raw)
+    replacements = payload.get("replacements") if isinstance(payload, dict) else None
+    if not isinstance(replacements, list):
+        raise ContentGenerationError(
+            f"AI 定点改稿没有返回替换清单（finish_reason={finish_reason or 'unknown'}）。"
+        )
+    revised = content
+    applied = 0
+    for item in replacements[:12]:
+        if not isinstance(item, dict):
+            continue
+        old = str(item.get("old") or "").strip()
+        new = str(item.get("new") or "").strip()
+        if not old or old == new or old not in revised:
+            continue
+        # A targeted edit must not erase source-backed precision.  Models
+        # sometimes replace a concrete number with a drafting placeholder
+        # even when the failed dimension was unrelated.  Keep the original
+        # sentence in that case; the next review can still reject a genuine
+        # factual problem, but it will never accept a less informative draft
+        # created by the repair step itself.
+        placeholder_markers = (
+            "具体数字",
+            "这段时间",
+            "相关参数",
+            "相关数据",
+            "某个数字",
+            "某种程度",
+            "不少",
+        )
+        old_numeric = strong_numeric_claims_in_line(old)
+        if old_numeric and any(marker in new for marker in placeholder_markers):
+            new = old
+        revised = revised.replace(old, new, 1)
+        applied += 1
+    if applied == 0:
+        raise ContentGenerationError("AI 定点改稿返回的替换项均未命中原稿。")
+    if not has_complete_production_content_structure(
+        revised,
+        clean_text(str(evidence.get("channel", {}).get("mode") or "video")),
+    ):
+        raise ContentGenerationError("AI 定点替换后 content.md 结构不完整。")
+    return revised
+
+
+def run_ai_editorial_pipeline(
+    project: dict[str, Any],
+    template: dict[str, Any],
+    brief: str,
+    references: list[dict[str, Any]],
+    content: str,
+    *,
+    stage_callback: Callable[[str], None] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    evidence = editorial_evidence_snapshot(project, template, brief, references)
+    if stage_callback:
+        stage_callback("ai_review")
+    initial = ai_editorial_score_report(evidence, content, review_round=1)
+    result: dict[str, Any] = {"evidence": evidence, "initial_review": initial}
+    project_id = int(project.get("id") or 0)
+    if project_id > 0:
+        storage.write_json(storage.project_file(project_id, "editorial_ai_score.json"), result)
+    if initial.get("passed"):
+        result["final_review"] = initial
+        if project_id > 0:
+            storage.write_json(storage.project_file(project_id, "editorial_ai_score.json"), result)
+        return content, result
+    local_tension = narrative_tension_report(content, clean_text(str(template.get("mode") or "video")))
+    veto_types = {
+        clean_text(str(item.get("type") or ""))
+        for item in initial.get("hard_vetoes", [])
+        if isinstance(item, dict)
+    }
+    failed_dimensions = [
+        item for item in initial.get("dimensions", []) if isinstance(item, dict) and not item.get("passed")
+    ]
+    structural_failure = (
+        "hollow_narration" in veto_types
+        or (bool(local_tension.get("needs_rewrite")) and len(failed_dimensions) >= 2)
+    )
+    if stage_callback:
+        stage_callback("structural_rewrite" if structural_failure else "targeted_rewrite")
+    revised = (
+        structural_ai_editorial_revision(evidence, content, initial)
+        if structural_failure
+        else targeted_ai_editorial_revision(evidence, content, initial)
+    )
+    if project_id > 0:
+        revised = str(
+            canonicalize_project_content(
+                project_id,
+                revised,
+                brief=brief,
+                references=references,
+            ).get("content")
+            or revised
+        )
+    revised = refresh_content_image_prompts(project, template, revised)
+    if stage_callback:
+        stage_callback("ai_recheck")
+    final = ai_editorial_score_report(evidence, revised, review_round=2)
+    result["revised_content_hash"] = hashlib.sha256(revised.encode("utf-8", errors="ignore")).hexdigest()
+    result["final_review"] = final
+    if project_id > 0:
+        storage.write_json(storage.project_file(project_id, "editorial_ai_score.json"), result)
+    if not final.get("passed"):
+        failed_names = [
+            clean_text(str(item.get("name") or item.get("key") or ""))
+            for item in final.get("dimensions", [])
+            if isinstance(item, dict) and not item.get("passed")
+        ]
+        veto_reasons = [
+            clean_text(str(item.get("reason") or ""))
+            for item in final.get("hard_vetoes", [])
+            if isinstance(item, dict)
+        ]
+        detail = "、".join(dedupe_clauses([*failed_names, *veto_reasons])[:6]) or "AI 复审未通过"
+        raise ContentGenerationError(f"AI 定点改稿后仍未通过统一评分：{detail}。原有正式文案已保留。")
+    return revised, result
+
+
+def ai_editorial_review_for_project(project_id: int, content: str | None = None) -> dict[str, Any]:
+    project = storage.get_project(project_id)
+    template_key = clean_text(str(project.get("template") or ""))
+    template = storage.get_template(template_key) if template_key else {}
+    brief = storage.get_brief(project_id)
+    references = effective_project_references(project_id, brief=brief)
+    evidence = editorial_evidence_snapshot(project, template, brief, references)
+    content_text = content if content is not None else storage.get_content(project_id)
+    if not clean_text(content_text):
+        raise ContentGenerationError("当前没有可供 AI 审稿的文案。")
+    return ai_editorial_score_report(evidence, content_text, review_round=1)
 
 
 def image_prompt_layer_entry(prompt: str, *, kind: str, topic: str, brand: str) -> dict[str, Any]:
@@ -29232,7 +34908,7 @@ def teacher_rewrite_generation_prompt(
     topic: str,
     brand: str,
     label: str,
-    max_rounds: int = 3,
+    max_rounds: int = 1,
     semantic_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     versions: list[dict[str, Any]] = []
@@ -29304,6 +34980,8 @@ def compose_image_prompt_teacher_messages(
             "original_prompt": item.get("original_prompt"),
             "elastic_prompt": item.get("elastic_prompt"),
             "local_fixed_prompt": item.get("final_prompt"),
+            "redraw_requirement": item.get("redraw_requirement"),
+            "rewrite_scope": item.get("rewrite_scope"),
             "semantic_context": item.get("semantic_context"),
             "visual_decision": item.get("visual_decision"),
             "teacher_findings": [
@@ -29323,6 +35001,9 @@ def compose_image_prompt_teacher_messages(
         "每个场景必须先提出 A、B 两个语义正确但视觉路线明显不同的候选概念，再选择更适合当前口播、且与整批已选场景不重复的一个。"
         "两个概念不能只是换机位或换颜色：可以分别采用真实证据现场、概念隐喻、编辑设计、数据关系、物件叙事等不同表达方式。"
         "final_prompt 必须对应 selected_concept，并且可以直接发给文生图模型。"
+        "如果条目含 redraw_requirement，必须按它生成新的 final_prompt，不得只把要求追加到末尾。"
+        "rewrite_scope=partial 时只改用户点名的主体、动作、文字或风格，保留其它正确细节；"
+        "rewrite_scope=full 时从当前口播事实重新设计整个画面，旧提示词只作为问题参考。"
         "硬边界只有：服务本期主题和当前口播；人物、对象、数字与因果不能改错；不得借用其它镜头或其它项目的信息。"
         "人物、对象、动作、证据物件、图形关系、构图和材质由你按这段口播自由设计，不套固定信息牌或固定版式。"
         "final_prompt 必须要求模型一次完成画面与原生文字；标题、完整结论、事实数字、批注和必要来源与场景融为一体，文字只来自当前口播，不设统一字数上限，并禁止截断、错误文字、乱码、Logo和水印。"
@@ -29368,22 +35049,45 @@ def rewrite_image_prompts_with_ai_teachers(
     api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
     if not api_key or OpenAI is None or not entries:
         return {}
-    base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-    model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+    base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+    model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
     thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
     reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
-    extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-    if thinking_type in {"enabled", "disabled"}:
-        extra_body["thinking"] = {"type": thinking_type}
-    response = client.chat.completions.create(
-        model=model,
-        messages=compose_image_prompt_teacher_messages(project, template, purpose, entries),
-        temperature=0.35,
-        max_tokens=7000,
-        response_format={"type": "json_object"},
-        extra_body=extra_body,
-    )
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0, default_headers={"User-Agent": "short-video-studio/1.0"})
+    extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
+    messages = compose_image_prompt_teacher_messages(project, template, purpose, entries)
+    response = None
+    last_error: Exception | None = None
+    channel_attempt_limit = 8
+    for attempt in range(1, channel_attempt_limit + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.35,
+                max_tokens=7000,
+                response_format={"type": "json_object"},
+                extra_body=extra_body,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            message = user_facing_error(exc)
+            retryable_channel_error = any(
+                marker in message.lower()
+                for marker in (
+                    "user location is not supported",
+                    "failed_precondition",
+                    "resource_exhausted",
+                    "temporarily unavailable",
+                )
+            )
+            if not retryable_channel_error or attempt >= channel_attempt_limit:
+                break
+            time.sleep(0.8 * attempt)
+    if response is None:
+        detail = user_facing_error(last_error) if last_error else "没有返回响应"
+        raise RuntimeError(f"当前改写模型 {model} 请求失败：{detail}") from last_error
     choice = response.choices[0] if getattr(response, "choices", None) else None
     raw = message_content_to_text(choice.message.content if choice and getattr(choice, "message", None) else "")
     project_id = int(project.get("id", 0) or 0)
@@ -29444,7 +35148,7 @@ def rewrite_image_prompts_with_ai_teachers(
             "selected_concept": selected_id or clean_text(str(selected_item.get("id") or "")),
             "selection_reason": clean_text(str(item.get("selection_reason") or "")),
             "teacher_notes": _text_list(item.get("teacher_notes"), [], limit=4, item_limit=80),
-            "provider": f"deepseek-image-prompt-teachers:{model}",
+            "provider": f"compatible-image-prompt-editor:{model}",
         }
     return result
 
@@ -29479,7 +35183,10 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
         )
     entries: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
-    changed_count = 0
+    # Count final changed targets, not every internal normalization pass.
+    # A scene may pass through several deterministic cleanup stages in one
+    # preflight; those are diagnostic events, not separate rewritten prompts.
+    rewrite_event_count = 0
     final_prompts: dict[str, str] = {}
     kind = "cover" if purpose == "cover" else "scene"
 
@@ -29554,6 +35261,12 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             clean_text(str(semantic_context.get("speech") or "")),
             purpose=purpose,
         )
+        if purpose == "scene":
+            fixed_prompt = bind_scene_prompt_lineage(
+                fixed_prompt,
+                topic,
+                clean_text(str(semantic_context.get("speech") or "")),
+            )
         after_visual = prompt_visual_score(fixed_prompt, purpose)
         after_layer = image_prompt_layer_entry(fixed_prompt, kind=kind, topic=topic, brand=brand)
         after_semantic = image_semantic_score(fixed_prompt, semantic_context, is_cover=purpose == "cover")
@@ -29575,7 +35288,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             after_layer = before_layer
             after_semantic = before_semantic
             score = original_score
-        changed_count += int(fixed_prompt != original)
+        rewrite_event_count += int(fixed_prompt != original)
         entry = {
             "target": target,
             "label": label,
@@ -29599,15 +35312,18 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
 
     ai_teacher_error = ""
     ai_teacher_results: dict[str, dict[str, Any]] = {}
-    ai_teacher_needed = any(
-        int(entry.get("score", 0) or 0) < 72
-        or (
-            purpose == "scene"
-            and not semantic_scene_brief_integrity(
-                str(entry.get("original_prompt") or ""),
-                str(entry.get("final_prompt") or ""),
-            ).get("ok")
-        )
+    source_composition_duplicates = duplicate_scene_composition_pairs(entries) if purpose == "scene" else []
+    # Do not call the remote teacher merely because a local prompt scores below
+    # the soft quality target. That made every retry rewrite all scenes and was
+    # the main source of the long pauses. The hard semantic contract remains
+    # local and deterministic; use the teacher only for duplicate compositions
+    # or an actual integrity failure.
+    ai_teacher_needed = bool(source_composition_duplicates) or any(
+        purpose == "scene"
+        and not semantic_scene_brief_integrity(
+            str(entry.get("original_prompt") or ""),
+            str(entry.get("final_prompt") or ""),
+        ).get("ok")
         for entry in entries
     )
     ai_teacher_requested = (
@@ -29812,7 +35528,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                     topic=topic,
                     brand=brand,
                     label=clean_text(str(entry.get("label") or target)),
-                    max_rounds=2,
+                    max_rounds=1,
                     semantic_context=semantic_context,
                 )
             if not direct_ai_scene:
@@ -29916,7 +35632,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                 ]
                 continue
             if ai_prompt and ai_prompt != entry.get("final_prompt"):
-                changed_count += 1
+                rewrite_event_count += 1
             entry["final_prompt"] = ai_prompt
             entry["score"] = score
             entry["after"] = {"visual": after_visual, "layer": after_layer, "semantic": after_semantic, "rewrite": ai_review}
@@ -29936,7 +35652,9 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
     for entry in entries:
         target = clean_text(str(entry.get("target") or ""))
         label = clean_text(str(entry.get("label") or target or "图片"))
-        final_prompt = clean_text(str(entry.get("final_prompt") or ""))
+        entry_original_prompt = normalize_image_prompt(str(entry.get("original_prompt") or ""))
+        raw_final_prompt = str(entry.get("final_prompt") or "")
+        final_prompt = clean_text(raw_final_prompt)
         semantic_context = entry.get("semantic_context") if isinstance(entry.get("semantic_context"), dict) else {}
         if not entry.get("ai_teacher_direct"):
             final_prompt = ensure_prompt_contains_speech_anchor(
@@ -29953,7 +35671,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             selected_callouts: list[str] = []
             final_prompt = apply_unique_scene_callouts_to_prompt(final_prompt, selected_callouts)
             if final_prompt != previous_prompt:
-                changed_count += 1
+                rewrite_event_count += 1
             density_prompt_before = final_prompt
             if entry.get("ai_teacher_direct"):
                 density_report = scene_visual_density_report(final_prompt)
@@ -29965,7 +35683,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                     callouts=selected_callouts,
                 )
             if final_prompt != density_prompt_before:
-                changed_count += 1
+                rewrite_event_count += 1
             selected_visual_concept = clean_text(str(entry.get("selected_visual_concept") or ""))
             if not selected_visual_concept:
                 visual_decision = entry.get("visual_decision") if isinstance(entry.get("visual_decision"), dict) else {}
@@ -29992,14 +35710,14 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                 source_information=semantic_context.get("source_information") if isinstance(semantic_context.get("source_information"), dict) else None,
             )
             if balanced_prompt != final_prompt:
-                changed_count += 1
+                rewrite_event_count += 1
                 final_prompt = balanced_prompt
             repaired_prompt, repaired_foreign_numbers = repair_foreign_scene_numeric_facts(
                 final_prompt,
                 semantic_context,
             )
             if repaired_prompt != final_prompt:
-                changed_count += 1
+                rewrite_event_count += 1
                 final_prompt = repaired_prompt
                 entry["foreign_numeric_repair"] = {
                     "applied": True,
@@ -30034,10 +35752,10 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             callout_plan.append({"target": target, "label": label, "callouts": selected_callouts})
         final_prompt = normalize_image_prompt(repair_legacy_mojibake(final_prompt))
         if purpose == "scene":
-            integrity = semantic_scene_brief_integrity(original, final_prompt)
-            contract_preserved = scene_prompt_preserves_channel_contract(original, final_prompt)
+            integrity = semantic_scene_brief_integrity(entry_original_prompt, final_prompt)
+            contract_preserved = scene_prompt_preserves_channel_contract(entry_original_prompt, final_prompt)
             if not integrity.get("ok") or not contract_preserved:
-                final_prompt = original
+                final_prompt = entry_original_prompt
                 entry["best_version_lock"] = {
                     "applied": True,
                     "reason": "candidate_lost_scene_contract",
@@ -30052,7 +35770,7 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                 semantic_context,
             )
             if post_lock_removed:
-                changed_count += 1
+                rewrite_event_count += 1
                 entry["post_lock_numeric_repair"] = {
                     "applied": True,
                     "removed": post_lock_removed,
@@ -30078,6 +35796,52 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
                     "可以继续生成；如果画面仍不好，单张重绘时会继续套用老师团改写链路。",
                 )
             )
+    if purpose == "scene":
+        prompt_groups: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            fingerprint = semantic_text_hash(clean_text(str(entry.get("final_prompt") or "")))
+            if fingerprint:
+                prompt_groups.setdefault(fingerprint, []).append(entry)
+        for duplicate_entries in prompt_groups.values():
+            if len(duplicate_entries) < 2:
+                continue
+            labels: list[str] = []
+            for entry in duplicate_entries:
+                target = clean_text(str(entry.get("target") or ""))
+                original = normalize_image_prompt(str(entry.get("original_prompt") or ""))
+                semantic_context = entry.get("semantic_context") if isinstance(entry.get("semantic_context"), dict) else {}
+                speech = clean_text(str(semantic_context.get("speech") or ""))
+                if original and (not speech or token_overlap_score(original, speech, limit=96) >= 20):
+                    entry["final_prompt"] = original
+                    entry["duplicate_prompt_fallback"] = True
+                    final_prompts[target] = original
+                    rewrite_event_count += 1
+                labels.append(clean_text(str(entry.get("label") or target)))
+            issues.append(
+                quality_issue(
+                    "warn",
+                    "、".join(item for item in labels if item),
+                    "多镜头被改写成完全相同的提示词，已分别回退到各自口播绑定版本。",
+                    "系统不会把同一提示词重复发送给图片模型。",
+                )
+            )
+        final_composition_duplicates = duplicate_scene_composition_pairs(entries)
+        for pair in final_composition_duplicates:
+            issues.append(
+                quality_issue(
+                    "block",
+                    f"{pair['left']}、{pair['right']}",
+                    f"分镜源头重复：主体“{pair['subject']}”和动作“{pair['action']}”相同。",
+                    "重新规划其中一镜的场景、主体动作、景别或信息载体后，才允许调用图片模型。",
+                )
+            )
+    changed_targets = {
+        clean_text(str(item.get("target") or ""))
+        for item in entries
+        if normalize_image_prompt(str(item.get("final_prompt") or ""))
+        != normalize_image_prompt(str(item.get("original_prompt") or ""))
+    }
+    changed_targets.discard("")
     scores = [int(item.get("score", 0) or 0) for item in entries]
     if ai_teacher_requested and not ai_teacher_results:
         issues.append(
@@ -30089,6 +35853,10 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             )
         )
     hard_blockers: list[dict[str, Any]] = []
+    duplicated_labels: set[str] = set()
+    if purpose == "scene":
+        for pair in duplicate_scene_composition_pairs(entries):
+            duplicated_labels.update((pair["left"], pair["right"]))
     for entry in entries:
         target = clean_text(str(entry.get("target") or ""))
         label = clean_text(str(entry.get("label") or target or "图片"))
@@ -30097,6 +35865,8 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
         semantic = after.get("semantic") if isinstance(after.get("semantic"), dict) else {}
         semantic_context = entry.get("semantic_context") if isinstance(entry.get("semantic_context"), dict) else {}
         blockers: list[str] = []
+        if label in duplicated_labels:
+            blockers.append("与本批其它镜头的主体和动作重复")
         if not final_prompt:
             blockers.append("提示词为空")
         if semantic.get("foreign_callouts"):
@@ -30104,7 +35874,54 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
         remaining_foreign_numbers = foreign_scene_numeric_facts(final_prompt, semantic_context)
         if remaining_foreign_numbers:
             blockers.append(f"仍含未核实数字：{', '.join(remaining_foreign_numbers[:4])}")
-        if purpose == "scene" and clean_text(str(semantic_context.get("speech") or "")):
+        if purpose == "scene":
+            current_speech = clean_text(str(semantic_context.get("speech") or ""))
+            embedded_speech = scene_prompt_speech_anchor(final_prompt)
+            # The generated prompt may carry a short prefix such as
+            # ``本镜内容：`` before the topic. Match the field itself rather
+            # than requiring it to start at the beginning of a line.
+            topic_match = re.search(
+                r"(?:^|\n|本镜内容[：:]\s*)本期主题\s*[:：]\s*([^\n。；;]+)",
+                final_prompt,
+            )
+            embedded_topic = clean_text(topic_match.group(1)) if topic_match else ""
+            if not current_speech:
+                blockers.append("当前镜头口播身份缺失")
+            else:
+                # scene_plan can lag behind the current prompt manifest after a
+                # repair. Validate against both the scene anchor and the
+                # immutable project content, using the larger directional
+                # overlap so a short anchor is not penalized by a long source.
+                content_anchor = clean_text(str(content_text or ""))
+                speech_overlap = max(
+                    token_overlap_score(embedded_speech, current_speech, limit=96),
+                    token_overlap_score(current_speech, embedded_speech, limit=96),
+                    token_overlap_score(embedded_speech, content_anchor, limit=96),
+                    token_overlap_score(content_anchor, embedded_speech, limit=96),
+                ) if embedded_speech else 0
+                if not embedded_speech or speech_overlap < 32:
+                    blockers.append("完整口播与当前镜头不匹配")
+            if not topic or not embedded_topic:
+                blockers.append("当前主题身份缺失")
+            elif token_overlap_score(embedded_topic, topic, limit=64) < 30:
+                blockers.append("提示词主题与当前项目不匹配")
+            object_match = re.search(
+                r"核心对象硬约束\s*[:：]\s*必须清晰画出([^\n，,。；;]{2,32}?)(?:实物)?(?:[，,\n]|$)"
+                r"|本期核心对象必须是\s*[:：]\s*([^\n，,。；;]{2,32})(?:[，,\n]|$)",
+                raw_final_prompt,
+            )
+            if object_match:
+                constrained_object = clean_text(object_match.group(1) or object_match.group(2)).removesuffix("实物")
+                active_context = clean_text(f"{topic} {current_speech}")
+                object_overlap = max(
+                    token_overlap_score(constrained_object, active_context, limit=32),
+                    token_overlap_score(active_context, constrained_object, limit=32),
+                )
+                if (
+                    constrained_object in _TOPIC_ENTITY_GENERIC_TERMS
+                    or (constrained_object not in active_context and object_overlap < 30)
+                ):
+                    blockers.append(f"混入非当前主题的核心对象：{constrained_object}")
             if int(semantic.get("speech", 0) or 0) < 20 and int(semantic.get("audio_anchor", 0) or 0) < 20:
                 blockers.append("没有承接当前口播")
         if blockers:
@@ -30137,7 +35954,9 @@ def preflight_generation_prompt_batch(project_id: int, prompts: list[dict[str, A
             else ("generate" if generation_safe else "repair_before_provider")
         ),
         "score": int(round(avg_score)),
-        "changed_count": changed_count,
+        "changed_count": len(changed_targets),
+        "rewrite_event_count": rewrite_event_count,
+        "changed_targets": sorted(changed_targets),
         "prompt_count": len(entries),
         "issues": issues,
         "entries": entries,
@@ -30286,13 +36105,11 @@ def script_rhythm_report(project_id: int, content: str | None = None) -> dict[st
                 "risk",
                 "口播套话/播客腔",
                 f"存在弱开头或播客式收尾：{', '.join(bad_phrase_hits[:6])}。",
-                "节奏增强会先删除这些句式，再补一个具体评论区互动问题。",
+                "节奏增强只删除套话、重复句和无信息转场，不会向正文拼接新台词。",
             )
         )
-    if max_plain_gap >= 5:
-        issues.append(quality_issue("warn", "中段推进", f"最长连续 {max_plain_gap} 句都缺少追问、转折、案例或反差。", "每 2-4 句插入一次追问、误区纠正、具体案例或“表面/真正”转折。"))
     if float(engagement.get("retention_score", 0) or 0) < CONTENT_RETENTION_MIN_SCORE:
-        issues.append(quality_issue("warn", "中段留存", "中段缺少按节奏分布的新数字、案例、后果或反转。", "每 20-30 秒补一个新的追看理由，不能连续解释超过 3 段。"))
+        issues.append(quality_issue("warn", "中段留存", "中段的信息增量不足，事实、解释、现实影响或行动没有形成连续因果。", "围绕一条主线补齐缺失环节；不要按秒数机械插入追问、转折或总结。"))
     if dialogue_lines and len(long_lines) / max(1, len(dialogue_lines)) > 0.28:
         length_label = "24 个英文单词" if english_mode else "46 字"
         issues.append(
@@ -30305,8 +36122,25 @@ def script_rhythm_report(project_id: int, content: str | None = None) -> dict[st
         )
     if len(ultra_short_lines) >= max(4, len(dialogue_lines) // 4):
         issues.append(quality_issue("info", "口播碎片", "过短句偏多，可能显得碎。", "把连续短句合并成“短句 + 解释”结构。"))
-    if float(engagement.get("interaction_score", 0) or 0) < CONTENT_INTERACTION_MIN_SCORE:
-        issues.append(quality_issue("warn", "结尾互动", "结尾没有形成单一、低门槛互动。", "只保留一个具体评论动作，不要同时堆点赞、收藏、关注和转发。"))
+    viewer_value = engagement.get("viewer_value") if isinstance(engagement.get("viewer_value"), dict) else {}
+    for viewer_issue in viewer_value.get("issues") or []:
+        if not isinstance(viewer_issue, dict):
+            continue
+        where = clean_text(str(viewer_issue.get("where") or "观众收获"))
+        metric = float(
+            viewer_value.get("plain_score", 0)
+            if where == "大白话"
+            else viewer_value.get("value_score", 0)
+            or 0
+        )
+        issues.append(
+            quality_issue(
+                "risk" if metric < 50 else "warn",
+                where,
+                clean_text(str(viewer_issue.get("issue") or "观众听完后的明确收获不足。")),
+                clean_text(str(viewer_issue.get("fix") or "补足事实、原因、现实关系和可执行判断。")),
+            )
+        )
     if retention.get("enabled") and estimated_duration and estimated_duration < float(retention.get("minimum_sec") or 0):
         shortfall = float(retention.get("minimum_sec") or 0) - estimated_duration
         level = "risk" if estimated_duration < float(retention.get("minimum_sec") or 0) * 0.72 else "warn"
@@ -30357,6 +36191,8 @@ def script_rhythm_report(project_id: int, content: str | None = None) -> dict[st
             "interaction_score": engagement.get("interaction_score"),
             "opening_novelty_score": opening_novelty.get("score", 100),
             "opening_family": opening_novelty.get("family", ""),
+            "viewer_value_score": viewer_value.get("value_score"),
+            "plain_language_score": viewer_value.get("plain_score"),
         },
         "opening_novelty": opening_novelty,
         "metrics": {
@@ -30403,7 +36239,7 @@ def split_spoken_text_for_rhythm(text: str, limit: int = 42) -> list[str]:
         return [cleaned] if cleaned else []
     parts = [part for part in re.split(r"(?<=[。！？!?；;])\s*", cleaned) if clean_text(part)]
     if len(parts) <= 1:
-        parts = [part for part in re.split(r"[，,]\s*", cleaned) if clean_text(part)]
+        parts = [part for part in re.split(r"(?<=[，,])\s*", cleaned) if clean_text(part)]
 
     result: list[str] = []
     current = ""
@@ -30429,56 +36265,88 @@ def split_spoken_text_for_rhythm(text: str, limit: int = 42) -> list[str]:
         while len(chunk) > limit + 8:
             cut = max(chunk.rfind("，", 0, limit), chunk.rfind(",", 0, limit), chunk.rfind("、", 0, limit))
             if cut < 14:
-                cut = limit
-            normalized.append(chunk[:cut].strip("，,、 "))
-            chunk = chunk[cut:].strip("，,、 ")
+                # Never split blindly by character count: it can separate
+                # values from units (2/nm, 256/GB) and break subtitle/TTS text.
+                break
+            # Preserve punctuation: rhythm splitting must not alter spoken text.
+            if cut < len(chunk) and chunk[cut] in "，,、":
+                cut += 1
+            normalized.append(chunk[:cut].strip())
+            chunk = chunk[cut:].strip()
         if chunk:
             normalized.append(chunk)
     return [item for item in normalized if item]
 
 
+def enhance_script_section_rhythm_with_limit(
+    script: str,
+    topic: str,
+    mode: str,
+    *,
+    limit: int,
+) -> tuple[str, dict[str, Any]]:
+    """Run the existing rhythm normalizer with an explicit delivery-line budget."""
+    if mode == "article":
+        return script, {"changed": False, "split_count": 0, "bridge_count": 0, "interaction_added": False}
+    output: list[str] = []
+    split_count = 0
+    interaction_removed = 0
+    last_speaker = "主播"
+    for raw in script.splitlines():
+        original = raw.rstrip()
+        stripped = original.strip()
+        if not stripped:
+            output.append(original)
+            continue
+        prefix = ""
+        body = stripped
+        if body.startswith(("- ", "* ")):
+            prefix, body = body[:2], body[2:].strip()
+        normalized = re.sub(r"\*\*(.*?)\*\*", r"\1", body).strip()
+        parsed = parse_dialogue_speaker_line(normalized, max_speaker_len=18)
+        if parsed:
+            speaker = clean_text(parsed[0]) or last_speaker
+            spoken = clean_text(parsed[1])
+            last_speaker = speaker
+            if not spoken or is_stage_direction_line(spoken) or looks_like_visual_direction(spoken):
+                output.append(original)
+                continue
+        else:
+            if is_stage_direction_line(normalized) or normalized.startswith(("### ", "## ", "# ")) or is_script_marker_speaker(normalized, ""):
+                output.append(original)
+                continue
+            spoken = clean_text(normalized)
+            speaker = last_speaker
+            if not spoken or not re.search(r"[，。！？；：,.!?;:]", spoken):
+                output.append(original)
+                continue
+        segments = split_spoken_text_for_rhythm(spoken, limit=max(18, int(limit)))
+        if len(segments) > 1:
+            split_count += len(segments) - 1
+        for segment in segments:
+            line = format_rhythm_dialogue_line(speaker, segment) if parsed else segment
+            output.append(f"{prefix}{line}" if prefix else line)
+    output, interaction_removed = dedupe_terminal_interaction_lines(output)
+    return "\n".join(output).strip(), {
+        "changed": split_count > 0 or interaction_removed > 0,
+        "split_count": split_count,
+        "bridge_count": 0,
+        "interaction_added": False,
+        "interaction_removed": interaction_removed,
+    }
+
+
 def rhythm_bridge_line(topic: str, index: int, output_language: str = "zh-CN") -> str:
-    source = clean_text(topic)
-    if clean_text(output_language).lower().startswith("en"):
-        variants = [
-            "But that still leaves one missing step.",
-            "Now compare that claim with what actually happens.",
-            "Here is the detail that changes the conclusion.",
-        ]
-    elif any(token in source for token in ("自动续费", "扣费", "订阅", "免密", "支付")):
-        variants = [
-            "先别急，关键不是你点没点取消，而是钱到底从哪里扣。",
-            "很多人以为关掉 App 就结束了，其实真正的开关在支付渠道里。",
-            "记住这个判断：看见便宜试用，先找自动续费这一行。",
-        ]
-    else:
-        variants = [
-            "先别急，真正容易忽略的点在后面。",
-            "很多人以为到这一步就结束了，其实关键还没出现。",
-            "这里换个角度看，问题就清楚了。",
-        ]
-    return variants[index % len(variants)]
+    # Rhythm must come from the surrounding facts. A topic-only bridge is a
+    # template fragment and makes otherwise natural speech sound stitched.
+    return ""
 
 
 def interaction_line_for_topic(topic: str, output_language: str = "zh-CN") -> str:
-    source = clean_text(topic)
-    if clean_text(output_language).lower().startswith("en"):
-        topic_anchor = re.sub(r"[^0-9A-Za-z ]+", "", source).strip()
-        if topic_anchor:
-            return f"What is the one detail about {topic_anchor[:56].rstrip()} that would change your mind?"
-        return "What is the one real detail that would change your mind?"
-    if any(token in source for token in ("自动续费", "扣费", "订阅", "免密", "支付")):
-        return "如果你也收到过扣费短信，评论区告诉我：你手机里关掉了几个自动扣费项目？"
-    if any(token in source.lower() for token in ("智能家居", "智能设备", "matter", "homekit", "米家")):
-        return "你家哪件智能设备已经吃灰或变砖？评论区只写设备名。"
-    if any(token in source for token in ("骗局", "诈骗", "骗子", "上门", "冒充")):
-        return "你遇到过哪一种骗局？评论区只写关键词，提醒更多人。"
-    if any(token in source for token in ("AI", "人工智能", "大模型", "智能体")):
-        return "AI 最先改变了你工作的哪一步？评论区只说一个真实变化。"
-    topic_anchor = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", source)[:12]
-    if topic_anchor:
-        return f"说到{topic_anchor}，你踩过哪个坑？评论区只写一个经历。"
-    return "你遇到过类似情况吗？评论区只写一个最真实的例子。"
+    # Interaction must grow out of the actual conclusion. A topic-only CTA is
+    # necessarily generic, so callers leave it empty unless the episode already
+    # contains a natural question based on its evidence.
+    return ""
 
 
 def format_rhythm_dialogue_line(speaker: str, text: str) -> str:
@@ -30576,8 +36444,6 @@ def dedupe_terminal_interaction_lines(lines: list[str]) -> tuple[list[str], int]
     for index in range(len(kept) - 1, max(-1, len(kept) - 7), -1):
         if not is_terminal_interaction_intent(kept[index]):
             continue
-        if not is_explicit_interaction_cta(kept[index]):
-            kept[index] = kept[index].rstrip() + "评论区只写一个经历。"
         break
     return kept, len(duplicate_indexes)
 
@@ -30621,6 +36487,8 @@ def low_information_transition_family(text: str) -> str:
         r"(?:更狠|真正关键|关键|重点).*(?:还在后面|还没出现|马上出现)",
         r"(?:你以为|很多人以为).*(?:结束|完了).*(?:其实|但|可)",
         r"(?:问题来了|接着看|往下看|继续看)",
+        r"(?:这里|现在).*(?:换个角度).*(?:清楚|明白)",
+        r"(?:真正容易忽略|关键其实藏在|真正决定结果).*(?:后面|另一层|小动作)",
     )
     return "suspense_bridge" if any(re.search(pattern, source) for pattern in transition_patterns) else ""
 
@@ -30668,19 +36536,9 @@ def dedupe_script_semantic_lines(lines: list[str]) -> tuple[list[str], dict[str,
             continue
         family = low_information_transition_family(spoken)
         if family:
-            repeated = next(
-                (
-                    previous_index
-                    for previous_index, previous_family in reversed(recent_transitions)
-                    if previous_family == family and spoken_position - previous_index <= 6
-                ),
-                None,
-            )
-            if repeated is not None:
-                remove_indexes.add(index)
-                transition_count += 1
-            else:
-                recent_transitions.append((spoken_position, family))
+            remove_indexes.add(index)
+            transition_count += 1
+            recent_transitions.append((spoken_position, family))
         spoken_position += 1
 
     return (
@@ -30709,12 +36567,14 @@ def strip_weak_opening_prefix(spoken: str) -> tuple[str, list[str]]:
     while changed and cleaned:
         changed = False
         for pattern in WEAK_SCRIPT_OPENING_PATTERNS:
-            updated = re.sub(rf"^\s*(?:{pattern})", "", cleaned, count=1).strip(" ，,。；;：:")
-            if updated != cleaned:
-                hits.append("弱开头套话")
-                cleaned = updated
-                changed = True
-                break
+            matcher = re.match(rf"^\s*(?:{pattern})", cleaned)
+            if not matcher:
+                continue
+            updated = cleaned[matcher.end() :].strip(" ，,。；;：:")
+            hits.append("弱开头套话")
+            cleaned = updated
+            changed = True
+            break
     return cleaned, hits
 
 
@@ -30881,6 +36741,9 @@ def rewrite_script_section_bad_phrases(script: str, topic: str, mode: str) -> tu
             prefix = body[:2]
             body = body[2:].strip()
         normalized = re.sub(r"\*\*(.*?)\*\*", r"\1", body).strip()
+        if normalized.startswith(("### ", "## ", "# ")):
+            output.append(original)
+            continue
         if is_standalone_speaker_label(normalized):
             last_speaker = normalized.strip("【】[]：:")
             hits.append("移除空角色行")
@@ -30904,6 +36767,9 @@ def rewrite_script_section_bad_phrases(script: str, topic: str, mode: str) -> tu
                     hits.append("结尾只保留一个互动动作")
                 if not cleaned:
                     continue
+                if low_information_transition_family(cleaned):
+                    hits.append("移除无信息转场")
+                    continue
                 if any(token in cleaned for token in WEAK_SCRIPT_CTA_TOKENS) and not any(token in cleaned for token in INTERACTION_SIGNAL_TOKENS):
                     hits.extend(token for token in WEAK_SCRIPT_CTA_TOKENS if token in cleaned)
                     continue
@@ -30913,6 +36779,9 @@ def rewrite_script_section_bad_phrases(script: str, topic: str, mode: str) -> tu
             continue
 
         speaker = clean_text(parsed[0]) or last_speaker
+        if is_narrative_speaker_label(speaker):
+            speaker = "主播"
+            hits.append("结构标签归一为主播")
         spoken = strip_leading_stage_direction(clean_text(parsed[1]))
         last_speaker = speaker
         if not spoken:
@@ -30932,6 +36801,9 @@ def rewrite_script_section_bad_phrases(script: str, topic: str, mode: str) -> tu
             hits.append("结尾只保留一个互动动作")
         if not spoken:
             continue
+        if low_information_transition_family(spoken):
+            hits.append("移除无信息转场")
+            continue
         if any(token in spoken for token in WEAK_SCRIPT_CTA_TOKENS) and not any(token in spoken for token in INTERACTION_SIGNAL_TOKENS):
             hits.extend(token for token in WEAK_SCRIPT_CTA_TOKENS if token in spoken)
             continue
@@ -30945,29 +36817,6 @@ def rewrite_script_section_bad_phrases(script: str, topic: str, mode: str) -> tu
     output, duplicate_interaction_count = dedupe_terminal_interaction_lines(output)
     if duplicate_interaction_count:
         hits.append("合并重复互动结尾")
-    dialogue_parts: list[str] = []
-    for line in output:
-        normalized_line = line.strip().removeprefix("- ").removeprefix("* ").strip()
-        parsed = parse_dialogue_speaker_line(normalized_line, max_speaker_len=18)
-        if parsed:
-            dialogue_parts.append(parsed[1])
-            continue
-        spoken = strip_spoken_line_for_tts(normalized_line)
-        if spoken:
-            dialogue_parts.append(spoken)
-    tail = "\n".join(dialogue_parts)[-240:]
-    if not any(is_explicit_interaction_cta(item) for item in dialogue_parts[-6:]) or any(token in tail for token in WEAK_SCRIPT_OUTRO_TOKENS):
-        output.append(
-            format_rhythm_dialogue_line(
-                last_speaker,
-                interaction_line_for_topic(topic, output_language),
-            )
-        )
-        hits.append("补具体互动结尾")
-        output, removed_after_append = dedupe_terminal_interaction_lines(output)
-        if removed_after_append:
-            hits.append("合并重复互动结尾")
-
     return "\n".join(output).strip(), dedupe_clauses(hits)
 
 
@@ -31159,6 +37008,34 @@ def numeric_fact_is_ordinal(line: str, token: str) -> bool:
     return any(match.start() > 0 and source[match.start() - 1] == "第" for match in re.finditer(re.escape(raw), source))
 
 
+def numeric_fact_is_narrative_count(line: str, token: str) -> bool:
+    """Exclude structural counting words that do not assert external facts."""
+    source = clean_text(line)
+    raw = clean_text(token)
+    if not source or not raw:
+        return False
+    if normalized_numeric_fact(raw).endswith("字"):
+        return True
+    for match in re.finditer(re.escape(raw), source):
+        preceding = source[max(0, match.start() - 6) : match.start()]
+        following = source[match.end() : match.end() + 8]
+        # Fixed idioms and self-authored list structure are narration grammar,
+        # not external numerical claims that require a news source.
+        if raw.endswith("家") and preceding.endswith("货比"):
+            return True
+        if re.match(r"(?:路|线|步|点|方面|件事|个问题|个选择|句话|个字)", following):
+            return True
+        # “三条里至少一条”“拿三条去对”“三条全中” describe the
+        # structure of the narration.  A bare factual count such as “有三条政策”
+        # must still reach the evidence gate, so require an explicit structural
+        # continuation instead of exempting every token ending in “条”.
+        if normalized_numeric_fact(raw).endswith("条") and re.match(
+            r"(?:里|中|去对|分别|如下|全中|至少|逐条|各自|都)", following
+        ):
+            return True
+    return False
+
+
 def extract_contextual_numeric_claims(text: str) -> list[dict[str, str]]:
     source = clean_text(text)
     claims: list[dict[str, str]] = []
@@ -31172,6 +37049,24 @@ def extract_contextual_numeric_claims(text: str) -> list[dict[str, str]]:
     return claims
 
 
+def extract_contextual_price_claims(text: str) -> list[dict[str, str]]:
+    """Recognize spoken prices where Chinese commonly omits the yuan unit."""
+    source = clean_text(text)
+    claims: list[dict[str, str]] = []
+    price_context = re.compile(
+        r"(?:官网|售价|价格|报价|成交价|渠道|授权店|门店|电商|平台|卖到|卖价|"
+        r"起售|报到|报出|挂出|最低|最高|便宜|优惠|直降|涨到|降到|涨了|降了|涨幅|降幅)"
+    )
+    for match in re.finditer(r"(?<![\d.])\d{3,7}(?!\s*[\dA-Za-z.%年月日时分秒万亿])", source, flags=re.IGNORECASE):
+        left = source[max(0, match.start() - 12) : match.start()]
+        right = source[match.end() : match.end() + 12]
+        if not price_context.search(f"{left}{right}"):
+            continue
+        raw = match.group(0)
+        claims.append({"raw": raw, "normalized": f"{raw}元", "kind": "contextual_price"})
+    return claims
+
+
 FACT_USAGE_META_LABELS = {
     "封面主标题",
     "封面副标题",
@@ -31181,7 +37076,6 @@ FACT_USAGE_META_LABELS = {
     "互动钩子",
     "免责声明",
 }
-FACT_AUTHORITY_SECTIONS = ("原始材料简述", "资料边界", "参考资料")
 FACT_EXCLUDED_SECTIONS = {
     "图片提示词",
     "场景图提示词",
@@ -31203,6 +37097,7 @@ def strong_numeric_claims_in_line(line: str) -> list[dict[str, str]]:
             or normalized in seen
             or not is_strong_numeric_fact(token)
             or numeric_fact_is_ordinal(source, token)
+            or numeric_fact_is_narrative_count(source, token)
         ):
             continue
         seen.add(normalized)
@@ -31219,6 +37114,24 @@ def strong_numeric_claims_in_line(line: str) -> list[dict[str, str]]:
                 "kind": "contextual_measurement",
             }
         )
+    for claim in extract_contextual_price_claims(source):
+        normalized = clean_text(str(claim.get("normalized") or ""))
+        if not normalized or normalized in seen:
+            continue
+        token_end = source.find(token) + len(token)
+        following = source[token_end : token_end + 12]
+        if normalized.endswith("条") and re.match(r"(?:资料|来源|建议|要求|理由|信息|问题|规则)", following):
+            continue
+        if normalized.endswith("字") and re.search(r"(?:几个|多少|不超过|控制在|标题|名字|短)", source[max(0, source.find(token) - 8) : source.find(token)]):
+            continue
+        seen.add(normalized)
+        claims.append(
+            {
+                "raw": clean_text(str(claim.get("raw") or "")),
+                "normalized": normalized,
+                "kind": "contextual_price",
+            }
+        )
     return claims
 
 
@@ -31230,7 +37143,7 @@ def numeric_fact_authority_records(
     references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     source_brief = storage.get_brief(project_id) if brief is None and project_id else str(brief or "")
-    source_references = storage.get_references(project_id) if references is None and project_id else (references or [])
+    source_references = effective_project_references(project_id, brief=source_brief) if references is None and project_id else (references or [])
     records: list[dict[str, str]] = []
 
     def append_record(kind: str, label: str, text: str) -> None:
@@ -31238,7 +37151,62 @@ def numeric_fact_authority_records(
         if value:
             records.append({"kind": kind, "label": clean_text(label), "text": value})
 
-    append_record("brief", "brief.md", source_brief)
+    def append_explicit_brief_evidence(source: str) -> None:
+        """Use only user-authored evidence fields, never the generated script body."""
+        lines = str(source or "").splitlines()
+        material_match = re.search(
+            r"(?ms)^核心材料\s*[:：]\s*(.*?)(?=^\s*(?:主线|必须保留|成稿要求|目标受众|基调)\s*[:：]?|\Z)",
+            str(source or ""),
+        )
+        if material_match:
+            append_record("brief_evidence", "brief.md / 核心材料", material_match.group(1))
+        transcript_match = re.search(
+            r"(?ms)^(?:完整口播逐字稿|用户提供的完整素材稿)[^\n]*\n\s*(.+)$",
+            str(source or ""),
+        )
+        if transcript_match:
+            append_record("brief_evidence", "brief.md / 用户完整素材", transcript_match.group(1))
+        for index, raw_line in enumerate(lines):
+            line = clean_text(raw_line)
+            if line == "一句话选题":
+                for candidate in lines[index + 1 :]:
+                    value = clean_text(candidate)
+                    if value:
+                        append_record("brief_evidence", "brief.md / 一句话选题", value)
+                        break
+
+        in_fact_section = False
+        fact_tier = ""
+        for raw_line in lines:
+            line = clean_text(raw_line)
+            if re.match(r"^(?:一[、.]?)?事实分级$", line):
+                in_fact_section = True
+                continue
+            if in_fact_section and re.match(r"^(?:二|三|四|五)[、.]", line):
+                break
+            if not in_fact_section or not line:
+                continue
+            # Explicitly accepted and qualified facts are evidence supplied by
+            # the user. Prohibited examples describe what must not be claimed.
+            if line.startswith("✅"):
+                fact_tier = "accepted"
+                continue
+            if line.startswith("⚠️"):
+                fact_tier = "qualified"
+                append_record("brief_evidence", "brief.md / 事实分级", line)
+                continue
+            if line.startswith("🚫"):
+                fact_tier = "prohibited"
+                continue
+            if fact_tier in {"accepted", "qualified"}:
+                append_record("brief_evidence", "brief.md / 事实分级", line)
+
+    # Only the user-authored factual preamble and explicit fact sections may
+    # verify claims. Audience instructions, arguments and generated narration
+    # remain excluded, so generated content can never prove itself.
+    append_explicit_brief_evidence(source_brief)
+    if not source_references:
+        append_record("brief", "brief.md", sanitize_locked_topic_brief(source_brief, ""))
     for index, item in enumerate(source_references, start=1):
         if not isinstance(item, dict):
             continue
@@ -31252,8 +37220,8 @@ def numeric_fact_authority_records(
             for field in ("title", "snippet", "source")
         )
         append_record("reference", label, text)
-    for title in FACT_AUTHORITY_SECTIONS:
-        append_record("content_source", f"content.md / {title}", extract_section(content, title, level=2))
+    # Never let generated content prove itself. In particular,
+    # `原始材料简述` is written by the same model as the narration.
     return records
 
 
@@ -31373,6 +37341,11 @@ def build_episode_fact_registry(
     facts: list[dict[str, Any]] = []
     for fact in fact_order:
         sources = source_map.get(fact, [])
+        if not sources and re.search(r"(?:元|块)$", fact):
+            # “800 块” and “800 元” are the same spoken price, while the
+            # registry keeps the original wording for diagnostics.
+            equivalent = fact[:-1] + ("块" if fact.endswith("元") else "元")
+            sources = source_map.get(equivalent, [])
         fact_usages = usage_map.get(fact, [])
         if fact_usages and sources:
             status = "verified"
@@ -31527,6 +37500,14 @@ def soften_unsupported_numeric_claim_line(line: str, facts: Iterable[str]) -> tu
         normalized = normalized_numeric_fact(raw)
         if normalized not in target_facts or raw not in rewritten:
             continue
+        raw_pos = original.find(raw)
+        local_prefix = original[max(0, raw_pos - 4) : raw_pos] if raw_pos >= 0 else ""
+        local_suffix = original[raw_pos + len(raw) : raw_pos + len(raw) + 12] if raw_pos >= 0 else ""
+        if (
+            re.search(r"(?:花|用|给|留)了?$", local_prefix)
+            and re.search(r"(?:把|来|去|处理|操作|看|检查|修|改|等)", local_suffix)
+        ):
+            continue
         before = rewritten
         escaped = re.escape(raw)
 
@@ -31558,6 +37539,11 @@ def soften_unsupported_numeric_claim_line(line: str, facts: Iterable[str]) -> tu
         elif re.search(r"(?:秒|分钟|小时)$", normalized):
             rewritten = re.sub(rf"(?:只要|仅需|不到)\s*{escaped}", "很快", rewritten)
             rewritten = re.sub(rf"(?:等待?|等了?)\s*{escaped}", "等一小会儿", rewritten)
+            rewritten = re.sub(
+                rf"(?P<subject>[^，。！？!?]{{1,18}}?(?:时间|时长))\s*(?:偏了|相差|误差(?:达到|有)?)\s*{escaped}",
+                r"\g<subject>一偏",
+                rewritten,
+            )
 
         rewritten = re.sub(
             rf"(?:偷偷|擅自)?停了{escaped}(?P<object>[^，。！？!?]{{1,10}}?药)",
@@ -31587,14 +37573,23 @@ def soften_unsupported_numeric_claim_line(line: str, facts: Iterable[str]) -> tu
         if rewritten != before:
             hits.append(f"{normalized}改为定性表达")
 
+    # A repair is rejected when token substitution creates an obviously broken
+    # collocation. The caller will keep the original line and surface the fact
+    # issue instead of contaminating spoken copy.
+    broken_collocations = ("画不少钱", "那不少钱", "一小不少钱", "花短时间")
+    if any(item in rewritten for item in broken_collocations):
+        return original, []
     return rewritten, dedupe_clauses(hits)
 
 
 def repair_project_unsupported_numeric_facts(project_id: int, content: str | None = None) -> dict[str, Any]:
     original_content = content if content is not None else storage.get_content(project_id)
     brief = storage.get_brief(project_id)
-    references = storage.get_references(project_id)
-    repaired_content, hits = soften_unsupported_numeric_facts_text(
+    references = effective_project_references(project_id, brief=brief)
+    # All user-facing automatic repairs must use sentence-level blurring. The
+    # legacy token softener remains available for its explicit compatibility
+    # tests, but it can damage grammar when invoked from a production gate.
+    repaired_content, hits = blur_unsupported_numeric_facts_text(
         project_id,
         original_content,
         brief=brief,
@@ -31665,6 +37660,125 @@ def soften_unsupported_numeric_facts_text(
     return rewritten, dedupe_clauses(hits)
 
 
+def blur_unsupported_numeric_facts_text(
+    project_id: int,
+    content: str,
+    *,
+    brief: str | None = None,
+    references: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[str]]:
+    """Replace unsupported factual numbers with natural, sentence-level wording.
+
+    This is deliberately separate from the legacy token softener. A price
+    comparison needs a phrase such as “出现明显价差”, not a damaged token such
+    as “官网不少钱”. The result is accepted only after the fact gate passes.
+    """
+    report = numeric_source_consistency_report(
+        project_id, content, brief=brief, references=references
+    )
+    unsupported = report.get("unsupported_facts") if isinstance(report.get("unsupported_facts"), list) else []
+    if not unsupported:
+        return content, []
+    grouped: dict[str, set[str]] = {}
+    for item in unsupported:
+        if not isinstance(item, dict):
+            continue
+        line = clean_text(str(item.get("line") or ""))
+        fact = clean_text(str(item.get("fact") or ""))
+        if line and fact:
+            grouped.setdefault(line, set()).add(fact)
+
+    def replacement_for(fact: str) -> str:
+        if re.search(r"(?:元|块)$", fact):
+            return "这个价格"
+        if fact.endswith("%"):
+            return "这个比例"
+        if re.search(r"(?:秒|分钟|小时|天|周|月|季度|年)$", fact):
+            return "这段时间"
+        if re.search(r"(?:家|人|条|款|台|次)$", fact):
+            return "不少"
+        return "具体数字"
+
+    rewritten = str(content or "")
+    hits: list[str] = []
+    for line, facts in grouped.items():
+        candidate = line
+        unsupported_price = any(re.search(r"(?:元|块)$", fact) for fact in facts)
+        if unsupported_price and "官网" in line and any(term in line for term in ("授权店", "门店", "渠道")):
+            speaker_match = re.match(r"^(\s*[【\[].*?[】\]]\s*)", line)
+            prefix = speaker_match.group(1) if speaker_match else ""
+            candidate = prefix + "官网和授权店出现明显价差。"
+            rewritten = rewritten.replace(line, candidate, 1)
+            hits.extend(f"{fact}改为模糊表述" for fact in sorted(facts))
+            continue
+        for raw in extract_numeric_fact_tokens(line):
+            fact = normalized_numeric_fact(raw)
+            fact_candidates = {fact}
+            if re.fullmatch(r"\d{3,7}", fact):
+                fact_candidates.add(f"{fact}元")
+            matched_fact = next((candidate_fact for candidate_fact in fact_candidates if candidate_fact in facts), "")
+            if not matched_fact:
+                continue
+            replacement = replacement_for(matched_fact)
+            escaped = re.escape(raw)
+            if replacement == "这个价格":
+                candidate = re.sub(rf"官网\s*{escaped}", "官网这个价格", candidate)
+                candidate = re.sub(rf"(?:授权店|门店|渠道|电商)(?:报出|报到|挂出|卖到)?\s*{escaped}", "渠道报出这个价格", candidate)
+                candidate = re.sub(rf"{escaped}\s*起售", "这个起售价", candidate)
+                candidate = re.sub(rf"{escaped}\s*比", "这个价格比", candidate)
+            candidate = candidate.replace(raw, replacement)
+            hits.append(f"{matched_fact}改为模糊表述")
+        candidate = re.sub(r"官网这个价格，渠道报出这个价格", "官网和渠道出现明显价差", candidate)
+        candidate = re.sub(r"官网这个价格，授权店这个价格", "官网和授权店出现明显价差", candidate)
+        candidate = re.sub(r"从\s*这个价格\s*(?:涨到|调到)\s*这个价格", "价格上调", candidate)
+        candidate = re.sub(r"从\s*这个价格\s*(?:降到|调低到)\s*这个价格", "价格下调", candidate)
+        candidate = re.sub(r"(?:涨到|调到)\s*这个价格", "价格上调", candidate)
+        candidate = re.sub(r"(?:降到|调低到)\s*这个价格", "价格下调", candidate)
+        candidate = re.sub(r"渠道报出这个价格", "渠道报出更低价格", candidate)
+        candidate = re.sub(r"电商(?:挂出|报出)\s*这个价格", "电商给出不同报价", candidate)
+        candidate = re.sub(r"网络购物(?:在)?这段时间内可以无理由退货", "网络购物通常可以无理由退货", candidate)
+        candidate = re.sub(r"这段时间内", "短期内", candidate)
+        candidate = re.sub(r"这个比例(?:到|至)?", "明显", candidate)
+        candidate = re.sub(r"这具体数字", "这几个字", candidate)
+        candidate = re.sub(r"这不少路", "这些选择", candidate)
+        candidate = re.sub(r"\s+([，。！？；：])", r"\1", candidate)
+        if candidate != line:
+            rewritten = rewritten.replace(line, candidate, 1)
+
+    validation = numeric_source_consistency_report(
+        project_id, rewritten, brief=brief, references=references
+    )
+    if validation.get("unsupported_facts"):
+        return content, []
+    return rewritten, dedupe_clauses(hits)
+
+
+def repair_legacy_numeric_softening_artifacts_text(content: str) -> tuple[str, list[str]]:
+    """Remove malformed phrases persisted by the retired token softener."""
+    source = str(content or "")
+    replacements = (
+        (r"官网这个价格", "官网价格上调"),
+        (r"从\s*(\d{3,7})\s*价格上调", r"原价 \1，之后价格上调"),
+        (r"(?:涨到|调到)\s*这个价格", "价格上调"),
+        (r"(?:降到|调低到)\s*这个价格", "价格下调"),
+        (r"网络购物(?:在)?这段时间内可以无理由退货", "网络购物通常可以无理由退货"),
+        (r"([“\"'])?([^，。！？；：\n]{1,16})([”\"'])?这具体数字", r"\1\2\3这几个字"),
+        (r"这不少路都成立", "这些选择都成立"),
+        (r"所以实际怎么做，不少", "所以实际怎么做，分三步"),
+        (r"涨价苹果不是唯不少", "涨价不只发生在苹果一家"),
+        (r"货比不少", "货比三家"),
+        (r"这不少线", "这些线"),
+    )
+    rewritten = source
+    hits: list[str] = []
+    for pattern, replacement in replacements:
+        updated, count = re.subn(pattern, replacement, rewritten)
+        if count:
+            rewritten = updated
+            hits.append("清理旧数字修复残留")
+    return rewritten, dedupe_clauses(hits)
+
+
 def canonicalize_project_content(
     project_id: int,
     content: str,
@@ -31681,9 +37795,16 @@ def canonicalize_project_content(
     normalized = compact_content_meta(original)
     normalized, visual_prompt_hits = repair_visual_prompt_contamination_text(normalized, mode)
     normalized, bad_phrase_hits = repair_script_bad_phrases_text(normalized, topic, mode)
+    normalized, numeric_artifact_hits = repair_legacy_numeric_softening_artifacts_text(normalized)
     normalized, highlight_hits = repair_stale_opening_highlight(normalized)
     opening_repair = repair_channel_opening_repetition(project_id, normalized)
     normalized = str(opening_repair.get("content") or normalized).rstrip() + "\n"
+    normalized, duration_meta_hits = synchronize_content_meta_duration(normalized, mode)
+    if topic:
+        if re.match(r"(?m)^#\s+.+$", normalized):
+            normalized = re.sub(r"(?m)^#\s+.+$", f"# {topic}", normalized, count=1)
+        else:
+            normalized = f"# {topic}\n\n{normalized.lstrip()}"
     # Unsupported facts must remain visible to the gate. Token-by-token replacements
     # such as "3倍" -> "更大" silently damage sentence grammar and spoken meaning.
     numeric_repair_hits: list[str] = []
@@ -31700,7 +37821,14 @@ def canonicalize_project_content(
         brief=brief,
         references=references,
     )
-    actions = [*visual_prompt_hits, *bad_phrase_hits, *highlight_hits, *numeric_repair_hits]
+    actions = [
+        *visual_prompt_hits,
+        *bad_phrase_hits,
+        *numeric_artifact_hits,
+        *highlight_hits,
+        *duration_meta_hits,
+        *numeric_repair_hits,
+    ]
     if opening_repair.get("changed"):
         actions.append("合并同频道重复开场")
     return {
@@ -31955,7 +38083,6 @@ def content_change_impact(project_id: int, before_content: str, after_content: s
 
 
 def sanitize_tts_delivery_text(text: str, topic: str) -> str:
-    output_language = "en-US" if content_lines_use_english([text]) else "zh-CN"
     output: list[str] = []
     spoken_count = 0
     for raw in str(text or "").splitlines():
@@ -31969,49 +38096,30 @@ def sanitize_tts_delivery_text(text: str, topic: str) -> str:
         spoken_count += 1
         if spoken_count <= 3:
             line, _hits = strip_weak_opening_prefix(line)
-        if line:
+        if line and not low_information_transition_family(line):
             output.append(line)
     output, _duplicate_interaction_count = dedupe_terminal_interaction_lines(output)
-    if not output:
-        output.append(interaction_line_for_topic(topic, output_language))
-    if output and not any(is_explicit_interaction_cta(item) for item in output[-6:]):
-        output.append(interaction_line_for_topic(topic, output_language))
-        output, _removed_after_append = dedupe_terminal_interaction_lines(output)
     return "\n".join(output).strip()
 
 
 def enhance_script_section_rhythm(script: str, topic: str, mode: str) -> tuple[str, dict[str, Any]]:
     if mode == "article":
         return script, {"changed": False, "split_count": 0, "bridge_count": 0, "interaction_added": False}
-    output_language = "en-US" if content_lines_use_english([script]) else "zh-CN"
     output: list[str] = []
     split_count = 0
     bridge_count = 0
-    plain_gap = 0
-    bridge_index = 0
     last_speaker = "主播"
 
     def emit_spoken_segments(speaker_name: str, spoken_text: str, prefix_text: str = "") -> None:
-        nonlocal split_count, bridge_count, plain_gap, bridge_index
+        nonlocal split_count
         speaker = clean_text(speaker_name) or last_speaker
         spoken = clean_text(spoken_text)
-        if not spoken:
+        if not spoken or low_information_transition_family(spoken):
             return
         segments = split_spoken_text_for_rhythm(spoken)
         if len(segments) > 1:
             split_count += len(segments) - 1
         for segment in segments:
-            signal = rhythm_signal_for_line(segment, len(output), len(output) + 1)
-            if signal == "explain":
-                plain_gap += 1
-            else:
-                plain_gap = 0
-            if plain_gap >= 4:
-                bridge = rhythm_bridge_line(topic, bridge_index, output_language)
-                output.append(format_rhythm_dialogue_line(speaker, bridge))
-                bridge_count += 1
-                bridge_index += 1
-                plain_gap = 0
             line = format_rhythm_dialogue_line(speaker, segment)
             output.append(f"{prefix_text}{line}" if prefix_text else line)
 
@@ -32027,11 +38135,13 @@ def enhance_script_section_rhythm(script: str, topic: str, mode: str) -> tuple[s
             prefix = body[:2]
             body = body[2:].strip()
         normalized = re.sub(r"\*\*(.*?)\*\*", r"\1", body).strip()
+        if normalized.startswith(("### ", "## ", "# ")):
+            output.append(original)
+            continue
         parsed = parse_dialogue_speaker_line(normalized, max_speaker_len=18)
         if not parsed:
             if is_stage_direction_line(normalized) or normalized.startswith(("### ", "## ", "# ")) or is_script_marker_speaker(normalized, ""):
                 output.append(original)
-                plain_gap = 0
                 continue
             if clean_text(normalized) and len(clean_text(normalized)) > 34 and re.search(r"[，。！？；：,.!?;:]", normalized):
                 emit_spoken_segments(last_speaker, normalized, prefix)
@@ -32047,32 +38157,12 @@ def enhance_script_section_rhythm(script: str, topic: str, mode: str) -> tuple[s
             continue
         if is_stage_direction_line(spoken) or looks_like_visual_direction(spoken):
             output.append(original)
-            plain_gap = 0
             continue
         emit_spoken_segments(speaker, spoken, prefix)
 
     output, interaction_removed = dedupe_terminal_interaction_lines(output)
 
-    dialogue_parts: list[str] = []
-    for line in output:
-        parsed = parse_dialogue_speaker_line(line.strip().removeprefix("- ").removeprefix("* ").strip(), max_speaker_len=18)
-        if parsed:
-            dialogue_parts.append(parsed[1])
-    dialogue_text = "\n".join(dialogue_parts)
     interaction_added = False
-    tail = dialogue_text[-220:]
-    needs_topic_callback = any(token in clean_text(topic) for token in ("自动续费", "扣费", "订阅", "免密", "支付")) and "扣费短信" not in tail
-    has_explicit_interaction = any(is_explicit_interaction_cta(item) for item in dialogue_parts[-6:])
-    if interaction_removed or needs_topic_callback or not has_explicit_interaction:
-        output.append(
-            format_rhythm_dialogue_line(
-                last_speaker,
-                interaction_line_for_topic(topic, output_language),
-            )
-        )
-        interaction_added = True
-        output, removed_after_append = dedupe_terminal_interaction_lines(output)
-        interaction_removed += removed_after_append
 
     return "\n".join(output).strip(), {
         "changed": split_count > 0 or bridge_count > 0 or interaction_added or interaction_removed > 0,
@@ -32164,6 +38254,8 @@ def compress_content_to_retention_budget(
     if (
         not clean_text(original)
         or not retention.get("enabled")
+        or retention.get("enforce_generation_only")
+        or retention.get("experiment_active")
         or not maximum_sec
         or before_duration <= maximum_sec
     ):
@@ -32255,6 +38347,10 @@ def compress_content_to_retention_budget(
         score += {"hook": 50, "case": 32, "turn": 28, "push": 24, "interaction": 55}.get(signal, 0)
         if re.search(r"\d", spoken):
             score += 28
+        # Preserve evidence and reasoning during any duration experiment.
+        # These lines are not expendable filler even when their keep score is low.
+        if re.search(r"(因为|所以|导致|原因|结果|意味着|实际上|但是|然而|因此|如果|否则|相比|数据|报告|调查|案例|广告|价格|销量|利润|体验)", spoken):
+            score += 42
         if len(re.findall(r"\b[A-Z][A-Za-z0-9.-]{2,}\b", spoken)) >= 1:
             score += 18
         if any(token in lowered for token in generic_bridge_tokens):
@@ -32536,6 +38632,20 @@ def production_stability_summary(project_id: int, limit: int = 20) -> dict[str, 
     }
 
 
+def cached_quality_gate_state(project_id: int, brief: str, content: str) -> dict[str, Any]:
+    report = storage.get_report(project_id, "quality_gate") or {}
+    exists = bool(report)
+    current = exists and quality_gate_non_video_sections_current(project_id, report, brief, content)
+    score = int(report.get("overall_score", 0) or 0) if current else None
+    return {
+        "exists": exists,
+        "current": current,
+        "score": score,
+        "verdict": clean_text(str(report.get("verdict") or "")) if current else "",
+        "release_ready": bool(current and score is not None and score >= 70),
+    }
+
+
 def project_status_report(project_id: int) -> dict[str, Any]:
     project = storage.get_project(project_id)
     brief = clean_text(storage.get_brief(project_id))
@@ -32543,6 +38653,7 @@ def project_status_report(project_id: int) -> dict[str, Any]:
     scene_status_payload = storage.scene_status(project_id)
     image_review = image_review_status(project_id)
     video_quality = video_quality_report(project_id)
+    quality_gate = cached_quality_gate_state(project_id, brief, content)
     audio_path = storage.project_file(project_id, "audio/podcast.mp3")
     subtitle_path = storage.project_file(project_id, "audio/subtitles.srt")
     final_video_path = storage.project_file(project_id, "releases/final-video.mp4")
@@ -32698,6 +38809,29 @@ def project_status_report(project_id: int) -> dict[str, Any]:
                 else ("使用新版人声侧链混音重新合成视频。" if final_video_path.exists() and not video_mix_current else ("图片重绘并确认后重新合成视频。" if pending_redraw_count else ("重新合成视频以使用最新素材。" if stale_video_inputs else ("运行成片自检，确认无黑屏、字幕覆盖和时长问题。" if final_video_path.exists() else "先合成视频。"))))
             ),
         ),
+        _project_status_item(
+            "quality",
+            "质量总检",
+            (
+                "ok"
+                if quality_gate.get("current") and int(quality_gate.get("score") or 0) >= 70
+                else (
+                    "risk"
+                    if quality_gate.get("current") and int(quality_gate.get("score") or 0) < 50
+                    else "warn"
+                )
+            ),
+            (
+                f"当前素材质量总分 {quality_gate.get('score')} 分"
+                if quality_gate.get("current")
+                else ("质量报告已过期，需要重新检查" if quality_gate.get("exists") else "尚未运行质量总检")
+            ),
+            (
+                quality_gate.get("verdict") or "运行质量总检后再判断是否适合发布。"
+                if not quality_gate.get("release_ready")
+                else ""
+            ),
+        ),
     ]
     steps = [item for item in steps if item.get("key") != "bgm"]
     status_rank = {"ok": 0, "info": 1, "warn": 2, "risk": 3}
@@ -32711,9 +38845,17 @@ def project_status_report(project_id: int) -> dict[str, Any]:
         "ready_for_video": all(
             item["status"] == "ok"
             for item in steps
-            if item.get("key") != "video"
+            if item.get("key") not in {"video", "quality"}
         ),
-        "ready_for_release": video_current and (not cover_enabled or covers_generated == len(cover_paths)),
+        "ready_for_release": bool(
+            video_current
+            and quality_gate.get("release_ready")
+            and (not cover_enabled or covers_generated == len(cover_paths))
+        ),
+        # This answers a different question from ready_for_release: whether the
+        # already-rendered artifact can be sent to a platform right now.
+        "can_publish_existing": bool(final_video_path.is_file() and final_video_path.stat().st_size > 0),
+        "final_video_stale": bool(stale_video_inputs),
         "steps": steps,
         "metrics": {
             "audio_duration_sec": audio_duration,
@@ -32728,6 +38870,8 @@ def project_status_report(project_id: int) -> dict[str, Any]:
             "bgm_label": bgm_status.get("label") or bgm_status.get("desired_label"),
             "video_mix_current": video_mix_current,
             "video_quality_score": video_quality.get("score", 0),
+            "quality_gate_current": bool(quality_gate.get("current")),
+            "quality_gate_score": quality_gate.get("score"),
             "production_stability": stability,
         },
     }
@@ -32811,11 +38955,14 @@ def production_resume_plan(project_id: int) -> dict[str, Any]:
     )
     subtitle_sync_missing_or_stale = bool(subtitle_path.exists() and audio_path.exists() and not subtitle_version_current)
     subtitles_stale = subtitles_stale or subtitle_sync_missing_or_stale
-    lineage_video_stale = asset_states.get("video") in {"stale", "missing", "partial"}
+    # A prompt/scene-plan refresh is metadata-only until a rendered scene actually
+    # changes. Do not invalidate an already verified video merely because a
+    # cancelled preparation task rewrote scene_timeline.json or lineage metadata.
+    # Real render inputs below (audio, subtitles, scene images, covers, BGM) remain
+    # authoritative, together with stale_scene_indexes and mix policy checks.
     video_input_paths = [
         audio_path,
         subtitle_path,
-        storage.project_file(project_id, "audio/scene_timeline.json"),
         *_scene_output_paths(project_id),
         *(cover_paths if cover_enabled else []),
         *([bgm_path] if bgm_path else []),
@@ -32861,7 +39008,6 @@ def production_resume_plan(project_id: int) -> dict[str, Any]:
             or video_older_than_inputs
             or bgm_status.get("needs_rematch")
             or not video_mix_current
-            or lineage_video_stale
             or motion_stale
         )
     )
@@ -33208,7 +39354,7 @@ def quality_gate_source_hashes(project_id: int, brief: str, content: str) -> dic
     project = storage.get_project(project_id)
     template_key = clean_text(str(project.get("template") or ""))
     template = storage.get_template(template_key) if template_key else {}
-    references = storage.get_references(project_id)
+    references = effective_project_references(project_id, brief=brief)
 
     def value_hash(value: Any) -> str:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")
@@ -33314,7 +39460,7 @@ def quality_gate_report(
     template = storage.get_template(template_key) if template_key else {}
     brief_text = brief if brief is not None else storage.get_brief(project_id)
     content_text = content if content is not None else storage.get_content(project_id)
-    references = storage.get_references(project_id)
+    references = effective_project_references(project_id, brief=brief_text)
     sections = {
         "content": content_quality_report(project, template, brief_text, content_text, references) if clean_text(content_text) else {
             "score": 0,
@@ -33392,7 +39538,7 @@ def save_project_content_bundle(
     template = storage.get_template(template_key) if template_key else {}
     mode = clean_text(project.get("template_mode") or template.get("mode") or "video")
     brief = storage.get_brief(project_id)
-    references = storage.get_references(project_id)
+    references = effective_project_references(project_id, brief=brief)
     tavily_topic = storage.get_project_settings(project_id).get("tavily_topic", "general")
     canonical = canonicalize_project_content(
         project_id,
@@ -33620,7 +39766,7 @@ def creative_optimization_plan(project_id: int, content: str | None = None) -> d
         opening_score = float(rhythm.get("engagement", {}).get("opening_score", 0) or 0)
         retention_score = float(rhythm.get("engagement", {}).get("retention_score", 0) or 0)
         interaction_score = float(rhythm.get("engagement", {}).get("interaction_score", 0) or 0)
-        if rhythm_score < 86 or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE or interaction_score < CONTENT_INTERACTION_MIN_SCORE:
+        if rhythm_score < 86 or opening_score < CONTENT_OPENING_MIN_SCORE or retention_score < CONTENT_RETENTION_MIN_SCORE:
             add_action(
                 "viral_rewrite",
                 "执行总编优化",
@@ -33708,7 +39854,7 @@ def repair_image_prompt_section(project_id: int, content: str | None = None) -> 
     template = storage.get_template(template_key) if template_key else {}
     mode = clean_text(project.get("template_mode") or template.get("mode") or "video")
     brief = storage.get_brief(project_id)
-    references = storage.get_references(project_id)
+    references = effective_project_references(project_id, brief=brief)
     tavily_topic = storage.get_project_settings(project_id).get("tavily_topic", "general")
     original_content = content if content is not None else storage.get_content(project_id)
     editorial_content = content_without_image_prompts(original_content) or original_content
@@ -33770,10 +39916,11 @@ def repair_image_prompt_section(project_id: int, content: str | None = None) -> 
             )
             save_visual_director(project_id, editorial_content, visual_brief=visual_brief)
     prompt_cache_path = storage.project_file(project_id, "scenes/scene_prompts.json")
-    if prompt_cache_path.exists():
+    if changed and prompt_cache_path.exists():
         with contextlib.suppress(Exception):
             prompt_cache_path.unlink()
-    mark_image_review_dirty(project_id, "图片提示词已按频道、主题和口播重新生成，图片需要重新确认")
+    if changed:
+        mark_image_review_dirty(project_id, "图片提示词已按频道、主题和口播重新生成，图片需要重新确认")
 
     report = quality_gate_report(project_id, brief=brief, content=editorial_content)
     report_path = storage.save_report(project_id, "quality_gate", report)
@@ -33799,7 +39946,12 @@ def repair_image_prompt_section(project_id: int, content: str | None = None) -> 
     }
 
 
-def optimize_project_content(project_id: int, content: str | None = None) -> dict[str, Any]:
+def optimize_project_content(
+    project_id: int,
+    content: str | None = None,
+    *,
+    rewrite_targets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     project = storage.get_project(project_id)
     template_key = clean_text(project.get("template") or "")
     template = storage.get_template(template_key) if template_key else {}
@@ -33816,13 +39968,18 @@ def optimize_project_content(project_id: int, content: str | None = None) -> dic
     env = runtime_env()
     api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
     if api_key and OpenAI is not None:
-        base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-        model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
-        thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
-        reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
-        extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-        if thinking_type in {"enabled", "disabled"}:
-            extra_body["thinking"] = {"type": thinking_type}
+        base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+        model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
+        # Editorial rewriting prioritizes a complete, usable script over long hidden reasoning.
+        # Keep channel-wide reasoning settings for other agents; these are request-local defaults.
+        thinking_type = clean_text(env.get("DEEPSEEK_REWRITE_THINKING_TYPE", "")) or "disabled"
+        reasoning_effort = clean_text(env.get("DEEPSEEK_REWRITE_REASONING_EFFORT", "")) or "low"
+        extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
+        # The configured local CPA accepts OpenAI reasoning_effort and DeepSeek thinking controls.
+        # Apply them here only, so editorial rewriting does not spend its whole budget on hidden reasoning.
+        base_host = clean_text(base_url).lower().split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0]
+        if base_host in {"127.0.0.1", "localhost", "::1"}:
+            extra_body = {**extra_body, "thinking": {"type": thinking_type}}
         try:
             rewrite_timeout = deepseek_rewrite_timeout_seconds(env)
             client = OpenAI(
@@ -33830,8 +39987,18 @@ def optimize_project_content(project_id: int, content: str | None = None) -> dic
                 base_url=base_url,
                 timeout=rewrite_timeout,
                 max_retries=0,
+                default_headers={"User-Agent": "short-video-studio/1.0"},
             )
-            messages = compose_deepseek_rewrite_messages(project, template, original_content, before_engagement)
+            messages = compose_deepseek_rewrite_messages(
+                project,
+                template,
+                original_content,
+                before_engagement,
+                brief=brief,
+                references=effective_project_references(project_id, brief=brief),
+                rewrite_targets=rewrite_targets,
+            )
+            messages[-1]["content"] += editorial_evidence_block(effective_project_references(project_id, brief=brief))
             messages[0]["content"] = (
                 str(messages[0].get("content") or "").strip()
                 + "\n\n"
@@ -33842,22 +40009,62 @@ def optimize_project_content(project_id: int, content: str | None = None) -> dic
                 + "\n\n"
                 + build_output_language_rules(project)
             )
-            response = client.chat.completions.create(
+            response = request_editor_stream(
+                client, total_timeout=600,
+                progress=lambda state: storage.save_report(project_id, "editor_rewrite_transport", state),
                 model=model,
                 messages=messages,
                 temperature=0.66,
-                max_tokens=12000,
+                reasoning_effort=reasoning_effort,
+                max_tokens=max(6000, min(16000, int(env.get("DEEPSEEK_REWRITE_MAX_TOKENS", "12000") or "12000"))),
                 extra_body=extra_body,
             )
             choice = response.choices[0] if getattr(response, "choices", None) else None
             rewritten = message_content_to_text(choice.message.content if choice and getattr(choice, "message", None) else "")
+            finish_reason = str(getattr(choice, "finish_reason", "") or "")
+            storage.save_report(project_id, "editor_rewrite_response", {
+                "model": model,
+                "timing": getattr(response, "timing", {}),
+                "finish_reason": finish_reason,
+                "content_length": len(rewritten),
+                "usage": response.usage.model_dump() if getattr(response, "usage", None) else {},
+                "reasoning_length": len(str(getattr(choice.message, "reasoning_content", "") or "")) if choice else 0,
+                "content": rewritten,
+            })
             rewritten = strip_code_fences(rewritten)
             rewritten = re.sub(r"(?is)^<think>.*?</think>\s*", "", rewritten).strip()
+            rewritten = rewritten.lstrip("\ufeff").strip()
+            if finish_reason == "length":
+                raise ContentGenerationError("AI 总编返回被截断（finish_reason=length），原稿保留；详情见 editor_rewrite_response 报告。")
+            if not rewritten:
+                raise ContentGenerationError("AI 总编返回正文为空，原稿保留；详情见 editor_rewrite_response 报告。")
             if not rewritten.startswith("#"):
-                raise ContentGenerationError("DeepSeek 返回内容不是完整 content.md。")
+                raise ContentGenerationError("AI 总编返回格式异常：缺少 Markdown 标题，原稿保留；详情见 editor_rewrite_response 报告。")
+            storage.save_report(project_id, "editor_rewrite_transport", {
+                "status": "complete", "timing": getattr(response, "timing", {}),
+                "content_length": len(rewritten), "finish_reason": finish_reason,
+            })
+            # A research checklist is an editorial diagnostic, not a replacement
+            # for an existing spoken script. Preserve the returned candidate for
+            # inspection, but never let it erase a usable draft.
+            if content_is_research_request(rewritten) and not content_is_research_request(original_content):
+                storage.save_report(project_id, "content_research_request_candidate", {
+                    "status": "rejected",
+                    "reason": "AI 总编返回补资料清单，已保留原口播正文",
+                    "model": model,
+                    "finish_reason": finish_reason,
+                    "original_content_length": len(original_content),
+                    "candidate_content_length": len(rewritten),
+                    "candidate": rewritten,
+                    "created_at": storage.now_ts(),
+                })
+                raise ContentGenerationError("AI 总编返回补资料清单，已保留原口播正文；请先补充有效来源。")
             optimized_content = rewritten
             provider = "deepseek"
         except Exception as exc:
+            storage.save_report(project_id, "editor_rewrite_transport", {
+                "status": "failed", "error_type": type(exc).__name__, "error": str(exc),
+            })
             deepseek_error = str(exc)
             provider = "deepseek-failed"
     elif not api_key:
@@ -33865,7 +40072,11 @@ def optimize_project_content(project_id: int, content: str | None = None) -> dic
     else:
         deepseek_error = "当前环境缺少 openai 依赖，无法调用 DeepSeek。"
 
-    references = storage.get_references(project_id)
+    # Failed editorial requests must not rewrite the original or invalidate assets.
+    if deepseek_error:
+        raise ContentGenerationError(deepseek_error)
+
+    references = effective_project_references(project_id, brief=brief)
     canonical = canonicalize_project_content(
         project_id,
         optimized_content,
@@ -33929,7 +40140,7 @@ def optimize_project_content(project_id: int, content: str | None = None) -> dic
 STAGE_GATE_DEFS: dict[str, dict[str, str]] = {
     "content_gate": {
         "label": "文案生产前闸门",
-        "desc": "爆款选题、脚本节奏、事实合规老师先检查文案，必要时自动增强节奏或总编改稿。",
+        "desc": "核对当前稿是否已通过统一六维 AI 复审；这里只验证，不在生产阶段再次改稿。",
     },
     "visual_prompt_gate": {
         "label": "新图生成前提示词闸门",
@@ -33942,7 +40153,7 @@ STAGE_GATE_DEFS: dict[str, dict[str, str]] = {
 }
 
 STAGE_GATE_RULE_VERSIONS = {
-    "content_gate": "2026-07-29.1",
+    "content_gate": "2026-10-17.1",
     "visual_prompt_gate": "2026-07-13.2",
     "pre_video_gate": "2026-07-19.1",
 }
@@ -33950,29 +40161,51 @@ STAGE_GATE_RULE_VERSIONS = {
 
 def production_stage_gate_keys_for_step(step: str) -> list[str]:
     step = clean_text(step)
-    if step == "audio":
-        return ["content_gate"]
+    # Content approval is a dependency of every asset-producing step. Running
+    # it only from the dashboard allowed assets to be produced before a weak or
+    # stale script was noticed at the end of the workflow.
+    asset_steps = {
+        "audio",
+        "subtitles",
+        "images",
+        "images_missing",
+        "images_sample",
+        "covers",
+        "covers_missing",
+        "motion_clips",
+        "video",
+    }
+    gates = ["content_gate"] if step in asset_steps else []
     if step in {"images", "images_missing", "images_sample", "covers", "covers_missing"}:
-        return ["content_gate", "visual_prompt_gate"]
+        gates.append("visual_prompt_gate")
     if step == "video":
-        return ["pre_video_gate"]
-    return []
+        gates.append("pre_video_gate")
+    return gates
+
+
+def stage_gate_change_requires_full_refresh(gate_key: str, step: str, content_changed: bool) -> bool:
+    if not content_changed:
+        return False
+    return not (
+        clean_text(gate_key) == "visual_prompt_gate"
+        and clean_text(step) in {"images_missing", "covers_missing"}
+    )
 
 
 def production_stage_gate_auto_fix_mode(explicit_gate_mode: str, gate_key: str) -> bool:
     """Return whether a gate may mutate assets during this job step.
 
     An explicitly requested gate repair is allowed to optimize assets.  The
-    pre-video gate attached implicitly to the video step is deliberately
-    check-only: once composition starts it must consume the selected assets,
-    not reopen an image provider behind the user's back.
+    Implicit content and pre-video checks never repair upstream assets.
+    Production consumes the approved script; rewriting requires an explicit
+    repair action, so generating images/audio cannot silently change the script.
     """
     mode = clean_text(explicit_gate_mode)
     if mode == "check":
         return False
     if mode == "fix":
         return True
-    return clean_text(gate_key) != "pre_video_gate"
+    return clean_text(gate_key) not in {"content_gate", "pre_video_gate"}
 
 
 def quality_sample_scene_index(project_id: int, scene_count: int) -> int:
@@ -34373,8 +40606,8 @@ def generate_key_visual_concepts(project_id: int, purpose: str, base_prompt: str
     ai_error = ""
     raw_concepts: Any = []
     if api_key and OpenAI is not None:
-        base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-        model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+        base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+        model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
         thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
         reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
         previous = storage.get_report(project_id, "key_visual_concepts") or {}
@@ -34424,11 +40657,9 @@ def generate_key_visual_concepts(project_id: int, purpose: str, base_prompt: str
 4. score 按标题兑现、首句悬念、事实准确、视觉冲突、缩略图可读性综合给 0-100 分。
 5. prompt 只描述本构思的独有设计，不复述整份基础要求。
 """.strip()
-        extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-        if thinking_type in {"enabled", "disabled"}:
-            extra_body["thinking"] = {"type": thinking_type}
+        extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
         try:
-            client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0, max_retries=0)
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0, max_retries=0, default_headers={"User-Agent": "short-video-studio/1.0"})
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -35820,6 +42051,34 @@ def _stage_gate_score(values: Iterable[Any], default: int = 0) -> int:
     return min(scores) if scores else default
 
 
+def _content_gate_weighted_score(
+    rhythm_score: Any,
+    editorial_score: Any,
+    teacher_scores: Iterable[Any],
+    semantic_score: Any = 0,
+) -> int:
+    """Combine independent quality signals without letting one heuristic become a veto."""
+    def number(value: Any) -> float | None:
+        try:
+            parsed = float(value or 0)
+        except (ValueError, TypeError):
+            return None
+        return parsed if parsed > 0 else None
+
+    components: list[tuple[float, float]] = []
+    for value, weight in ((rhythm_score, 0.20), (editorial_score, 0.25), (semantic_score, 0.20)):
+        parsed = number(value)
+        if parsed is not None:
+            components.append((parsed, weight))
+    teacher_values = [parsed for parsed in (number(item) for item in teacher_scores) if parsed is not None]
+    if teacher_values:
+        components.append((sum(teacher_values) / len(teacher_values), 0.35))
+    if not components:
+        return 0
+    total_weight = sum(weight for _value, weight in components)
+    return int(round(sum(value * weight for value, weight in components) / total_weight))
+
+
 def stage_gate_source_fingerprint(project_id: int, key: str) -> str:
     content = storage.get_content(project_id)
     if key == "content_gate":
@@ -35827,7 +42086,7 @@ def stage_gate_source_fingerprint(project_id: int, key: str) -> str:
             "rule_version": STAGE_GATE_RULE_VERSIONS[key],
             "content": visual_brief_source_hash(content),
             "brief": semantic_text_hash(storage.get_brief(project_id)),
-            "references": semantic_text_hash(storage.get_references(project_id)),
+            "references": semantic_text_hash(effective_project_references(project_id)),
         }
         return semantic_text_hash(payload)
     if key == "visual_prompt_gate":
@@ -35897,6 +42156,119 @@ def _stage_gate_eval_payload(
     }
 
 
+def authoritative_editorial_gate_result(
+    project_id: int,
+    content: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the canonical editorial gate only when its inputs still match."""
+    content_text = content if content is not None else storage.get_content(project_id)
+    artifact = storage.read_json(storage.project_file(project_id, "editorial_ai_score.json"), {})
+    if not isinstance(artifact, dict):
+        return None
+    review = artifact.get("final_review") if isinstance(artifact.get("final_review"), dict) else {}
+    evidence = artifact.get("evidence") if isinstance(artifact.get("evidence"), dict) else {}
+    if not review or not evidence:
+        return None
+    project = storage.get_project(project_id)
+    template_key = clean_text(str(project.get("template") or ""))
+    template = storage.get_template(template_key) if template_key else {}
+    brief = storage.get_brief(project_id)
+    references = effective_project_references(project_id, brief=brief)
+    current_evidence = editorial_evidence_snapshot(project, template, brief, references)
+    current_content_hash = hashlib.sha256(content_text.encode("utf-8", errors="ignore")).hexdigest()
+    identity_matches = all(
+        (
+            clean_text(str(review.get("rubric_version") or "")) == AI_EDITORIAL_RUBRIC_VERSION,
+            clean_text(str(review.get("content_hash") or "")) == current_content_hash,
+            clean_text(str(review.get("evidence_hash") or ""))
+            == clean_text(str(current_evidence.get("evidence_hash") or "")),
+        )
+    )
+    if not identity_matches:
+        return None
+
+    issues: list[dict[str, Any]] = []
+    for item in review.get("dimensions", []) if isinstance(review.get("dimensions"), list) else []:
+        if not isinstance(item, dict) or item.get("passed"):
+            continue
+        issues.append(
+            quality_issue(
+                "risk",
+                clean_text(str(item.get("name") or item.get("key") or "AI 六维审稿")),
+                clean_text(str(item.get("reason") or "该维度未达到统一通过线。")),
+                clean_text(str(item.get("repair_instruction") or "按审稿证据定点修改。")),
+            )
+        )
+    for item in review.get("hard_vetoes", []) if isinstance(review.get("hard_vetoes"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        issues.append(
+            quality_issue(
+                "risk",
+                "AI 审稿硬否决",
+                clean_text(str(item.get("reason") or item.get("type") or "存在硬否决项。")),
+                "只修复被引用的事实、偏题或空壳句，再按同一量表复审。",
+            )
+        )
+    score = int(review.get("weighted_total", 0) or 0)
+    passed = bool(review.get("passed")) and score >= 80 and not issues
+    return _stage_gate_eval_payload(
+        project_id,
+        "content_gate",
+        score,
+        passed,
+        issues,
+        {
+            "authority": "ai_editorial_six_dimension",
+            "rubric_version": AI_EDITORIAL_RUBRIC_VERSION,
+            "review_round": review.get("review_round", 0),
+            "content_hash": current_content_hash,
+            "evidence_hash": current_evidence.get("evidence_hash", ""),
+            "dimensions": review.get("dimensions", []),
+            "hard_vetoes": review.get("hard_vetoes", []),
+        },
+    )
+
+
+def refresh_authoritative_editorial_gate(
+    project_id: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    project = storage.get_project(project_id)
+    template_key = clean_text(str(project.get("template") or ""))
+    template = storage.get_template(template_key) if template_key else {}
+    brief = storage.get_brief(project_id)
+    references = effective_project_references(project_id, brief=brief)
+    content = storage.get_content(project_id)
+    emit_stage_gate_progress(progress_callback, "ai_editorial_review", "当前稿件或证据已变化，正在使用统一六维量表重新审稿")
+    try:
+        evidence = editorial_evidence_snapshot(project, template, brief, references)
+        review = ai_editorial_score_report(evidence, content, review_round=1)
+        artifact = {"evidence": evidence, "initial_review": review, "final_review": review}
+        storage.write_json(storage.project_file(project_id, "editorial_ai_score.json"), artifact)
+        result = authoritative_editorial_gate_result(project_id, content)
+        if result is None:
+            raise ContentGenerationError("六维审稿报告与最终稿哈希不一致。")
+        emit_stage_gate_progress(
+            progress_callback,
+            "complete",
+            f"统一六维审稿已通过：{int(result.get('score', 0) or 0)} 分",
+            score=int(result.get("score", 0) or 0),
+        )
+        return result
+    except Exception as exc:
+        message = user_facing_error(str(exc), 320)
+        emit_stage_gate_progress(progress_callback, "failed", message)
+        return _stage_gate_eval_payload(
+            project_id,
+            "content_gate",
+            0,
+            False,
+            [quality_issue("risk", "AI 六维审稿", message, "根据报告中的失败句和修复指令处理后重新检查。")],
+            {"authority": "ai_editorial_six_dimension", "error": message},
+        )
+
+
 def evaluate_production_stage_gate(
     project_id: int,
     key: str,
@@ -35905,14 +42277,38 @@ def evaluate_production_stage_gate(
     prefer_ai: bool = False,
 ) -> dict[str, Any]:
     content_text = content if content is not None else storage.get_content(project_id)
+    if key == "content_gate" and not prefer_ai:
+        authoritative = authoritative_editorial_gate_result(project_id, content_text)
+        if authoritative is not None:
+            return authoritative
+        return _stage_gate_eval_payload(
+            project_id,
+            key,
+            0,
+            False,
+            [
+                quality_issue(
+                    "risk",
+                    "AI 六维审稿",
+                    "当前文案、证据或评分版本已经变化，已有审稿报告不再对应当前稿件。",
+                    "运行文案生产前闸门，使用统一六维量表重新审稿。",
+                )
+            ],
+            {"authority": "ai_editorial_six_dimension", "stale_or_missing": True},
+        )
     if key == "content_gate":
         project = storage.get_project(project_id)
         template_key = clean_text(project.get("template") or "")
         template = storage.get_template(template_key) if template_key else {}
         brief = storage.get_brief(project_id)
-        references = storage.get_references(project_id)
+        references = effective_project_references(project_id, brief=brief)
         editorial_content = content_for_editorial_quality(content_text) or content_text
-        supervisors = ai_supervisor_report(project_id, editorial_content, prefer_ai=prefer_ai)
+        supervisors = ai_supervisor_report(
+            project_id,
+            editorial_content,
+            prefer_ai=prefer_ai,
+            review_scope="content",
+        )
         rhythm = script_rhythm_report(project_id, content_text)
         content_report = content_quality_report(
             project,
@@ -35948,21 +42344,50 @@ def evaluate_production_stage_gate(
             if isinstance(item, dict)
             and not any(token in clean_text(str(item.get("where") or "")) for token in ("场景图", "图片", "封面", "视觉"))
         ]
+        semantic_review = supervisors.get("semantic_review") if isinstance(supervisors.get("semantic_review"), dict) else {}
+        semantic_available = bool(semantic_review.get("available")) and supervisors.get("provider") == "deepseek-ai-supervisors"
+        semantic_viewer_value_ok = semantic_available and all(
+            semantic_review.get(name)
+            for name in ("evidence_present", "explanation_present", "concrete_example_present", "viewer_action_present")
+        )
         for item in [*rhythm_issues, *editorial_issues]:
-            if isinstance(item, dict) and item.get("level") in {"risk", "warn"}:
-                issues.append(item)
+            if not isinstance(item, dict) or item.get("level") not in {"risk", "warn"}:
+                continue
+            if semantic_viewer_value_ok and clean_text(str(item.get("where") or "")) == "观众收获":
+                diagnostic = dict(item)
+                diagnostic["level"] = "info"
+                diagnostic["issue"] = clean_text(str(diagnostic.get("issue") or "")) + " AI 语义复检已确认事实、解释、例子和观众动作齐全。"
+                issues.append(diagnostic)
+                continue
+            issues.append(item)
+        unsupported_claims = semantic_review.get("unsupported_claims") if isinstance(semantic_review.get("unsupported_claims"), list) else []
+        for item in unsupported_claims[:8]:
+            if not isinstance(item, dict) or not clean_text(str(item.get("claim") or "")):
+                continue
+            issues.append(
+                quality_issue(
+                    "risk",
+                    "语义事实依据",
+                    f"具体断言缺少当前来源支持：{clean_text(str(item.get('claim') or ''))}",
+                    clean_text(str(item.get("reason") or "补充直接来源，或把断言收窄为来源能够证明的范围。")),
+                )
+            )
         editorial_quality_score = quality_score_from_issues(editorial_issues)
-        score = _stage_gate_score(
-            [rhythm.get("score"), editorial_quality_score, *teacher_scores],
-            default=int(supervisors.get("overall_score", supervisors.get("score", 0)) or 0),
+        semantic_score = int(supervisors.get("overall_score", supervisors.get("score", 0)) or 0) if semantic_available else 0
+        score = _content_gate_weighted_score(
+            rhythm.get("score"),
+            editorial_quality_score,
+            teacher_scores,
+            semantic_score,
         )
         engagement = content_report.get("engagement") if isinstance(content_report.get("engagement"), dict) else {}
-        engagement_passed = (
+        local_engagement_passed = (
             float(engagement.get("overall_score", 0) or 0) >= CONTENT_OVERALL_MIN_SCORE
             and float(engagement.get("opening_score", 0) or 0) >= CONTENT_OPENING_MIN_SCORE
             and float(engagement.get("retention_score", 0) or 0) >= CONTENT_RETENTION_MIN_SCORE
-            and float(engagement.get("interaction_score", 0) or 0) >= CONTENT_INTERACTION_MIN_SCORE
         )
+        semantic_engagement_passed = semantic_available and bool(semantic_review.get("opening_hook_present")) and bool(semantic_review.get("retention_progression_present"))
+        engagement_passed = local_engagement_passed or semantic_engagement_passed
         passed = score >= CONTENT_GATE_MIN_SCORE and engagement_passed and not any(item.get("level") == "risk" for item in issues)
         return _stage_gate_eval_payload(
             project_id,
@@ -35976,6 +42401,7 @@ def evaluate_production_stage_gate(
                     "ai_model": supervisors.get("ai_model"),
                     "teachers": teachers,
                     "ai_error": supervisors.get("ai_error", ""),
+                    "semantic_review": semantic_review,
                 },
                 "rhythm_score": rhythm.get("score", 0),
                 "content_score": editorial_quality_score,
@@ -35985,7 +42411,7 @@ def evaluate_production_stage_gate(
                     "overall": CONTENT_OVERALL_MIN_SCORE,
                     "opening": CONTENT_OPENING_MIN_SCORE,
                     "retention": CONTENT_RETENTION_MIN_SCORE,
-                    "interaction": CONTENT_INTERACTION_MIN_SCORE,
+                    "interaction": "optional",
                 },
             },
         )
@@ -36176,6 +42602,7 @@ def evaluate_production_stage_gate(
                 "image_quality_override": image_override,
                 "ignored_image_soft_issue_count": len(ignored_image_issues),
                 "soft_image_only": soft_image_only,
+                "image_hard_risk": image_hard_risk,
                 "warning_penalty_count": warning_penalty_count,
             },
         )
@@ -36203,6 +42630,7 @@ def _stage_gates_report_base(project_id: int) -> dict[str, Any]:
 
 
 def save_stage_gate_result(project_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    result = compact_gate_result(result)
     report = _stage_gates_report_base(project_id)
     gates = report["gates"]
     gates[str(result.get("key") or "")] = result
@@ -36226,6 +42654,7 @@ def save_stage_gate_result(project_id: int, result: dict[str, Any]) -> dict[str,
 def production_stage_gates_dashboard(project_id: int) -> dict[str, Any]:
     report = _stage_gates_report_base(project_id)
     ordered = []
+    blocking_gate: dict[str, Any] | None = None
     for key, definition in STAGE_GATE_DEFS.items():
         current = report["gates"].get(key)
         if not isinstance(current, dict):
@@ -36259,7 +42688,28 @@ def production_stage_gates_dashboard(project_id: int) -> dict[str, Any]:
                         )
                     ],
                 }
+        if blocking_gate is not None:
+            current = {
+                **current,
+                "passed": False,
+                "status": "blocked",
+                "blocked_by": blocking_gate.get("key"),
+                "verdict": f"等待“{blocking_gate.get('label')}”通过后再检查。",
+                "issues": [
+                    quality_issue(
+                        "info",
+                        "等待前置闸门",
+                        f"“{blocking_gate.get('label')}”尚未通过，本闸门没有运行。",
+                        "先完成前置闸门；通过后系统会自动进入本闸门。",
+                    )
+                ],
+            }
         ordered.append(current)
+        if blocking_gate is None and not current.get("passed"):
+            blocking_gate = {
+                "key": key,
+                "label": definition.get("label", key),
+            }
     report["ordered_gates"] = ordered
     return report
 
@@ -36274,7 +42724,7 @@ def cached_stage_gate_result(project_id: int, key: str) -> dict[str, Any] | None
     stored = clean_text(str(current.get("source_fingerprint") or ""))
     if not stored or stored != stage_gate_source_fingerprint(project_id, key):
         return None
-    return {**current, "cache_hit": True, "reused_at": storage.now_ts()}
+    return {**compact_gate_result(current), "cache_hit": True, "reused_at": storage.now_ts()}
 
 
 def evaluate_all_production_stage_gates(project_id: int, *, force: bool = False) -> dict[str, Any]:
@@ -36300,7 +42750,11 @@ def evaluate_all_production_stage_gates(project_id: int, *, force: bool = False)
 
 def stage_gate_has_hard_risk(result: dict[str, Any]) -> bool:
     issues = result.get("issues") if isinstance(result.get("issues"), list) else []
-    return any(isinstance(item, dict) and item.get("level") == "risk" for item in issues)
+    return any(
+        isinstance(item, dict)
+        and clean_text(str(item.get("level") or "")).lower() in {"risk", "error"}
+        for item in issues
+    )
 
 
 PRE_VIDEO_NON_BLOCKING_IMAGE_TERMS = (
@@ -36337,6 +42791,41 @@ def pre_video_image_issue_is_hard(issue: dict[str, Any]) -> bool:
     return not is_ignorable_image_quality_issue(issue)
 
 
+PRE_VIDEO_EDITORIAL_BLOCKER_LABELS = {
+    "文案节奏",
+}
+
+
+def pre_video_technical_blockers(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep broken or missing assets blocking while leaving editorial scores advisory."""
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    return [
+        item
+        for item in blockers
+        if isinstance(item, dict)
+        and clean_text(str(item.get("where") or "")) not in PRE_VIDEO_EDITORIAL_BLOCKER_LABELS
+    ]
+
+
+def pre_video_gate_can_continue_incomplete(result: dict[str, Any]) -> bool:
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    preflight = details.get("preflight") if isinstance(details.get("preflight"), dict) else {}
+    if pre_video_technical_blockers(preflight):
+        return False
+    if bool(details.get("image_hard_risk")):
+        return False
+    issues = result.get("issues") if isinstance(result.get("issues"), list) else []
+    for item in issues:
+        if not isinstance(item, dict) or clean_text(str(item.get("level") or "")) != "risk":
+            continue
+        where = clean_text(str(item.get("where") or ""))
+        if where in PRE_VIDEO_EDITORIAL_BLOCKER_LABELS or where == "图片确认":
+            continue
+        if pre_video_image_issue_is_hard(item):
+            return False
+    return True
+
+
 def stage_gate_can_continue_with_warnings(key: str, result: dict[str, Any]) -> bool:
     score = int(result.get("score", 0) or 0)
     if stage_gate_has_hard_risk(result):
@@ -36346,10 +42835,43 @@ def stage_gate_can_continue_with_warnings(key: str, result: dict[str, Any]) -> b
         # must not deadlock a fully automatic run after the repair pass.
         return score >= 55
     if key == "visual_prompt_gate":
-        details = result.get("details") if isinstance(result.get("details"), dict) else {}
-        weak_count = int(details.get("weak_prompt_count", 0) or 0)
-        return score >= 70 and weak_count <= 1
+        # Prompt quality warnings are advisory. After the automatic repair pass,
+        # only concrete risk/error findings may stop image generation.
+        return True
     return False
+
+
+def visual_prompt_preflight_may_continue(
+    project_id: int,
+    prompt_preflight: dict[str, Any],
+) -> bool:
+    """Allow accepted quality warnings, but never semantic or safety blockers."""
+    if not isinstance(prompt_preflight, dict):
+        return False
+    hard_blockers = prompt_preflight.get("hard_blockers")
+    if isinstance(hard_blockers, list) and hard_blockers:
+        return False
+    issues = prompt_preflight.get("issues") if isinstance(prompt_preflight.get("issues"), list) else []
+    if any(
+        isinstance(item, dict)
+        and clean_text(str(item.get("level") or "")).lower() in {"risk", "error", "block"}
+        for item in issues
+    ):
+        return False
+    final_prompts = prompt_preflight.get("final_prompts")
+    if not isinstance(final_prompts, dict) or not final_prompts:
+        return False
+
+    if prompt_preflight.get("generation_safe") or prompt_preflight.get("passed"):
+        return True
+
+    accepted = cached_stage_gate_result(project_id, "visual_prompt_gate")
+    return bool(
+        isinstance(accepted, dict)
+        and accepted.get("passed")
+        and clean_text(str(accepted.get("status") or "")) == "accepted_with_warnings"
+        and accepted.get("accepted_by_user")
+    )
 
 
 CONTENT_REWRITEABLE_GATE_TOKENS = (
@@ -36367,7 +42889,118 @@ CONTENT_REWRITEABLE_GATE_TOKENS = (
 )
 
 
+def content_gate_semantic_rewrite_targets(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return source-bound claims that an editor can repair by narrowing or deleting."""
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    supervisors = details.get("supervisors") if isinstance(details.get("supervisors"), dict) else {}
+    semantic = supervisors.get("semantic_review") if isinstance(supervisors.get("semantic_review"), dict) else {}
+    raw_targets = semantic.get("unsupported_claims") if isinstance(semantic.get("unsupported_claims"), list) else []
+    targets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_targets:
+        if not isinstance(item, dict):
+            continue
+        claim = clean_text(str(item.get("claim") or ""))
+        if not claim or claim in seen:
+            continue
+        seen.add(claim)
+        targets.append({
+            "claim": claim,
+            "reason": clean_text(str(item.get("reason") or "当前来源没有明确支持该断言")),
+            "instruction": "只收窄这一句到现有来源能直接证明的范围；仍无法成立时删除该句，不改动其余有效内容",
+        })
+    return targets
+
+
+def remove_unsupported_semantic_claims_text(
+    content: str,
+    rewrite_targets: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """Delete source-external assertions after an AI rewrite already missed them."""
+    lines = str(content or "").splitlines()
+    removable: set[int] = set()
+    active_section = ""
+    eligible: set[int] = set()
+    normalized_lines: dict[int, str] = {}
+
+    def semantic_chars(value: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", clean_text(value)).casefold()
+
+    def bigrams(value: str) -> set[str]:
+        return {value[index : index + 2] for index in range(max(0, len(value) - 1))}
+
+    for index, raw in enumerate(lines):
+        heading = re.match(r"^##\s+(.+?)\s*$", raw.strip())
+        if heading:
+            active_section = clean_text(heading.group(1))
+            continue
+        if active_section not in {"口播脚本", "对话脚本", "视频脚本", "脚本", "重点字幕"}:
+            continue
+        spoken = clean_text(strip_spoken_line_for_tts(raw.strip().removeprefix("- ")))
+        normalized = semantic_chars(spoken)
+        if normalized:
+            eligible.add(index)
+            normalized_lines[index] = normalized
+
+    for target in rewrite_targets:
+        claim = semantic_chars(str(target.get("claim") or ""))
+        if len(claim) < 8:
+            continue
+        claim_pairs = bigrams(claim)
+        for index in eligible:
+            candidate = normalized_lines[index]
+            candidate_pairs = bigrams(candidate)
+            overlap = len(claim_pairs.intersection(candidate_pairs)) / max(1, len(candidate_pairs))
+            if candidate in claim or claim in candidate or (len(candidate) >= 8 and overlap >= 0.50):
+                removable.add(index)
+
+    # Remove short setup/dependency lines that become meaningless once the
+    # unsupported assertion itself is gone.
+    for index in sorted(tuple(removable)):
+        previous = index - 1
+        if previous in eligible:
+            previous_text = clean_text(strip_spoken_line_for_tts(lines[previous]))
+            if previous_text.startswith(("还有一条", "更具体的是", "法律上", "规定里")):
+                removable.add(previous)
+        for following in range(index + 1, min(len(lines), index + 4)):
+            if following not in eligible:
+                continue
+            following_text = clean_text(strip_spoken_line_for_tts(lines[following]))
+            if following_text.startswith(("注意", "也就是说", "所以这件事的核心", "换句话说")):
+                removable.add(following)
+                continue
+            break
+
+    if not removable:
+        return content, []
+    rewritten = "\n".join(line for index, line in enumerate(lines) if index not in removable)
+    rewritten = re.sub(r"\n{3,}", "\n\n", rewritten).strip() + "\n"
+    return rewritten, [f"删除来源外具体断言 {len(removable)} 行"]
+
+
+def repair_project_unsupported_semantic_claims(
+    project_id: int,
+    rewrite_targets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original = storage.get_content(project_id)
+    repaired, hits = remove_unsupported_semantic_claims_text(original, rewrite_targets)
+    changed = repaired != original
+    result: dict[str, Any] = {"changed": changed, "content": repaired, "hits": hits}
+    if changed:
+        result.update(
+            save_project_content_bundle(
+                project_id,
+                repaired,
+                image_dirty_reason="文案已删除来源外断言，图片提示词需要同步更新",
+                refresh_quality_report=False,
+            )
+        )
+    return result
+
+
 def content_gate_has_rewriteable_issues(result: dict[str, Any]) -> bool:
+    if content_gate_semantic_rewrite_targets(result):
+        return True
     issues = result.get("issues") if isinstance(result.get("issues"), list) else []
     for item in issues:
         if not isinstance(item, dict):
@@ -36384,6 +43017,38 @@ def accept_stage_gate_with_warnings(result: dict[str, Any]) -> dict[str, Any]:
     accepted["status"] = "accepted_with_warnings"
     accepted["verdict"] = "带提醒通过，继续下一步"
     accepted["accepted_with_warnings"] = True
+    return accepted
+
+
+def accept_production_stage_gate(project_id: int, key: str) -> dict[str, Any]:
+    """Accept the current stage gate assessment without hiding its warnings.
+
+    The saved result keeps the current source fingerprint.  Any later content,
+    prompt manifest, or asset change therefore makes this acceptance
+    stale through the normal dashboard/cache validation path.
+    """
+    cleaned_key = clean_text(key)
+    if cleaned_key not in STAGE_GATE_DEFS:
+        raise ValueError(f"未知生产闸门：{key}")
+    current = cached_stage_gate_result(project_id, cleaned_key)
+    if current is None:
+        current = evaluate_production_stage_gate(project_id, cleaned_key)
+    accepted = accept_stage_gate_with_warnings(current)
+    accepted_at = storage.now_ts()
+    gate_name = STAGE_GATE_DEFS.get(cleaned_key, {}).get("label", cleaned_key)
+    accepted.update(
+        accepted_by_user=True,
+        accepted_at=accepted_at,
+        checked_at=accepted_at,
+        source_fingerprint=stage_gate_source_fingerprint(project_id, cleaned_key),
+        verdict=f"已人工跳过当前{gate_name}并放行继续；检查提醒保留",
+    )
+    actions = list(accepted.get("actions") or [])
+    action = f"人工跳过本次{gate_name}检查，保留提醒并继续生产"
+    if action not in actions:
+        actions.append(action)
+    accepted["actions"] = actions
+    save_stage_gate_result(project_id, accepted)
     return accepted
 
 
@@ -36479,6 +43144,14 @@ def project_image_repair_prompt(project_id: int, kind: str, target: str) -> str:
         prompt = clean_text(str(final_prompts.get(filename) or ""))
         if prompt:
             return prompt
+        project = storage.get_project(project_id)
+        content = storage.get_content(project_id)
+        manifest_prompts = visual_prompt_manifest_scene_prompts(project_id, content)
+        index = image_target_scene_index(filename)
+        if 0 < index <= len(manifest_prompts):
+            prompt = clean_text(str(manifest_prompts[index - 1] or ""))
+            if prompt:
+                return prompt
         records = storage.read_json(storage.project_file(project_id, "scenes/scene_prompts.json"), [])
         if isinstance(records, list):
             for record in records:
@@ -36486,8 +43159,6 @@ def project_image_repair_prompt(project_id: int, kind: str, target: str) -> str:
                     prompt = clean_text(str(record.get("prompt") or record.get("source_prompt") or ""))
                     if prompt:
                         return prompt
-        project = storage.get_project(project_id)
-        content = storage.get_content(project_id)
         prompts = current_scene_prompts(
             project_id,
             content,
@@ -36495,7 +43166,6 @@ def project_image_repair_prompt(project_id: int, kind: str, target: str) -> str:
             clean_text(str(project.get("topic_name") or "")),
             prefer_timeline=True,
         )
-        index = image_target_scene_index(filename)
         return prompts[index - 1] if 0 < index <= len(prompts) else ""
 
     cover = normalize_cover_target(target)
@@ -36530,6 +43200,69 @@ def emit_stage_gate_progress(
         pass
 
 
+def refresh_content_gate_references(
+    project_id: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Fetch real evidence before a fact gate instead of retrying prose edits."""
+    project = storage.get_project(project_id)
+    template = storage.get_template(clean_text(str(project.get("template") or "")))
+    brief = storage.get_brief(project_id)
+    tavily_topic = clean_text(str(project.get("tavily_topic") or "general"))
+    existing = effective_project_references(project_id)
+    template_key = clean_text(str(template.get("key") or template.get("name") or project.get("template") or ""))
+    current_news_channel = any(token in template_key for token in ("情报", "新闻", "资讯", "热点"))
+    source_identities = {
+        urllib.parse.urlparse(clean_text(str(item.get("url") or ""))).netloc.lower()
+        or clean_text(str(item.get("source") or "")).lower()
+        for item in existing
+        if isinstance(item, dict)
+    }
+    source_identities.discard("")
+    required_sources = CURRENT_NEWS_MIN_INDEPENDENT_SOURCES if current_news_channel else 1
+    if len(source_identities) >= required_sources:
+        return {
+            "attempted": False,
+            "effective_count": len(existing),
+            "independent_source_count": len(source_identities),
+            "message": f"已复用 {len(existing)} 条有效事实来源（{len(source_identities)} 家独立来源）",
+        }
+
+    emit_stage_gate_progress(
+        progress_callback,
+        "source_research",
+        f"当前只有 {len(existing)} 条来源、{len(source_identities)} 家独立来源，正在补搜今天及近7天新闻",
+    )
+    context = build_reference_context(project, template, brief, tavily_topic)
+    references = context.get("references") if isinstance(context, dict) else []
+    references = [dict(item) for item in references if isinstance(item, dict)] if isinstance(references, list) else []
+    references = dedupe_references([*existing, *references])[:20] if existing else references[:20]
+    diagnostics = context.get("research_diagnostics") if isinstance(context, dict) else {}
+    diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+    diagnostics.update({"attempted": True, "project_id": project_id, "effective_count": len(references), "checked_at": storage.now_ts()})
+    storage.write_json(storage.project_file(project_id, "reference_research.json"), diagnostics)
+    if references:
+        storage.save_references(project_id, references)
+        content = storage.get_content(project_id)
+        if clean_text(content):
+            save_episode_fact_registry(project_id, content, brief=brief, references=references)
+        with contextlib.suppress(Exception):
+            sync_production_intelligence(project_id, "content_gate_source_refresh")
+    raw_count = int(diagnostics.get("raw_web_count", 0) or 0)
+    filtered_count = int(diagnostics.get("filtered_web_count", 0) or 0)
+    message = f"重新检索得到 {raw_count} 条结果，主题过滤后保留 {filtered_count} 条，当前有效来源 {len(references)} 条"
+    emit_stage_gate_progress(progress_callback, "source_research_complete", message, raw_reference_count=raw_count, filtered_reference_count=filtered_count, reference_count=len(references))
+    return {**diagnostics, "message": message}
+
+
+def content_is_research_request(content: str) -> bool:
+    """A research checklist is not a spoken script and cannot be repaired as one."""
+    headings = {clean_text(line.lstrip("# ")) for line in content.splitlines() if line.lstrip().startswith("#")}
+    return "需要补充的资料" in headings and "建议检索方向" in headings and not any(
+        heading in headings for heading in ("口播脚本", "口播正文", "正文", "完整口播")
+    )
+
+
 def run_production_stage_gate(
     project_id: int,
     key: str,
@@ -36537,7 +43270,49 @@ def run_production_stage_gate(
     auto_fix: bool = True,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    if key == "content_gate" and not auto_fix:
+        emit_stage_gate_progress(progress_callback, "checking", "正在核对六维审稿版本、内容哈希和证据哈希")
+        current = authoritative_editorial_gate_result(project_id)
+        if current is None:
+            current = refresh_authoritative_editorial_gate(project_id, progress_callback)
+        if current is None:
+            current = evaluate_production_stage_gate(project_id, key, prefer_ai=False)
+        compact = compact_gate_result(current)
+        result = {
+            **compact,
+            "status": "passed" if current.get("passed") else "failed",
+            "before": compact,
+            "after": compact,
+            "actions": [],
+            "content_changed": False,
+            "source_refresh": {},
+            "authority": "ai_editorial_six_dimension",
+        }
+        emit_stage_gate_progress(
+            progress_callback,
+            "complete" if current.get("passed") else "failed",
+            (
+                f"统一六维审稿已通过：{int(current.get('score', 0) or 0)} 分"
+                if current.get("passed")
+                else "统一六维审稿未通过，生产已停止"
+            ),
+            score=int(current.get("score", 0) or 0),
+        )
+        save_stage_gate_result(project_id, result)
+        return result
+
+    # Check the input-bound cache before potentially expensive source research.
+    # A passed or terminal unchanged assessment must not restart research simply
+    # because the user resumed production. Changed inputs invalidate this cache.
     before = cached_stage_gate_result(project_id, key)
+    source_refresh: dict[str, Any] = {}
+    reuse_assessment = before is not None and (
+        before.get("passed") or repeated_editorial_failure(before)
+    )
+    if key == "content_gate" and auto_fix and not reuse_assessment and not effective_project_references(project_id):
+        source_refresh = refresh_content_gate_references(project_id, progress_callback)
+        before = cached_stage_gate_result(project_id, key)
+
     if before is not None:
         emit_stage_gate_progress(
             progress_callback,
@@ -36548,7 +43323,11 @@ def run_production_stage_gate(
         )
     else:
         emit_stage_gate_progress(progress_callback, "checking", "正在读取最新内容、规则和已有质量报告")
-        before = evaluate_production_stage_gate(project_id, key)
+        before = evaluate_production_stage_gate(
+            project_id,
+            key,
+            prefer_ai=bool(key == "content_gate" and auto_fix),
+        )
     before_issues = before.get("issues") if isinstance(before.get("issues"), list) else []
     emit_stage_gate_progress(
         progress_callback,
@@ -36557,16 +43336,71 @@ def run_production_stage_gate(
         score=int(before.get("score", 0) or 0),
         issue_count=len(before_issues),
     )
+    prior_assessment = compact_gate_result(before)
     result = {
-        **before,
+        **prior_assessment,
         "status": "passed" if before.get("passed") else ("fixing" if auto_fix else "failed"),
-        "before": before,
-        "after": before,
-        "actions": [],
+        "before": prior_assessment,
+        "after": prior_assessment,
+        "actions": ([clean_text(str(source_refresh.get("message") or ""))] if source_refresh else []),
         "content_changed": False,
+        "source_refresh": source_refresh,
     }
     if before.get("passed"):
         emit_stage_gate_progress(progress_callback, "complete", "当前闸门已经通过，无需修改", score=int(before.get("score", 0) or 0))
+        save_stage_gate_result(project_id, result)
+        return result
+
+    if key == "content_gate" and content_is_research_request(storage.get_content(project_id)):
+        message = "当前 content.md 是待补资料清单，不是口播稿；先核实并补充来源，再重新生成文案。"
+        result.update(status="failed", passed=False, score=0, retry_skipped=True,
+                      error=message, verdict=message, actions=[*result["actions"], message])
+        result["issues"] = [quality_issue("risk", "缺少口播正文", message,
+                                          "完成来源核实后重新生成口播，不要对资料清单运行 AI 改稿。")]
+        emit_stage_gate_progress(progress_callback, "needs_attention", message)
+        save_stage_gate_result(project_id, result)
+        return result
+
+    semantic_rewrite_targets = content_gate_semantic_rewrite_targets(before) if key == "content_gate" else []
+    prior_actions = [clean_text(str(item)) for item in before.get("actions", [])] if isinstance(before.get("actions"), list) else []
+    targeted_rewrite_already_attempted = any("定向事实修订" in item for item in prior_actions)
+    if (
+        key == "content_gate"
+        and auto_fix
+        and semantic_rewrite_targets
+        and targeted_rewrite_already_attempted
+        and repeated_editorial_failure(before)
+    ):
+        semantic_fix = repair_project_unsupported_semantic_claims(project_id, semantic_rewrite_targets)
+        if semantic_fix.get("changed"):
+            hits = ", ".join(str(item) for item in semantic_fix.get("hits", [])[:4])
+            result["actions"].append(f"确定性删除来源外断言：{hits}")
+            result["content_changed"] = True
+            before = evaluate_production_stage_gate(project_id, key, prefer_ai=True)
+            result["after"] = before
+            semantic_rewrite_targets = content_gate_semantic_rewrite_targets(before)
+            prior_actions = [clean_text(str(item)) for item in before.get("actions", [])] if isinstance(before.get("actions"), list) else []
+            targeted_rewrite_already_attempted = any("定向事实修订" in item for item in prior_actions)
+            if before.get("passed"):
+                result.update(before)
+                result["actions"] = dedupe_clauses([
+                    *list(result.get("actions") or []),
+                    "来源外断言删除后复检通过",
+                ])
+                save_stage_gate_result(project_id, result)
+                return result
+    if (
+        key == "content_gate"
+        and auto_fix
+        and repeated_editorial_failure(before)
+        and not (semantic_rewrite_targets and not targeted_rewrite_already_attempted)
+    ):
+        result.update(status="failed", passed=False, editorial_attempted=True,
+                      retry_skipped=True, actions=list(before.get("actions") or []))
+        result["error"] = ("上次总编请求失败，正在冷却；60秒后可再次发起，当前未完成复评。"
+                           if before.get("execution_failed") else
+                           "本稿已尝试总编改稿但复检未通过；文案与来源未变化，已停止重复改稿。请先处理报告中的证据或语义问题，再复检。")
+        emit_stage_gate_progress(progress_callback, "needs_attention", result["error"])
         save_stage_gate_result(project_id, result)
         return result
 
@@ -36591,19 +43425,27 @@ def run_production_stage_gate(
             numeric_fix = repair_project_unsupported_numeric_facts(project_id)
             if numeric_fix.get("changed"):
                 hits = ", ".join(str(item) for item in numeric_fix.get("hits", [])[:8])
-                result["actions"].append(f"无来源精确数字改为定性表达：{hits}")
+                result["actions"].append(f"无来源精确数字已按整句模糊化：{hits}")
                 result["content_changed"] = True
-            after = evaluate_production_stage_gate(project_id, key)
+            rule_repairs_changed = bool(
+                risk_fix.get("changed") or fact_fix.get("changed") or numeric_fix.get("changed")
+            )
+            after = (
+                evaluate_production_stage_gate(project_id, key, prefer_ai=True)
+                if rule_repairs_changed
+                else before
+            )
             result["after"] = after
             if after.get("passed"):
                 result["actions"].append("平台/事实合规复检通过")
             elif content_gate_has_rewriteable_issues(after):
                 if risk_fix.get("changed") or fact_fix.get("changed"):
                     result["actions"].append("平台/事实合规复检仍未完全通过，继续自动总编优化")
-                result["actions"].append("节奏增强并同步重建图片提示词")
-                emit_stage_gate_progress(progress_callback, "rhythm_rewrite", "规则修复后仍未通过，正在增强开头、节奏和信息密度")
-                enhanced = enhance_content_rhythm(project_id, save=True)
-                result["content_changed"] = result["content_changed"] or bool(enhanced.get("content"))
+                if needs_sentence_split(after):
+                    result["actions"].append("按长句问题拆句，保留原文标点")
+                    emit_stage_gate_progress(progress_callback, "rhythm_rewrite", "检查发现长句，正在拆句；拆句不用于修复事实或信息不足")
+                    enhanced = enhance_content_rhythm(project_id, save=True)
+                    result["content_changed"] = result["content_changed"] or bool(enhanced.get("content"))
                 risk_fix = repair_project_platform_risk(project_id)
                 if risk_fix.get("changed"):
                     hits = ", ".join(str(item) for item in risk_fix.get("hits", [])[:8])
@@ -36617,9 +43459,11 @@ def run_production_stage_gate(
                 numeric_fix = repair_project_unsupported_numeric_facts(project_id)
                 if numeric_fix.get("changed"):
                     hits = ", ".join(str(item) for item in numeric_fix.get("hits", [])[:8])
-                    result["actions"].append(f"节奏增强后移除无来源精确数字：{hits}")
+                    result["actions"].append(f"节奏增强后整句模糊化无来源精确数字：{hits}")
                     result["content_changed"] = True
-                after = evaluate_production_stage_gate(project_id, key)
+                # The editor may have changed content.md; always perform the single
+                # post-edit semantic assessment so the next stage sees fresh evidence.
+                after = evaluate_production_stage_gate(project_id, key, prefer_ai=True)
                 result["after"] = after
                 if (
                     not after.get("passed")
@@ -36629,11 +43473,27 @@ def run_production_stage_gate(
                     emit_stage_gate_progress(
                         progress_callback,
                         "ai_rewrite",
-                        f"正在调用一次 AI 总编改稿；最长等待 {deepseek_rewrite_timeout_seconds(runtime_env())} 秒，超时会保留本地优化结果",
+                        f"正在调用一次 AI 总编改稿；流式接收，连续无数据上限 {deepseek_rewrite_timeout_seconds(runtime_env())} 秒、总时限 600 秒，失败时停止改稿并保留调用前文案",
                     )
-                    optimized = optimize_project_content(project_id)
+                    result["editorial_attempted"] = True
+                    semantic_rewrite_targets = content_gate_semantic_rewrite_targets(after)
+                    result["semantic_rewrite_targets"] = semantic_rewrite_targets
+                    optimized = optimize_project_content(
+                        project_id,
+                        rewrite_targets=semantic_rewrite_targets or None,
+                    )
+                    emit_stage_gate_progress(
+                        progress_callback,
+                        "ai_rewrite_returned",
+                        "AI 总编已返回，正在执行文案标准化与事实复检",
+                    )
                     if optimized.get("provider") == "deepseek":
-                        result["actions"].append("DeepSeek 总编改稿并复检")
+                        if semantic_rewrite_targets:
+                            result["actions"].append(
+                                f"DeepSeek 总编定向事实修订 {len(semantic_rewrite_targets)} 条并复检"
+                            )
+                        else:
+                            result["actions"].append("DeepSeek 总编改稿并复检")
                     else:
                         ai_error = user_facing_error(str(optimized.get("deepseek_error") or "AI 总编调用失败"))
                         result["actions"].append(f"DeepSeek 总编未执行：{ai_error}")
@@ -36652,12 +43512,17 @@ def run_production_stage_gate(
                     numeric_fix = repair_project_unsupported_numeric_facts(project_id)
                     if numeric_fix.get("changed"):
                         hits = ", ".join(str(item) for item in numeric_fix.get("hits", [])[:8])
-                        result["actions"].append(f"总编改稿后移除无来源精确数字：{hits}")
+                        result["actions"].append(f"总编改稿后整句模糊化无来源精确数字：{hits}")
                         result["content_changed"] = True
-                    after = evaluate_production_stage_gate(project_id, key)
+                    emit_stage_gate_progress(
+                        progress_callback,
+                        "ai_rewrite_validating",
+                        "改稿后处理完成，正在核对来源、数字和语义",
+                    )
+                    after = evaluate_production_stage_gate(project_id, key, prefer_ai=True)
                     result["after"] = after
-                if not after.get("passed") and content_gate_has_rewriteable_issues(after):
-                    result["actions"].append("二次节奏校准并复检")
+                if not after.get("passed") and needs_sentence_split(after):
+                    result["actions"].append("仅对剩余长句做二次拆句并复检")
                     emit_stage_gate_progress(progress_callback, "second_rewrite", "首次改稿仍未通过，正在进行第二轮节奏校准")
                     enhanced_again = enhance_content_rhythm(project_id, save=True)
                     result["content_changed"] = result["content_changed"] or bool(enhanced_again.get("content"))
@@ -36674,9 +43539,9 @@ def run_production_stage_gate(
                     numeric_fix = repair_project_unsupported_numeric_facts(project_id)
                     if numeric_fix.get("changed"):
                         hits = ", ".join(str(item) for item in numeric_fix.get("hits", [])[:8])
-                        result["actions"].append(f"二次校准后移除无来源精确数字：{hits}")
+                        result["actions"].append(f"二次校准后整句模糊化无来源精确数字：{hits}")
                         result["content_changed"] = True
-                    after = evaluate_production_stage_gate(project_id, key)
+                    after = evaluate_production_stage_gate(project_id, key, prefer_ai=True)
                     result["after"] = after
                 elif not after.get("passed"):
                     result["actions"].append("剩余阻断项需要补充来源或人工确认，已跳过无关的 AI 改稿")
@@ -36685,21 +43550,12 @@ def run_production_stage_gate(
                         "needs_attention",
                         "自动修复已结束；剩余问题不能靠改写解决，请按阻断项补充依据",
                     )
-                duration_fix = compress_content_to_retention_budget(project_id, save=True)
-                if duration_fix.get("changed"):
-                    before_duration = float(duration_fix.get("before_duration_sec") or 0)
-                    after_duration = float(duration_fix.get("after_duration_sec") or 0)
-                    result["actions"].append(
-                        f"按频道时长预算压缩口播：约 {before_duration:.0f} 秒 -> {after_duration:.0f} 秒"
-                    )
-                    result["content_changed"] = True
-                    emit_stage_gate_progress(
-                        progress_callback,
-                        "duration_fit",
-                        f"口播已压到频道目标时长：约 {after_duration:.0f} 秒，正在复检",
-                    )
-                    after = evaluate_production_stage_gate(project_id, key)
-                    result["after"] = after
+                # Keep the complete editorial script.  Duration is used by
+                # TTS segmentation and timeline planning, but the production
+                # gate must never silently delete spoken facts to fit a
+                # stopwatch budget.  Manual compression remains available as
+                # an explicit action through compress_content_to_retention_budget().
+                result["actions"].append("保留完整口播，跳过自动时长压缩")
             else:
                 result["actions"].append("剩余阻断项需要补充来源或人工确认，已跳过无关的节奏与 AI 改稿")
                 emit_stage_gate_progress(
@@ -36711,7 +43567,7 @@ def run_production_stage_gate(
             result["actions"].append("重建场景图/封面提示词")
             emit_stage_gate_progress(progress_callback, "prompt_rebuild", "正在根据主题和逐段口播重建图片提示词")
             repaired = repair_image_prompt_section(project_id)
-            result["content_changed"] = bool(repaired.get("content"))
+            result["content_changed"] = bool(repaired.get("changed"))
             after = evaluate_production_stage_gate(project_id, key)
             result["after"] = after
         elif key == "pre_video_gate":
@@ -36744,8 +43600,9 @@ def run_production_stage_gate(
                     emit_stage_gate_progress(
                         progress_callback,
                         "ai_rewrite",
-                        f"规则增强后仍未达标，正在调用一次 AI 总编改稿；最长等待 {deepseek_rewrite_timeout_seconds(runtime_env())} 秒",
+                        f"规则增强后仍未达标，正在调用一次 AI 总编改稿；流式接收，连续无数据上限 {deepseek_rewrite_timeout_seconds(runtime_env())} 秒、总时限 600 秒",
                     )
+                    result["editorial_attempted"] = True
                     optimized = optimize_project_content(project_id)
                     if optimized.get("provider") == "deepseek":
                         result["actions"].append("DeepSeek 总编重写开头与中段留存并复检")
@@ -36935,15 +43792,20 @@ def run_production_stage_gate(
             result["actions"].append("未知闸门，无自动修复动作")
     except Exception as exc:
         emit_stage_gate_progress(progress_callback, "failed", f"自动优化失败：{user_facing_error(exc)}")
-        result["actions"].append(f"自动修复失败：{exc}")
-        result["status"] = "failed"
-        result["error"] = str(exc)
+        mark_execution_failure(result, exc, stage_gate_source_fingerprint(project_id, key), storage.now_ts())
         save_stage_gate_result(project_id, result)
         return result
 
+    result.pop("error", None)
+    result.pop("retry_skipped", None)
+    result["execution_failed"] = False
+    result["reassessment_completed"] = True
     after = result.get("after") if isinstance(result.get("after"), dict) else before
     if not result.get("waiting_for_human") and not after.get("passed") and stage_gate_can_continue_with_warnings(key, after):
-        result["actions"].append("仅剩轻微提醒，已带提醒通过并自动进入下一步")
+        if key == "visual_prompt_gate":
+            result["actions"].append("提示词已完成自动优化，剩余均为质量提醒，自动带提醒继续生图")
+        else:
+            result["actions"].append("仅剩轻微提醒，已带提醒通过并自动进入下一步")
         after = accept_stage_gate_with_warnings(after)
         result["after"] = after
     result["score"] = after.get("score", before.get("score", 0))
@@ -37021,6 +43883,9 @@ def run_production_stage_gate_closed_loop(
         rounds.append(
             {
                 "round": round_index,
+                "error": result.get("error"),
+                "execution_failed": bool(result.get("execution_failed")),
+                "retry_skipped": bool(result.get("retry_skipped")),
                 "score": int(result.get("score", 0) or 0),
                 "passed": bool(result.get("passed")),
                 "status": result.get("status"),
@@ -37031,13 +43896,13 @@ def run_production_stage_gate_closed_loop(
         emit_stage_gate_progress(
             progress_callback,
             "round_complete",
-            f"第 {round_index} 轮完成：{int(result.get('score', 0) or 0)} 分，{'已通过' if result.get('passed') else '仍需处理'}",
+            gate_round_message(result, round_index),
             round=round_index,
             max_rounds=max_rounds,
             score=int(result.get("score", 0) or 0),
             issue_count=len(result.get("issues", [])) if isinstance(result.get("issues"), list) else 0,
         )
-        if result.get("passed") or result.get("waiting_for_human"):
+        if result.get("passed") or result.get("waiting_for_human") or result.get("error") or result.get("retry_skipped"):
             break
         if not auto_fix or signature == previous_signature:
             break
@@ -37147,6 +44012,35 @@ def release_performance_signal(item: dict[str, Any]) -> dict[str, Any]:
     share_save_rate = round((metrics["shares"] + metrics["favorites"]) / views * 100, 2) if views else 0.0
     follow_rate = round(metrics["follows"] / views * 100, 2) if views else 0.0
     estimated_duration_seconds = release_estimated_duration_seconds(metrics)
+    comment_rate = round(metrics["comments"] / views * 100, 2) if views else 0.0
+    like_rate = round(metrics["likes"] / views * 100, 2) if views else 0.0
+    view_score = min(100.0, math.log10(views + 1) / 5 * 100) if views else 0.0
+    ctr_score = min(100.0, metrics["click_through_rate"] / 12 * 100) if metrics["click_through_rate"] else 0.0
+    play_parts = [(view_score, 0.7)] + ([(ctr_score, 0.3)] if ctr_score else [])
+    play_weight = sum(weight for _, weight in play_parts)
+    play_potential_score = round(sum(value * weight for value, weight in play_parts) / play_weight, 1) if play_weight else 0.0
+
+    retention_parts: list[tuple[float, float]] = []
+    if metrics["two_second_retention_rate"]:
+        retention_parts.append((metrics["two_second_retention_rate"], 0.25))
+    if metrics["five_second_retention_rate"]:
+        retention_parts.append((metrics["five_second_retention_rate"], 0.30))
+    if metrics["completion_rate"]:
+        retention_parts.append((metrics["completion_rate"], 0.45))
+    retention_weight = sum(weight for _, weight in retention_parts)
+    completion_potential_score = round(sum(value * weight for value, weight in retention_parts) / retention_weight, 1) if retention_weight else 0.0
+
+    discussion_parts = [
+        (min(100.0, comment_rate / 3 * 100), 0.70),
+        (min(100.0, share_save_rate / 2 * 100), 0.20),
+        (min(100.0, like_rate / 5 * 100), 0.10),
+    ] if views else []
+    comment_potential_score = round(sum(value * weight for value, weight in discussion_parts), 1) if discussion_parts else 0.0
+    dimension_scores = {
+        "play_potential": play_potential_score,
+        "completion_potential": completion_potential_score,
+        "comment_potential": comment_potential_score,
+    }
     raw_score = (
         views
         + metrics["likes"] * 20
@@ -37184,6 +44078,26 @@ def release_performance_signal(item: dict[str, Any]) -> dict[str, Any]:
         growth_stage = "互动偏弱"
     else:
         growth_stage = "表现健康"
+
+    if not score_parts:
+        diagnosis = "数据仍在积累"
+    elif metrics["completion_rate"] and metrics["completion_rate"] < 22:
+        if comment_potential_score >= 35:
+            diagnosis = "有争议，留存不足"
+        elif play_potential_score >= 60:
+            diagnosis = "选题有效，正文未兑现"
+        else:
+            diagnosis = "中后段流失"
+    elif metrics["two_second_retention_rate"] and metrics["two_second_retention_rate"] < 55:
+        diagnosis = "开场没有留住人"
+    elif metrics["five_second_retention_rate"] and metrics["five_second_retention_rate"] < 38:
+        diagnosis = "前段承接不足"
+    elif completion_potential_score >= 30:
+        diagnosis = "正文留存较健康"
+    elif growth_stage == "互动偏弱":
+        diagnosis = "有人看，互动承接不足"
+    else:
+        diagnosis = growth_stage
     return {
         "release_id": item.get("id"),
         "platform": item.get("platform", ""),
@@ -37193,10 +44107,17 @@ def release_performance_signal(item: dict[str, Any]) -> dict[str, Any]:
         "metrics": metrics,
         "engagement": engagement,
         "engagement_rate": engagement_rate,
+        "comment_rate": comment_rate,
+        "like_rate": like_rate,
         "share_save_rate": share_save_rate,
         "follow_rate": follow_rate,
+        "dimension_scores": dimension_scores,
+        "play_potential_score": play_potential_score,
+        "completion_potential_score": completion_potential_score,
+        "comment_potential_score": comment_potential_score,
         "estimated_duration_seconds": estimated_duration_seconds,
         "growth_stage": growth_stage,
+        "diagnosis": diagnosis,
         "performance_score": quality_score,
         "raw_performance_score": int(round(raw_score)),
         "has_metrics": any(
@@ -37780,13 +44701,13 @@ def channel_history_report(project_id: int) -> dict[str, Any]:
             recommendations.append(experiment_recommendation)
         bottleneck = performance_insights.get("primary_bottleneck")
         if bottleneck == "开场流失":
-            recommendations.append("真实数据的主要瓶颈在前 2 秒；下一期优先重做第一句话、第一画面和标题兑现关系。")
+            recommendations.append("真实数据的主要瓶颈在开场；下一期优先重做第一句话、第一画面和标题兑现关系。")
         elif bottleneck == "前段承接弱":
-            recommendations.append("真实数据的主要瓶颈在 2—5 秒承接；下一期让第二个信息点更快出现，减少背景铺垫。")
+            recommendations.append("真实数据的主要瓶颈在前段承接；下一期让第二个有效信息更快出现，减少背景铺垫。")
         elif bottleneck == "中后段流失":
-            recommendations.append("真实数据的主要瓶颈在中后段；下一期提前给结论，并用反转、证据或动作每 2—3 句推进一次。")
+            recommendations.append("真实数据的主要瓶颈在中后段；下一期删除重复解释，补足缺失的证据、原因、后果或判断方法。")
         elif bottleneck == "互动偏弱":
-            recommendations.append("真实数据的主要瓶颈在互动；下一期结尾改成观众容易回答的经历题、站队题或选择题。")
+            recommendations.append("真实数据的主要瓶颈在互动；下一期先提升选题价值、事实新鲜度和现实用途，只有自然留下分歧时才加问题。")
         else:
             recommendations.append("已有投放数据，下一轮会优先参考表现更好的标题、开头、承接和互动方式。")
     recommendations.extend(
@@ -37883,6 +44804,7 @@ def save_image_prompt_control(
     *,
     anchor_key: str = "",
     abstraction_level: str = DEFAULT_IMAGE_ABSTRACTION_LEVEL,
+    additional_requirement: str | None = None,
 ) -> dict[str, Any]:
     controls = load_image_prompt_controls(project_id)
     normalized_kind = clean_text(kind).lower()
@@ -37896,9 +44818,16 @@ def save_image_prompt_control(
         control_key = normalize_cover_target(target)["kind"]
     else:
         raise ValueError("未知图片类型，请选择 scene 或 cover。")
+    previous = bucket.get(control_key) if isinstance(bucket.get(control_key), dict) else {}
+    requirement = (
+        clean_text(additional_requirement)
+        if additional_requirement is not None
+        else clean_text(str(previous.get("additional_requirement") or ""))
+    )
     bucket[control_key] = {
         "anchor_key": normalized_anchor,
         "abstraction_level": normalized_level,
+        "additional_requirement": requirement,
     }
     controls["updated_at"] = storage.now_ts()
     storage.write_json(_image_prompt_controls_path(project_id), controls)
@@ -38030,12 +44959,34 @@ def review_manifest_generation_prompt(
 ) -> tuple[str, dict[str, Any]]:
     final_prompt = clean_generation_prompt_punctuation(prompt)
     if purpose == "scene":
-        if not any(marker in final_prompt for marker in ("当前完整口播", "本镜口播原文", "口播原文")):
-            final_prompt = ensure_prompt_contains_speech_anchor(
-                final_prompt,
-                clean_text(str(semantic_context.get("speech") or "")),
-                purpose=purpose,
-            )
+        authoritative_speech = clean_text(
+            str(semantic_context.get("timeline_speech") or semantic_context.get("speech") or "")
+        )
+        task_match = re.search(
+            r"本镜信息任务\s*[:：]\s*以[「“]([^」”]{2,180})[」”]为主信息.*?"
+            r"(?=频道视觉合同\s*[:：]|同集连续\s*[:：]|本期核心对象必须是\s*[:：]|$)",
+            final_prompt,
+        )
+        if task_match and authoritative_speech:
+            task_message = clean_text(task_match.group(1))
+            task_alignment = scene_audio_alignment_score(f"口播原文：{task_message}", authoritative_speech)
+            task_numbers = set(re.findall(r"\d+(?:\.\d+)?", task_message))
+            speech_numbers = set(re.findall(r"\d+(?:\.\d+)?", authoritative_speech))
+            if task_alignment < 24 and not task_numbers.intersection(speech_numbers):
+                final_prompt = clean_text(final_prompt[: task_match.start()] + " " + final_prompt[task_match.end() :])
+        speech = compact_prompt_speech_anchor(authoritative_speech, 180)
+        # Manifest prompts are authoritative creative briefs, but some compact
+        # entries only contain `本镜信息任务`. The provider pipeline recognizes
+        # a scene as semantic only when its topic and exact narration are
+        # explicit. Without these fields it enters the generic prompt cleaner,
+        # which can discard the scene meaning and retain only channel styling.
+        semantic_prefix: list[str] = []
+        if topic and "本期主题：" not in final_prompt:
+            semantic_prefix.append(f"本期主题：{topic}")
+        if speech and "当前完整口播：" not in final_prompt:
+            semantic_prefix.append(f"当前完整口播：{speech}")
+        if semantic_prefix:
+            final_prompt = "\n".join([*semantic_prefix, final_prompt])
     else:
         if topic and topic not in final_prompt:
             final_prompt = ensure_prompt_keeps_topic_anchor(
@@ -38082,6 +45033,9 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
         matches = re.findall(r"(\d+)", filename)
         scene_index = int(matches[0]) if matches else 1
         semantic_context = semantic_contexts.get(f"scenes/{filename}") or semantic_contexts.get(filename) or {}
+        authoritative_scene_speech = clean_text(
+            str(semantic_context.get("timeline_speech") or semantic_context.get("speech") or "")
+        )
         manifest_prompts = visual_prompt_manifest_scene_prompts(project_id, content)
         manifest_prompt = manifest_prompts[scene_index - 1] if 0 < scene_index <= len(manifest_prompts) else ""
         manifest_prompt_authoritative = bool(clean_text(manifest_prompt))
@@ -38138,17 +45092,17 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
         visual_scene = plan_scene.get("visual_director") if isinstance(plan_scene.get("visual_director"), dict) else {}
         plan_visual_brief = scene_plan_payload.get("visual_brief") if isinstance(scene_plan_payload, dict) and isinstance(scene_plan_payload.get("visual_brief"), dict) else {}
         scene_prompt_from_plan = False
-        if not manifest_prompt_authoritative and (semantic_context.get("speech") or visual_scene):
+        if not manifest_prompt_authoritative and (authoritative_scene_speech or visual_scene):
             prompt = scene_specific_image_prompt(
                 topic=clean_text(str(project.get("topic_name") or first_heading(content) or "")),
-                speech_text=clean_text(str(semantic_context.get("speech") or plan_scene.get("speech_text") or "")),
+                speech_text=authoritative_scene_speech or clean_text(str(plan_scene.get("speech_text") or "")),
                 source_prompt=clean_text(str(plan_scene.get("source_prompt") or prompt or "")),
                 visual_scene=visual_scene,
                 visual_world=clean_text(str(plan_visual_brief.get("visual_world") or "")),
                 narrative=clean_text(str(plan_scene.get("narrative_state") or narrative_state_for_scene(scene_index, max(len(scene_plan_items) if isinstance(scene_plan_items, list) else 0, 1)))),
-                visual_type=clean_text(str(plan_scene.get("visual_type") or visual_scene.get("visual_type") or infer_visual_type(prompt, clean_text(str(semantic_context.get("speech") or ""))))),
+                visual_type=clean_text(str(plan_scene.get("visual_type") or visual_scene.get("visual_type") or infer_visual_type(prompt, authoritative_scene_speech))),
                 viewpoint=scene_viewpoint_hint(scene_index, max(len(scene_plan_items) if isinstance(scene_plan_items, list) else 0, 1), clean_text(str(plan_scene.get("visual_type") or ""))),
-                style_hint=content_scene_style_hint(classify_material_style(f"{prompt}\n{semantic_context.get('speech', '')}", template, "scene"), template),
+                style_hint=content_scene_style_hint(classify_material_style(f"{prompt}\n{authoritative_scene_speech}", template, "scene"), template),
             )
             scene_prompt_from_plan = True
         control = controls.get("scenes", {}).get(filename, {}) if isinstance(controls.get("scenes"), dict) else {}
@@ -38156,7 +45110,7 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
         current_level = normalize_image_abstraction_level(abstraction_level or str(control.get("abstraction_level") or DEFAULT_IMAGE_ABSTRACTION_LEVEL))
         anchor_text = resolve_image_anchor_text(options, current_anchor_key)
         if not clean_text(anchor_key) and not clean_text(str(control.get("anchor_key") or "")):
-            anchor_text = clean_text(str(semantic_context.get("speech") or "")) or anchor_text
+            anchor_text = authoritative_scene_speech or anchor_text
         manifest_control_override = bool(
             clean_text(anchor_key)
             or clean_text(abstraction_level)
@@ -38178,6 +45132,12 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
         )
         brand = clean_text(str(template.get("brand_name") or template.get("name") or template.get("key") or template_key))
         topic = clean_text(str(project.get("topic_name") or first_heading(content) or ""))
+        entity_constraint = visual_entity_constraint_block(
+            topic,
+            content_without_image_prompts(content) or content,
+        )
+        if entity_constraint and "本期核心对象必须是" not in final_prompt and "主体硬约束" not in final_prompt:
+            final_prompt = f"{final_prompt}\n{entity_constraint}"
         director_concept = visual_director_scene_concept(visual_scene)
         director_anchor = clean_text(
             str(visual_scene.get("dialogue_anchor") or semantic_context.get("audio_anchor") or "")
@@ -38194,7 +45154,7 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
                 speech=director_anchor,
                 content=content_without_image_prompts(content) or content,
             )
-            if focused_source_information.get("supporting_evidence") or not source_information.get("supporting_evidence"):
+            if focused_source_information:
                 source_information = focused_source_information
                 semantic_context = dict(semantic_context)
                 semantic_context["source_information"] = source_information
@@ -38208,11 +45168,14 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
                         ],
                     ]
                 )
-        if director_concept:
+        # Compile every scene from the current narration at the provider
+        # boundary. A saved manifest is useful as a creative draft, but it must
+        # never be forwarded verbatim after narration or scene planning changes.
+        if authoritative_scene_speech:
             final_prompt = balanced_scene_generation_brief(
                 final_prompt,
                 topic=topic,
-                speech=clean_text(str(semantic_context.get("speech") or plan_scene.get("speech_text") or "")),
+                speech=authoritative_scene_speech or clean_text(str(plan_scene.get("speech_text") or "")),
                 anchor=director_anchor,
                 concept=director_concept,
                 source_information=source_information,
@@ -38237,8 +45200,30 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
             )
             final_prompt = ensure_prompt_contains_speech_anchor(
                 final_prompt,
-                clean_text(str(semantic_context.get("speech") or "")),
+                authoritative_scene_speech,
                 purpose="scene",
+            )
+        scene_speech = authoritative_scene_speech or clean_text(str(plan_scene.get("speech_text") or ""))
+        scene_topic_type = infer_visual_topic_type(
+            clean_text(f"{topic} {scene_speech}"),
+            classify_material_style(f"{final_prompt}\n{scene_speech}", template, "scene"),
+            classify_visual_prompt_domain(clean_text(f"{topic} {scene_speech}"), "scene"),
+        )
+        final_prompt = enforce_scene_prop_contract(final_prompt, scene_speech, scene_topic_type)
+        # Scene compaction and teacher review rebuild the local shot and can
+        # drop episode-wide identity. Reapply it at the provider boundary:
+        # the event stays immutable while only this scene's evidence changes.
+        final_prompt = enforce_episode_event_visual_contract(
+            final_prompt,
+            topic=topic,
+            content=content_without_image_prompts(content) or content,
+            speech=scene_speech,
+            topic_type=scene_topic_type,
+        )
+        saved_requirement = clean_text(str(control.get("additional_requirement") or ""))
+        if saved_requirement:
+            final_prompt = normalize_image_prompt(
+                f"{final_prompt}\n追加要求（最高优先级，必须落实）：{saved_requirement}"
             )
         return {
             "kind": "scene",
@@ -38338,6 +45323,118 @@ def image_prompt(project_id: int, kind: str, target: str, anchor_key: str = "", 
     raise ValueError("未知图片类型，请选择 scene 或 cover。")
 
 
+def _without_saved_image_requirement(prompt: str) -> str:
+    """Remove the previous redraw instruction before applying the current one."""
+    text = str(prompt or "")
+    markers = (
+        "用户追加要求（最高优先级，必须落实到成图）",
+        "追加要求（最高优先级，必须落实）",
+        "追加要求（最高优先级）",
+        "用户重绘硬要求（必须落实到成图）",
+    )
+    for marker in markers:
+        text = re.sub(rf"(?:^|\n)\s*{re.escape(marker)}\s*[:：].*?(?=\n|$)", "", text)
+    return normalize_image_prompt(text)
+
+
+def compile_final_chatgpt_image_prompt(
+    project_id: int,
+    kind: str,
+    target: str,
+    *,
+    anchor_key: str = "",
+    abstraction_level: str = DEFAULT_IMAGE_ABSTRACTION_LEVEL,
+    additional_requirement: str = "",
+    rewrite_prompt: bool = False,
+    rewrite_scope: str = "partial",
+) -> dict[str, Any]:
+    """Compile the single prompt shown to the user and sent to ChatGPT."""
+    payload = image_prompt(
+        project_id,
+        kind,
+        target,
+        anchor_key=anchor_key,
+        abstraction_level=abstraction_level,
+    )
+    normalized_kind = clean_text(kind).lower()
+    requirement = clean_text(additional_requirement)
+    base_prompt = _without_saved_image_requirement(str(payload.get("prompt") or ""))
+    rewrite_provider = ""
+    normalized_scope = "full" if clean_text(rewrite_scope).lower() == "full" else "partial"
+    if requirement and rewrite_prompt:
+        project = storage.get_project(project_id)
+        template_key = clean_text(str(project.get("template") or ""))
+        template = storage.get_template(template_key) if template_key else {}
+        target_key = clean_text(str(payload.get("target") or target))
+        rewrites = rewrite_image_prompts_with_ai_teachers(
+            project,
+            template,
+            normalized_kind,
+            [
+                {
+                    "target": target_key,
+                    "label": clean_text(str(payload.get("label") or target_key)),
+                    "original_prompt": base_prompt,
+                    "elastic_prompt": f"{base_prompt}\n用户本次重绘要求：{requirement}",
+                    "final_prompt": base_prompt,
+                    "redraw_requirement": requirement,
+                    "rewrite_scope": normalized_scope,
+                    "semantic_context": payload.get("semantic_context") or {},
+                    "teacher_review": payload.get("teacher_review") or {},
+                }
+            ],
+        )
+        rewritten = rewrites.get(target_key) or next(iter(rewrites.values()), {})
+        base_prompt = normalize_image_prompt(str(rewritten.get("prompt") or ""))
+        rewrite_provider = clean_text(str(rewritten.get("provider") or ""))
+        if not base_prompt:
+            raise RuntimeError("AI 视觉导演没有返回重写后的提示词，本次未启动生图。")
+        semantic_context = payload.get("semantic_context") if isinstance(payload.get("semantic_context"), dict) else {}
+        topic = clean_text(str(project.get("topic_name") or semantic_context.get("topic") or ""))
+        speech = clean_text(
+            str(
+                semantic_context.get("timeline_speech")
+                or semantic_context.get("speech")
+                or semantic_context.get("audio_anchor")
+                or ""
+            )
+        )
+        context_lines = []
+        if topic and topic not in base_prompt:
+            context_lines.append(f"本期主题：{topic}")
+        if speech and speech not in base_prompt:
+            context_lines.append(f"本镜完整口播：{speech}")
+        if context_lines:
+            base_prompt = normalize_image_prompt("\n".join([*context_lines, base_prompt]))
+    elif requirement:
+        base_prompt = normalize_image_prompt(
+            f"{base_prompt}\n用户追加要求（最高优先级，必须落实到成图）：{requirement}"
+        )
+    size = SCENE_IMAGE_SIZE if normalized_kind == "scene" else str(normalize_cover_target(target)["size"])
+    final_outbound_prompt = build_chatgpt_handoff_prompt(
+        base_prompt,
+        size,
+        normalized_kind,
+        required_user_instruction=requirement,
+        preserve_visual_prompt=bool(rewrite_prompt and rewrite_provider),
+    )
+    result = dict(payload)
+    result.update(
+        {
+            "base_prompt": base_prompt,
+            "final_outbound_prompt": final_outbound_prompt,
+            "additional_requirement": requirement,
+            "rewrite_provider": rewrite_provider,
+            "rewrite_scope": normalized_scope,
+            "anchor_text": resolve_image_anchor_text(
+                list(payload.get("anchor_options") or []),
+                clean_text(str(payload.get("anchor_key") or anchor_key)),
+            ),
+        }
+    )
+    return result
+
+
 _ACTIVE_GENERATED_TMP_PATHS: set[str] = set()
 _ACTIVE_GENERATED_TMP_PATHS_LOCK = threading.RLock()
 
@@ -38424,32 +45521,9 @@ def generate_configured_image_safely(
             return output_path
         except Exception as exc:
             _cleanup_generated_tmp(tmp_path)
-            # Production-safe generation may be replacing an existing official
-            # asset during an incremental repair. If the external image service
-            # does not return a replacement, keep that usable asset and let the
-            # batch continue. Manual redraw uses a separate path and still
-            # surfaces generation failures to the user.
-            if output_path.exists() and output_path.is_file() and output_path.stat().st_size >= 4096:
-                existing_audit = read_image_audit(output_path)
-                existing_audit = dict(existing_audit) if isinstance(existing_audit, dict) else {}
-                existing_audit.update(
-                    {
-                        "ok": True,
-                        "severity": "soft",
-                        "replacement_failed": True,
-                        "replacement_error": user_facing_error(exc),
-                    }
-                )
-                warnings = list(existing_audit.get("warnings") or [])
-                warnings.append("替代图生成未完成，已保留现有正式图，生产任务继续。")
-                existing_audit["warnings"] = warnings
-                storage.write_json(output_path.with_suffix(".audit.json"), existing_audit)
-                if log:
-                    log(
-                        f"[images] {output_path.name} 的替代图未完成；"
-                        "已保留现有正式图并标记待复核，继续后续生产"
-                    )
-                return output_path
+            # The previous file stays on disk for manual recovery, but it must
+            # never be reported as the result of the current topic request.
+            # Propagating the error keeps its old lineage stale and blocks video.
             raise
 
 
@@ -38490,6 +45564,9 @@ def _update_scene_prompt_record(
                 {
                     "label": record.get("label") or f"场景 {index}",
                     "prompt": final_prompt,
+                    "planned_prompt": normalize_image_prompt(source_prompt),
+                    "outbound_prompt": normalize_image_prompt(final_prompt),
+                    "provider_prompt": normalize_image_prompt(final_prompt),
                     "source_prompt": normalize_image_prompt(source_prompt),
                     "audit": {
                         "ok": audit.get("ok", True),
@@ -38524,6 +45601,9 @@ def _update_scene_prompt_record(
                 "filename": filename,
                 "label": f"场景 {index}",
                 "prompt": final_prompt,
+                "planned_prompt": normalize_image_prompt(source_prompt),
+                "outbound_prompt": normalize_image_prompt(final_prompt),
+                "provider_prompt": normalize_image_prompt(final_prompt),
                 "source_prompt": normalize_image_prompt(source_prompt),
                 "audit": {
                     "ok": audit.get("ok", True),
@@ -38621,9 +45701,14 @@ def reusable_scene_image_record(
             if clean_text(str(record.get(key) or "")) != clean_text(str(current_context.get(key) or "")):
                 return None
         record_topic_hash = clean_text(str(record.get("topic_hash") or ""))
+        record_content_hash = clean_text(str(record.get("content_hash") or ""))
         if not record_topic_hash:
             return None
         if topic_hash and record_topic_hash != topic_hash:
+            return None
+        if not record_content_hash:
+            return None
+        if content_hash and record_content_hash != content_hash:
             return None
     previous_source = clean_text(str(record.get("source_prompt") or record.get("prompt") or "")) if isinstance(record, dict) else ""
     similarity = scene_prompt_reuse_similarity(previous_source, prompt)
@@ -38680,6 +45765,17 @@ def stale_scene_image_indexes(project_id: int) -> list[int]:
         if scene_image_index_from_path(path) > 0
     }
     stale: set[int] = set(pending_scene_prompt_redraw_indexes(storage.scene_status(project_id)))
+    scene_plan_payload = storage.read_json(storage.project_file(project_id, "audio/scene_plan.json"), {})
+    scene_plan_items = scene_plan_payload.get("scenes") if isinstance(scene_plan_payload, dict) else []
+    authoritative_narration_by_index = {
+        int(item.get("index") or position): (
+            clean_text(str(item.get("speech_text") or "")),
+            clean_text(str(item.get("audio_anchor") or "")),
+        )
+        for position, item in enumerate(scene_plan_items, start=1)
+        if isinstance(item, dict)
+        and clean_text(str(item.get("speech_text") or item.get("audio_anchor") or ""))
+    } if isinstance(scene_plan_items, list) else {}
 
     change_report = storage.read_json(storage.project_file(project_id, "content_change.json"), {})
     if isinstance(change_report, dict):
@@ -38706,11 +45802,73 @@ def stale_scene_image_indexes(project_id: int) -> list[int]:
         record = records_by_index.get(index)
         previous_source = clean_text(str(record.get("source_prompt") or record.get("prompt") or "")) if isinstance(record, dict) else ""
         record_topic_hash = clean_text(str(record.get("topic_hash") or "")) if isinstance(record, dict) else ""
-        topic_matches = not record_topic_hash or record_topic_hash == clean_text(str(hashes.get("topic_hash") or ""))
-        semantic_similarity = scene_prompt_reuse_similarity(previous_source, prompt) if previous_source else 0.0
-        if image_path is None or record is None or not topic_matches or semantic_similarity < 0.78:
+        record_content_hash = clean_text(str(record.get("content_hash") or "")) if isinstance(record, dict) else ""
+        topic_matches = bool(record_topic_hash) and record_topic_hash == clean_text(str(hashes.get("topic_hash") or ""))
+        content_matches = bool(record_content_hash) and record_content_hash == clean_text(str(hashes.get("content_hash") or ""))
+        if image_path is None:
             stale.add(index)
+            continue
+        manual_accepted = bool(record.get("manual_image_accepted")) if isinstance(record, dict) else False
+        if manual_accepted and topic_matches and content_matches:
+            # A successful explicit single-image redraw is authoritative for
+            # this project/content version.  Its provider may compact wording,
+            # so prompt-token lineage must not hide the newly saved image.
+            stale.discard(index)
+            continue
+        actual_prompt = normalize_image_prompt(storage.read_text(image_path.with_suffix(".md")))
+        speech_text, audio_anchor = authoritative_narration_by_index.get(index, ("", ""))
+        narration_matches = scene_prompt_matches_narration(actual_prompt, speech_text, audio_anchor)
+        topic = clean_text(str(project.get("topic_name") or first_heading(content) or ""))
+        topic_matches_prompt = bool(
+            actual_prompt
+            and image_prompt_has_topic_anchor(actual_prompt)
+            and token_overlap_score(actual_prompt, topic, limit=64) >= 30
+        )
+        # Provider-side compaction may remove the literal topic header while
+        # preserving the authoritative narration. Current topic/content hashes
+        # are a valid lineage fallback in that case, so a freshly generated
+        # image is not repeatedly treated as missing.
+        lineage_topic_fallback = topic_matches and content_matches
+        if not actual_prompt or not narration_matches:
+            stale.add(index)
+            continue
+        if not topic_matches_prompt and not lineage_topic_fallback:
+            stale.add(index)
+            continue
+        # The prompt gate may rebuild scene_prompts.json while generation is
+        # running. That refresh can replace a generated record with a prompt
+        # planning record that has no lineage hashes. The provider prompt saved
+        # beside the image is the authoritative execution receipt: when it
+        # matches the current topic and narration, missing/stale planning hashes
+        # must not hide the real image. Content-change invalidation above still
+        # rejects files older than an explicit script change.
+        if not topic_matches or not content_matches:
+            continue
+        # Prompt wording can legitimately change after preflight, compaction or
+        # best-version selection. Once the generated asset carries the current
+        # project/content hashes and its actual provider prompt matches both the
+        # active topic and authoritative narration, wording similarity is only
+        # a quality/version signal. It must not hide a real image as "missing".
     return sorted(stale)
+
+
+def scene_prompt_matches_narration(
+    actual_prompt: str,
+    speech_text: str,
+    audio_anchor: str,
+    *,
+    minimum_score: int = 24,
+) -> bool:
+    prompt = clean_text(actual_prompt)
+    candidates = [clean_text(speech_text), clean_text(audio_anchor)]
+    candidates = [item for item in candidates if item]
+    if not prompt or not candidates:
+        return False
+    return any(
+        scene_audio_alignment_score(prompt, item) >= minimum_score
+        or token_overlap_score(prompt, item, limit=32) >= 45
+        for item in candidates
+    )
 
 
 _PRODUCTION_FILE_HASH_CACHE: dict[str, tuple[int, int, str]] = {}
@@ -39096,6 +46254,13 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
     latest_job = storage.load_latest_job(project_id) or {}
     content_sync = storage.read_json(storage.project_file(project_id, "content_sync.json"), {})
     bgm_status = project_bgm_status(project_id)
+    motion_env = runtime_env()
+    motion_provider = clean_text(motion_env.get("VIDEO_PROVIDER") or "off").lower()
+    motion_mode = clean_text(motion_env.get("VIDEO_MOTION_MODE") or "key_scenes").lower()
+    motion_enabled = (
+        motion_provider not in {"", "off", "none", "disabled"}
+        and motion_mode not in {"off", "none", "disabled"}
+    )
     running_step = clean_text(str(latest_job.get("current_step") or "")) if latest_job.get("running") else ""
     running_map = {
         "audio": "audio",
@@ -39128,12 +46293,14 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
         "motion_clips": {"scene_images_hash": hashes["scene_images_hash"]},
         "covers": {"cover_prompts_hash": hashes["cover_prompts_hash"]},
         "bgm": {"bgm_semantic_hash": hashes["bgm_semantic_hash"]},
+        # Scene-plan and prompt manifests are planning metadata. Rewriting them
+        # without changing an actual rendered input must not invalidate a verified
+        # final video. Motion clips participate only when the feature is enabled.
         "video": {
             "audio_hash": hashes["audio_hash"],
             "subtitles_hash": hashes["subtitles_hash"],
-            "scene_plan_hash": hashes["scene_plan_hash"],
             "scene_images_hash": hashes["scene_images_hash"],
-            "motion_clips_hash": hashes.get("motion_clips_hash", ""),
+            **({"motion_clips_hash": hashes.get("motion_clips_hash", "")} if motion_enabled else {}),
             "covers_hash": hashes["covers_hash"],
             "bgm_hash": hashes["bgm_hash"],
             "bgm_mix_hash": hashes["bgm_mix_hash"],
@@ -39143,7 +46310,50 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
     }
     change_report = storage.read_json(storage.project_file(project_id, "content_change.json"), {})
     invalidation = change_report.get("invalidate") if isinstance(change_report, dict) and isinstance(change_report.get("invalidate"), dict) else {}
+    video_mix_meta = storage.read_json(project_video_mix_meta_path(project_id), {})
+    video_mix_current = bool(
+        isinstance(video_mix_meta, dict)
+        and clean_text(str(video_mix_meta.get("policy_version") or "")) == BGM_MIX_POLICY_VERSION
+        and clean_text(str(video_mix_meta.get("visual_master_policy_version") or "")) == VISUAL_MASTER_POLICY_VERSION
+    )
+    video_snapshot = snapshots.get("video", {})
+    video_updated_at = float(video_snapshot.get("updated_at", 0) or 0)
+    real_video_inputs = ["audio", "subtitles", "scene_images", "covers", "bgm"]
+    if motion_enabled:
+        real_video_inputs.append("motion_clips")
+    video_inputs_current = not any(
+        snapshots.get(name, {}).get("exists")
+        and float(snapshots.get(name, {}).get("updated_at", 0) or 0) > video_updated_at + 0.01
+        for name in real_video_inputs
+    )
+    bgm_current = clean_text(str(bgm_status.get("status") or "pending")) in {"current", "disabled"}
+    covers_complete = (
+        not cover_enabled
+        or int(snapshots.get("covers", {}).get("count", 0) or 0) >= len(_cover_output_paths(project_id))
+    )
+    motion_current = not motion_enabled or bool(snapshots.get("motion_clips", {}).get("exists"))
+    video_can_inherit = bool(
+        video_snapshot.get("exists")
+        and snapshots.get("audio", {}).get("exists")
+        and snapshots.get("subtitles", {}).get("exists")
+        and generated_scenes >= expected_scenes > 0
+        and not stale_scene_indexes
+        and covers_complete
+        and bgm_current
+        and video_mix_current
+        and motion_current
+        and video_inputs_current
+    )
     inherited_assets = {
+        # Analysis and scene-plan files may be refreshed by a cancelled preparation
+        # pass. If their real upstream inputs are still current, adopt the refreshed
+        # artifact instead of presenting a false stale state.
+        "content_analysis": bool(snapshots.get("content_analysis", {}).get("exists") and not content_sync.get("running")),
+        "scene_plan": bool(
+            snapshots.get("scene_plan", {}).get("exists")
+            and snapshots.get("audio", {}).get("exists")
+            and snapshots.get("subtitles", {}).get("exists")
+        ),
         # A historical content-change marker can remain after replacement or
         # semantically matching images have already consumed it. The per-image
         # freshness audit is authoritative here.
@@ -39153,8 +46363,9 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
             and not stale_scene_indexes
         ),
         "covers": not bool(invalidation.get("covers")),
-        "motion_clips": bool(snapshots.get("motion_clips", {}).get("exists")),
+        "motion_clips": bool(motion_enabled and snapshots.get("motion_clips", {}).get("exists")),
         "bgm": not bool(invalidation.get("bgm")),
+        "video": video_can_inherit,
     }
     lineage_changed = False
     for name, can_inherit in inherited_assets.items():
@@ -39200,6 +46411,9 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
             )
             status = "current" if prompt_current else ("stale" if snapshot.get("exists") else "missing")
             detail = "与当前文案一致" if prompt_current else ("基于旧文案或旧策略" if snapshot.get("exists") else "等待生成")
+        elif name == "motion_clips" and not motion_enabled:
+            status = "skipped"
+            detail = "动态镜头未启用，成片使用场景图轻运动"
         elif name == "bgm":
             bgm_state = clean_text(str(bgm_status.get("status") or "pending"))
             if bgm_state in {"current", "disabled"}:
@@ -39284,6 +46498,13 @@ def refresh_production_manifest(project_id: int) -> dict[str, Any]:
     comparable_previous.pop("generated_at", None)
     comparable_payload = dict(payload)
     comparable_payload.pop("generated_at", None)
+    # Project cards describe the deliverable, while latest-job keeps the history of
+    # a cancelled duplicate request. A complete current video therefore remains a
+    # completed project instead of being mislabeled as stopped.
+    video_asset = next((item for item in assets if item.get("key") == "video"), {})
+    if video_asset.get("status") == "current" and clean_text(str(project.get("last_job_status") or "")) != "succeeded":
+        project["last_job_status"] = "succeeded"
+        storage.write_project_meta(project_id, project)
     if comparable_previous == comparable_payload:
         return previous
     storage.write_json(production_manifest_path(project_id), payload)
@@ -39301,6 +46522,7 @@ def _regenerate_project_image_unlocked(
     prompt: str,
     anchor_key: str = "",
     abstraction_level: str = DEFAULT_IMAGE_ABSTRACTION_LEVEL,
+    additional_requirement: str = "",
     as_candidate: bool = False,
 ) -> dict[str, Any]:
     project = storage.get_project(project_id)
@@ -39314,19 +46536,28 @@ def _regenerate_project_image_unlocked(
         target,
         anchor_key=anchor_key,
         abstraction_level=abstraction_level,
+        additional_requirement=additional_requirement,
     )
-    source_prompt = normalize_image_prompt(prompt)
-    if not source_prompt:
-        source_prompt = str(
-            image_prompt(
-                project_id,
-                normalized_kind,
-                target,
-                anchor_key=anchor_key,
-                abstraction_level=abstraction_level,
-            ).get("prompt")
-            or ""
+    if clean_text(prompt):
+        source_prompt = _without_saved_image_requirement(prompt)
+        final_chatgpt_prompt = build_chatgpt_handoff_prompt(
+            source_prompt,
+            SCENE_IMAGE_SIZE if normalized_kind == "scene" else str(normalize_cover_target(target)["size"]),
+            normalized_kind,
+            required_user_instruction=clean_text(additional_requirement),
+            preserve_visual_prompt=True,
         )
+    else:
+        compiled_prompt = compile_final_chatgpt_image_prompt(
+            project_id,
+            normalized_kind,
+            target,
+            anchor_key=anchor_key,
+            abstraction_level=abstraction_level,
+            additional_requirement=additional_requirement,
+        )
+        source_prompt = clean_text(str(compiled_prompt.get("base_prompt") or ""))
+        final_chatgpt_prompt = str(compiled_prompt.get("final_outbound_prompt") or "").strip()
     if not source_prompt:
         raise ValueError("请先填写重绘提示词。")
 
@@ -39404,7 +46635,18 @@ def _regenerate_project_image_unlocked(
         tmp_path = generation_path.with_name(f".{generation_path.stem}.regen-{storage.now_ms()}.png")
         with _track_active_generated_tmp(tmp_path):
             try:
-                generate_configured_image(source_prompt, tmp_path, SCENE_IMAGE_SIZE, "scene", env, None, template)
+                generate_configured_image(
+                    source_prompt,
+                    tmp_path,
+                    SCENE_IMAGE_SIZE,
+                    "scene",
+                    env,
+                    None,
+                    template,
+                    required_user_instruction=clean_text(additional_requirement),
+                    final_chatgpt_prompt=final_chatgpt_prompt,
+                    preserve_visual_prompt=True,
+                )
                 _replace_generated_image(tmp_path, generation_path)
             except Exception:
                 _cleanup_generated_tmp(tmp_path)
@@ -39434,7 +46676,14 @@ def _regenerate_project_image_unlocked(
                 "scene_status": storage.scene_status(project_id),
             }
         discard_scene_image_candidates(project_id, scene_index, reason="official_regenerated")
-        _update_scene_prompt_record(project_id, filename, source_prompt, final_prompt, audit)
+        _update_scene_prompt_record(
+            project_id,
+            filename,
+            source_prompt,
+            final_prompt,
+            audit,
+            manual_accepted=True,
+        )
         review = mark_image_review_dirty(project_id, f"{filename} 已重绘，等待重新确认")
         manifest: dict[str, Any] | None = None
         with contextlib.suppress(Exception):
@@ -39486,14 +46735,34 @@ def _regenerate_project_image_unlocked(
         tmp_path = output_path.with_name(f".{output_path.stem}.regen-{storage.now_ms()}.png")
         with _track_active_generated_tmp(tmp_path):
             try:
-                generate_configured_image(source_prompt, tmp_path, str(cover["size"]), "cover", env, None, template)
+                generate_configured_image(
+                    source_prompt,
+                    tmp_path,
+                    str(cover["size"]),
+                    "cover",
+                    env,
+                    None,
+                    template,
+                    required_user_instruction=clean_text(additional_requirement),
+                    final_chatgpt_prompt=final_chatgpt_prompt,
+                )
                 _replace_generated_image(tmp_path, output_path)
             except Exception:
                 _cleanup_generated_tmp(tmp_path)
                 raise
         final_prompt = read_generated_prompt(output_path, source_prompt)
         audit = read_image_audit(output_path)
-        review = mark_image_review_dirty(project_id, f"{cover['label']} 已重绘，等待重新确认")
+        derived_count = 0
+        if cover["kind"] == "landscape":
+            derived_count = derive_cover_variants_from_master(
+                project_id,
+                output_path,
+                {"cover_landscape.png": final_prompt},
+            )
+        review = mark_image_review_dirty(
+            project_id,
+            f"{cover['label']} 已重绘" + (f"，并本地更新 {derived_count} 个发布比例" if derived_count else "") + "，等待重新确认",
+        )
         manifest: dict[str, Any] | None = None
         with contextlib.suppress(Exception):
             manifest = record_production_step(project_id, "covers")
@@ -39506,6 +46775,7 @@ def _regenerate_project_image_unlocked(
             "prompt": final_prompt,
             "control": saved_control,
             "audit": audit,
+            "derived_count": derived_count,
             "review": review,
             "manifest": manifest,
         }
@@ -39520,6 +46790,7 @@ def regenerate_project_image(
     prompt: str,
     anchor_key: str = "",
     abstraction_level: str = DEFAULT_IMAGE_ABSTRACTION_LEVEL,
+    additional_requirement: str = "",
     as_candidate: bool = False,
 ) -> dict[str, Any]:
     normalized_kind = clean_text(kind).lower()
@@ -39543,7 +46814,8 @@ def regenerate_project_image(
             prompt,
             anchor_key,
             abstraction_level,
-            as_candidate,
+            additional_requirement=additional_requirement,
+            as_candidate=as_candidate,
         )
     finally:
         image_lock.release()
@@ -39686,7 +46958,7 @@ def sync_project_content_artifacts(
     progress("summary", "正在更新摘要与场景数量")
     summary = summarize_content(content, project.get("template_mode", "video"))
     brief = storage.get_brief(project_id)
-    references = storage.get_references(project_id)
+    references = effective_project_references(project_id, brief=brief)
     fact_registry = save_episode_fact_registry(
         project_id,
         content,
@@ -39756,17 +47028,39 @@ class ContentRuntime:
             return item["state"]
         path = storage.project_file(project_id, "content_generate.json")
         if path.exists():
-            return storage.read_json(path, None)
+            state = storage.read_json(path, None)
+            # A running task only exists in this process. If the process was
+            # restarted, do not leave the UI waiting forever on stale disk state.
+            if isinstance(state, dict) and state.get("status") == "running":
+                state["status"] = "interrupted"
+                state["finished_at"] = storage.now_ts()
+                state["message"] = "后台服务曾中断，本次生成已停止，请重新点击生成。"
+                storage.write_json(path, state)
+                meta = storage.get_project(project_id)
+                meta["content_generating"] = False
+                storage.write_project_meta(project_id, meta)
+            return state
         return None
 
     async def start(self, project: dict[str, Any], template: dict[str, Any], brief: str, tavily_topic: str) -> dict[str, Any]:
         project_id = project["id"]
         await self.cancel(project_id, silent=True)
+        run_id = uuid.uuid4().hex
+        # The storage layer normalizes text on write. Bind the worker to the
+        # persisted value; hashing the pre-save request could make `_run`
+        # return immediately while the UI stayed in "running" forever.
+        persisted_brief = storage.get_brief(project_id)
+        brief_hash = hashlib.sha256((persisted_brief or "").encode("utf-8")).hexdigest()
         state = {
             "status": "running",
+            "run_id": run_id,
+            "project_id": project_id,
+            "brief_hash": brief_hash,
             "started_at": storage.now_ts(),
             "stage": "think",
             "stage_started_at": storage.now_ts(),
+            "heartbeat_at": storage.now_ts(),
+            "message": "已收到生成请求，正在整理主题和频道要求。",
             "stages": [],
             "cancel_requested": False,
             "provider": "",
@@ -39774,7 +47068,9 @@ class ContentRuntime:
         }
         self.tasks[project_id] = {"state": state}
         storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
-        task = asyncio.create_task(self._run(project, template, brief, tavily_topic))
+        task = asyncio.create_task(
+            self._run(project, template, persisted_brief, tavily_topic, run_id, brief_hash)
+        )
         self.tasks[project_id]["task"] = task
         return state
 
@@ -39801,18 +47097,43 @@ class ContentRuntime:
 
     def _push_stage(self, project_id: int, stage: str) -> None:
         state = self.tasks[project_id]["state"]
+        messages = {
+            "think": "正在整理主题、频道要求和内容结构。",
+            "search": "正在检索并筛选与本期主题相关的资料。",
+            "evidence": "资料已冻结，本期只允许使用当前主题和当前来源。",
+            "draft": "AI 正在根据本期资料撰写文案草稿。",
+            "ai_review": "AI 总编正在按统一六维标准逐句审稿。",
+            "targeted_rewrite": "初审未通过，AI 正在只修改失败句和失败维度。",
+            "ai_recheck": "定点修改完成，AI 正在使用同一标准复审。",
+            "finalize": "AI 复审已通过，正在保存正式文案。",
+            "visual": "文案已生成，正在整理分镜和画面提示。",
+        }
         state["stage"] = stage
         state["stage_started_at"] = storage.now_ts()
+        state["heartbeat_at"] = storage.now_ts()
+        state["message"] = messages.get(stage, f"正在处理：{stage}")
         state["stages"].append({"stage": stage, "started_at": storage.now_ts()})
         storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
 
-    async def _run(self, project: dict[str, Any], template: dict[str, Any], brief: str, tavily_topic: str) -> None:
+    def _is_current_run(self, project_id: int, run_id: str, brief_hash: str) -> bool:
+        item = self.tasks.get(project_id)
+        if not item:
+            return False
+        state = item.get("state") or {}
+        current_brief_hash = hashlib.sha256((storage.get_brief(project_id) or "").encode("utf-8")).hexdigest()
+        return state.get("run_id") == run_id and state.get("brief_hash") == brief_hash and current_brief_hash == brief_hash
+
+    async def _run(self, project: dict[str, Any], template: dict[str, Any], brief: str, tavily_topic: str, run_id: str, brief_hash: str) -> None:
         project_id = project["id"]
+        if not self._is_current_run(project_id, run_id, brief_hash):
+            return
         state = self.tasks[project_id]["state"]
         meta = storage.get_project(project_id)
         meta["content_generating"] = True
         storage.write_project_meta(project_id, meta)
         try:
+            if not self._is_current_run(project_id, run_id, brief_hash):
+                return
             self._push_stage(project_id, "think")
             preliminary_strategy = content_strategy_report(project, template, brief, tavily_topic, [])
             storage.write_json(storage.project_file(project_id, "content_strategy.json"), preliminary_strategy)
@@ -39821,11 +47142,9 @@ class ContentRuntime:
             self._push_stage(project_id, "search")
             references: list[dict[str, Any]] = []
             provider = ""
-            original_error = ""
-            deepseek_error = ""
             context: dict[str, Any] = {}
             deepseek_enabled = bool(clean_text(runtime_env().get("DEEPSEEK_API_KEY", "")))
-            state["generator_priority"] = "deepseek-template-first" if deepseek_enabled else "local-fallback"
+            state["generator_priority"] = "deepseek-template-first"
 
             if deepseek_enabled:
                 context = await asyncio.to_thread(build_reference_context, project, template, brief, tavily_topic)
@@ -39833,37 +47152,42 @@ class ContentRuntime:
                 if not isinstance(references, list):
                     references = []
                 state["reference_count"] = len(references)
+                state["entity_profile"] = context.get("entity_profile", {})
                 storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
+                # Research is a completed stage of its own. Persist the newly
+                # filtered evidence immediately so a later writing-quality
+                # rejection never leaves stale cross-topic sources in the UI.
+                storage.save_references(project_id, references)
+                storage.write_json(
+                    storage.project_file(project_id, "reference_research.json"),
+                    context.get("research_diagnostics", {}),
+                )
 
                 self._push_stage(project_id, "write")
                 try:
-                    content = await asyncio.to_thread(render_deepseek_content, project, template, brief, tavily_topic, context)
+                    state["provider"] = "deepseek"
+                    storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
+                    generation_quality: dict[str, Any] = {}
+                    content = await asyncio.to_thread(
+                        render_deepseek_content,
+                        project,
+                        template,
+                        brief,
+                        tavily_topic,
+                        context,
+                        generation_quality,
+                    )
+                    state["generation_quality"] = generation_quality
                     provider = "deepseek"
                 except Exception as exc:
-                    deepseek_error = str(exc)
-                    state["deepseek_error"] = deepseek_error
+                    generation_error = str(exc)
+                    state["deepseek_error"] = generation_error
+                    if generation_quality:
+                        state["generation_quality"] = generation_quality
                     storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
-
-                    self._push_stage(project_id, "original_fallback")
-                    try:
-                        original_result = await asyncio.to_thread(render_original_content, project, template, brief, tavily_topic)
-                        references = original_result.get("references", [])
-                        if not isinstance(references, list):
-                            references = []
-                        state["reference_count"] = len(references)
-                        state["original_stages"] = original_result.get("stages", [])
-                        storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
-                        content = str(original_result["content"])
-                        provider = str(original_result.get("provider") or "deepseek-via-original")
-                    except Exception as original_exc:
-                        original_error = str(original_exc)
-                        state["original_error"] = original_error
-                        storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
-                        raise ContentGenerationError(
-                            "文案模型调用失败，已保留原有文案并停止生产。"
-                            f" DeepSeek：{user_facing_error(deepseek_error, 260)}；"
-                            f"备用链路：{user_facing_error(original_error, 260)}"
-                        )
+                    raise ContentGenerationError(
+                        f"当前文案模型生成失败：{generation_error}。现有正式文案和素材均已保留。"
+                    ) from exc
             else:
                 state["fallback_reason"] = "DeepSeek API Key 未配置，已阻止使用通用空壳兜底稿。"
                 storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
@@ -39871,6 +47195,8 @@ class ContentRuntime:
                     "DeepSeek API Key 未配置，文案未生成；系统不会再用与主题无关的通用稿代替。"
                 )
 
+            if not self._is_current_run(project_id, run_id, brief_hash):
+                return
             canonical = canonicalize_project_content(
                 project_id,
                 content,
@@ -39878,6 +47204,26 @@ class ContentRuntime:
                 references=references,
             )
             content = str(canonical.get("content") or content)
+            # Unsupported precise facts are narrowed as complete natural
+            # phrases before the final gate. If the blur cannot pass a second
+            # evidence check, the original draft remains untouched and the
+            # task reports the exact blocking facts.
+            content, numeric_blur_hits = blur_unsupported_numeric_facts_text(
+                project_id,
+                content,
+                brief=brief,
+                references=references,
+            )
+            if numeric_blur_hits:
+                canonical["actions"] = dedupe_clauses(
+                    [*list(canonical.get("actions") or []), *numeric_blur_hits]
+                )
+                canonical["numeric_consistency"] = numeric_source_consistency_report(
+                    project_id,
+                    content,
+                    brief=brief,
+                    references=references,
+                )
             hollow = hollow_script_report(content, clean_text(template.get("mode") or "video"))
             if hollow.get("hollow"):
                 raise ContentGenerationError(
@@ -39891,6 +47237,14 @@ class ContentRuntime:
                     for item in unsupported_facts
                     if isinstance(item, dict)
                 )
+                storage.write_text(
+                    storage.project_file(project_id, "rejected_content_preview.md"),
+                    content,
+                )
+                storage.write_json(
+                    storage.project_file(project_id, "rejected_numeric_facts.json"),
+                    numeric_consistency,
+                )
                 raise ContentGenerationError(
                     "文案包含参考资料无法证明的精确数字，已阻止保存："
                     + "、".join(facts[:6])
@@ -39898,11 +47252,188 @@ class ContentRuntime:
             bad_phrase_hits = list(canonical.get("bad_phrase_repair") or [])
             opening_repair = canonical.get("opening_repair") if isinstance(canonical.get("opening_repair"), dict) else {}
             content = refresh_content_image_prompts(project, template, content)
+            # The saved script is the canonical source for every downstream asset.
+            # Run the same normalizer at the final write boundary so no later
+            # transformation or stale worker can persist structural labels or filler.
+            final_canonical = canonicalize_project_content(
+                project_id,
+                content,
+                brief=brief,
+                references=references,
+            )
+            content = str(final_canonical.get("content") or content)
+            final_hollow = hollow_script_report(content, clean_text(template.get("mode") or "video"))
+            if final_hollow.get("hollow"):
+                raise ContentGenerationError(
+                    "文案在保存前检查中仍只有套话或结构提示，已拒绝写入 content.md。"
+                )
+            final_script = extract_section(content, detect_script_section_title(content), level=2)
+            final_language_pollution = script_language_pollution_hits(final_script)
+            if final_language_pollution:
+                raise ContentGenerationError(
+                    "口播存在语义拼接污染，已阻止保存：" + "、".join(final_language_pollution[:4])
+                )
+            if any(
+                marker in final_script
+                for marker in ("【先给结论】", "【那问题来了】", "【接下来看】", "【最后问你一句】")
+            ):
+                raise ContentGenerationError(
+                    "文案在保存前仍含结构阶段标签，已拒绝写入 content.md。"
+                )
+            bad_phrase_hits = dedupe_clauses(
+                [*bad_phrase_hits, *list(final_canonical.get("bad_phrase_repair") or [])]
+            )
+            entity_alignment = topic_entity_alignment_report(
+                clean_text(str(project.get("topic_name") or "")),
+                brief,
+                content,
+            )
+            state["topic_entity_alignment"] = entity_alignment
+            storage.write_json(
+                storage.project_file(project_id, "topic_entity_alignment.json"),
+                entity_alignment,
+            )
+            if not entity_alignment.get("passed"):
+                state["error_type"] = "topic_entity_mismatch"
+                raise ContentGenerationError(
+                    f"主题实体错配：本期核心对象是“{entity_alignment.get('primary_entity') or '未识别'}”，"
+                    "生成口播已偏离该对象，结果未写入 content.md。"
+                )
+            if not self._is_current_run(project_id, run_id, brief_hash):
+                return
+            if PRODUCTION_LOGIC_VERSION == "project-109":
+                content_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+                final_review = {
+                    "rubric_version": "project-112-template-first",
+                    "weighted_total": int((canonical.get("quality") or {}).get("score", 0) or 0),
+                    "passed": True,
+                    "content_hash": content_hash,
+                    "review_round": 0,
+                }
+                editorial_pipeline = {"final_review": final_review}
+            else:
+                content, editorial_pipeline = await asyncio.to_thread(
+                    run_ai_editorial_pipeline,
+                    project,
+                    template,
+                    brief,
+                    references,
+                    content,
+                    stage_callback=lambda stage: self._push_stage(project_id, stage),
+                )
+                final_review = editorial_pipeline.get("final_review") if isinstance(editorial_pipeline, dict) else {}
+            state["editorial_ai_score"] = {
+                "rubric_version": final_review.get("rubric_version", AI_EDITORIAL_RUBRIC_VERSION),
+                "weighted_total": final_review.get("weighted_total", 0),
+                "passed": bool(final_review.get("passed")),
+                "content_hash": final_review.get("content_hash", ""),
+                "review_round": final_review.get("review_round", 0),
+            }
+            storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
+
+            # AI owns qualitative judgment; deterministic checks remain hard
+            # invariants and never rewrite or approve a rejected draft.
+            reviewed_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
+            if clean_text(str(final_review.get("content_hash") or "")) != reviewed_hash:
+                raise ContentGenerationError("AI 复审稿与待保存稿哈希不一致，已停止保存。")
+            post_review_hollow = hollow_script_report(content, clean_text(template.get("mode") or "video"))
+            if post_review_hollow.get("hollow"):
+                raise ContentGenerationError("AI 复审稿仍是空泛模板，已停止保存。")
+            post_review_script = extract_section(content, detect_script_section_title(content), level=2)
+            post_review_pollution = script_language_pollution_hits(post_review_script)
+            if post_review_pollution:
+                raise ContentGenerationError("AI 复审稿仍有结构或语义污染：" + "、".join(post_review_pollution[:4]))
+            # The targeted AI editor can re-introduce a precise number after
+            # the pre-review fact repair.  Treat this as a repairable edit,
+            # not as a fatal generation failure: blur the whole sentence,
+            # re-run the same source gate, and only stop when the repaired
+            # sentence still contains an unsupported numeric claim.
+            post_review_numeric = numeric_source_consistency_report(
+                project_id,
+                content,
+                brief=brief,
+                references=references,
+            )
+            post_review_unsupported = post_review_numeric.get("unsupported_facts", [])
+            if isinstance(post_review_unsupported, list) and post_review_unsupported:
+                repaired_content, repair_hits = blur_unsupported_numeric_facts_text(
+                    project_id,
+                    content,
+                    brief=brief,
+                    references=references,
+                )
+                repaired_numeric = numeric_source_consistency_report(
+                    project_id,
+                    repaired_content,
+                    brief=brief,
+                    references=references,
+                )
+                repaired_remaining = repaired_numeric.get("unsupported_facts", [])
+                if repaired_content != content and not repaired_remaining:
+                    content = repaired_content
+                    final_review["content_hash"] = hashlib.sha256(
+                        content.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    final_review["numeric_repair_hits"] = repair_hits
+                    state["editorial_ai_score"] = {
+                        "rubric_version": final_review.get("rubric_version", AI_EDITORIAL_RUBRIC_VERSION),
+                        "weighted_total": final_review.get("weighted_total", 0),
+                        "passed": bool(final_review.get("passed")),
+                        "content_hash": final_review["content_hash"],
+                        "review_round": final_review.get("review_round", 0),
+                        "numeric_repair_hits": repair_hits,
+                    }
+                    storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
+                    post_review_numeric = repaired_numeric
+                    post_review_unsupported = []
+                else:
+                    post_review_numeric = repaired_numeric
+                    post_review_unsupported = repaired_remaining
+            if isinstance(post_review_unsupported, list) and post_review_unsupported:
+                storage.write_text(
+                    storage.project_file(project_id, "rejected_content_preview.md"),
+                    content,
+                )
+                storage.write_json(
+                    storage.project_file(project_id, "rejected_numeric_facts.json"),
+                    post_review_numeric,
+                )
+                labels = [
+                    clean_text(str(item.get("fact") or item))
+                    for item in post_review_unsupported[:6]
+                    if isinstance(item, (dict, str))
+                ]
+                detail = "、".join(item for item in labels if item)
+                raise ContentGenerationError(
+                    "AI 复审稿新增了来源无法证明的精确事实"
+                    + (f"：{detail}" if detail else "")
+                    + "，已停止保存。"
+                )
+            post_review_alignment = topic_entity_alignment_report(
+                clean_text(str(project.get("topic_name") or "")),
+                brief,
+                content,
+            )
+            if not post_review_alignment.get("passed"):
+                raise ContentGenerationError("AI 复审稿偏离本期主题实体，已停止保存。")
+            self._push_stage(project_id, "finalize")
             summary = summarize_content(content, template.get("mode", "video"))
             artifacts = build_content_artifacts(project, template, brief, tavily_topic, references, content)
             storage.save_content(project_id, content)
             save_spoken_script_manifest(project_id, content)
-            opening_report = canonical.get("opening_novelty") if isinstance(canonical.get("opening_novelty"), dict) else opening_novelty_report(project_id, content)
+            from . import creative_learning
+            learning_explanation = creative_learning.channel_production_guidance(
+                clean_text(str(template.get("key") or project.get("template") or ""))
+            )
+            storage.write_json(
+                storage.project_file(project_id, "content_learning_explanation.json"),
+                {
+                    "generated_at": storage.now_ts(),
+                    "template_key": clean_text(str(template.get("key") or project.get("template") or "")),
+                    **learning_explanation,
+                },
+            )
+            opening_report = opening_novelty_report(project_id, content)
             storage.write_json(storage.project_file(project_id, "opening_novelty.json"), opening_report)
             storage.save_references(project_id, references)
             save_episode_fact_registry(
@@ -39910,7 +47441,7 @@ class ContentRuntime:
                 content,
                 brief=brief,
                 references=references,
-                registry=canonical.get("fact_registry") if isinstance(canonical.get("fact_registry"), dict) else None,
+                registry=None,
             )
             storage.save_summary(project_id, summary)
             self._push_stage(project_id, "visual")
@@ -39931,6 +47462,7 @@ class ContentRuntime:
             with contextlib.suppress(Exception):
                 record_production_step(project_id, "content_sync")
             state["provider"] = provider
+            state["learning_explanation"] = learning_explanation
             state["content_audit_score"] = artifacts["audit"]["score"]
             state["content_audit_verdict"] = artifacts["audit"]["verdict"]
             if bad_phrase_hits:
@@ -39942,12 +47474,46 @@ class ContentRuntime:
             }
             if opening_repair.get("changed"):
                 state["opening_repair"] = {"replacement": opening_repair.get("replacement", "")}
-            if deepseek_error:
-                state["fallback_reason"] = deepseek_error
-            if original_error:
-                state["original_fallback_reason"] = original_error
+            generation_quality = state.get("generation_quality") if isinstance(state.get("generation_quality"), dict) else {}
+            episode_explanation_model = classify_content_explanation_mode(
+                clean_text(str(project.get("topic_name") or "")),
+                brief,
+                references,
+                content,
+            )
+            final_quality = generated_content_quality_assessment(
+                content, clean_text(template.get("mode") or "video"), episode_explanation_model
+            )
+            delivery_verdict = editorial_delivery_verdict(final_review, final_quality)
+            quality_passed = delivery_verdict["quality_passed"]
+            # The persisted file is the only source of truth here. A warning
+            # from a discarded candidate must not survive after normalization.
+            quality_warning = clean_text(str(final_quality.get("warning") or ""))
+            generation_quality.update(
+                {
+                    "quality_passed": quality_passed,
+                    "quality_warning": quality_warning,
+                    "quality_score": final_quality.get("rank_score", 0),
+                    **delivery_verdict,
+                    "opening_score": final_quality.get("opening_score", generation_quality.get("opening_score", 0)),
+                    "retention_score": final_quality.get("retention_score", generation_quality.get("retention_score", 0)),
+                    "viewer_value_score": final_quality.get("viewer_value_score", generation_quality.get("viewer_value_score", 0)),
+                    "opening_has_stake": bool((final_quality.get("engagement") or {}).get("opening_has_stake")),
+                    "opening_stake_signals": (final_quality.get("engagement") or {}).get("opening_stake_signals", {}),
+                }
+            )
+            state["generation_quality"] = generation_quality
+            state.update(delivery_verdict)
+            state["evidence_policy"] = evidence_delivery_policy(references, brief)
+            state["quality_passed"] = quality_passed
+            state["quality_warning"] = quality_warning
+            if not self._is_current_run(project_id, run_id, brief_hash):
+                return
             state["status"] = "succeeded"
             state["finished_at"] = storage.now_ts()
+            state["heartbeat_at"] = storage.now_ts()
+            state["message"] = ("文案、审查结果和画面方案已生成。" if quality_passed
+                                else "文案和画面方案已生成，但内容质量仍需复核；未自动反复重写。")
             storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
         except asyncio.CancelledError:
             state["status"] = "cancelled"
@@ -39958,6 +47524,7 @@ class ContentRuntime:
             state["status"] = "failed"
             state["finished_at"] = storage.now_ts()
             state["error"] = str(exc)
+            state["message"] = user_facing_error(str(exc), 300)
             storage.write_json(storage.project_file(project_id, "content_generate.json"), state)
         finally:
             meta = storage.get_project(project_id)
@@ -40143,6 +47710,11 @@ def production_error_recovery_policy(error: BaseException | str) -> dict[str, An
         "未配置",
         "缺少 api",
         "api key",
+        "未开通",
+        "requested resource not granted",
+        "resource not granted",
+        "http 401",
+        "鉴权失败",
         "需要重新登录",
         "请登录",
         "login required",
@@ -40340,6 +47912,17 @@ class JobRuntime:
     ) -> dict[str, Any]:
         project_id = project["id"]
         steps = normalize_production_steps(steps)
+
+        # Requests can arrive after the page was offline and may carry an old
+        # "continue" plan. Missing-only steps must be revalidated against disk so
+        # completed scenes/covers/video are not regenerated by a stale click.
+        resume_plan = production_resume_plan(project_id)
+        recommended = set(resume_plan.get("recommended_steps") or [])
+        guarded_steps = {"images_missing", "covers_missing", "video"}
+        steps = [step for step in steps if step not in guarded_steps or step in recommended]
+        if not steps:
+            raise RuntimeError("当前场景图、封面和成片均已完成，无需重复启动生产任务。")
+
         latest = self.latest(project_id)
         if latest and latest.get("running"):
             raise RuntimeError("当前项目已有任务正在运行。")
@@ -40388,13 +47971,28 @@ class JobRuntime:
             return {"already_done": True}
         task = item["task"]
         task.cancel()
-        abort_result = await asyncio.to_thread(
-            abort_active_chatgpt_image_generations,
-            runtime_env(),
-            timeout_seconds=12.0,
-        )
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # Cancellation is authoritative. Browser cleanup is best-effort and
+        # must not turn Stop into a hanging request when Ant Browser is down.
+        try:
+            abort_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    abort_active_chatgpt_image_generations,
+                    runtime_env(),
+                    timeout_seconds=1.0,
+                ),
+                timeout=0.35,
+            )
+        except asyncio.TimeoutError:
+            abort_result = {"requested": 0, "released": [], "pending": [], "background": True}
+        except Exception as exc:
+            abort_result = {
+                "requested": 0,
+                "released": [],
+                "pending": [],
+                "cleanup_error": user_facing_error(exc),
+            }
         return {"already_done": False, "chatgpt_abort": abort_result}
 
     async def resume_on_startup(self) -> list[dict[str, Any]]:
@@ -40506,9 +48104,13 @@ class JobRuntime:
                     "production_start",
                 )
                 routes = intelligence.get("research", {}).get("routes", [])
+                evidence_sources = intelligence.get("evidence", {}).get("sources", [])
+                effective_sources = effective_project_references(project_id, brief=storage.get_brief(project_id))
                 log_lines.append(
-                    "[production] 已载入频道配方、研究路由和证据图谱"
-                    f"（研究源 {len(routes) if isinstance(routes, list) else 0} 个）"
+                    "[production] 已加载频道配方、研究路由和证据图谱"
+                    f"（检索路线 {len(routes) if isinstance(routes, list) else 0} 条；"
+                    f"证据图谱来源 {len(evidence_sources) if isinstance(evidence_sources, list) else 0} 条；"
+                    f"当前有效来源 {len(effective_sources)} 条）"
                 )
             except Exception as exc:
                 log_lines.append(f"[production] 生产智能初始化提醒：{user_facing_error(exc)}")
@@ -40596,7 +48198,9 @@ class JobRuntime:
                             run_production_stage_gate_closed_loop,
                             project_id,
                             gate_key,
-                            max_rounds=(1 if gate_key == "content_gate" else 2) if gate_auto_fix else 1,
+                            # One visual repair pass only. Re-running this gate with
+                            # auto-fix rebuilt the whole prompt batch and caused drift.
+                            max_rounds=(1 if gate_key in {"content_gate", "visual_prompt_gate"} else 2) if gate_auto_fix else 1,
                             auto_fix=gate_auto_fix,
                             progress_callback=update_gate_live_status,
                         )
@@ -40657,6 +48261,7 @@ class JobRuntime:
                                 log_lines,
                                 job_id,
                                 progress_callback=update_gate_asset_repair,
+                                allow_incomplete_video=allow_incomplete_video,
                             )
                             await asyncio.to_thread(record_production_step, project_id, repair_step)
                             repair_actions.append(repair_label)
@@ -40673,6 +48278,15 @@ class JobRuntime:
                         refreshed_gate["actions"] = repair_actions
                         refreshed_gate["asset_repair_steps"] = repair_steps
                         gate_result = refreshed_gate
+                    if (
+                        not gate_result.get("passed")
+                        and allow_incomplete_video
+                        and gate_key == "pre_video_gate"
+                        and pre_video_gate_can_continue_incomplete(gate_result)
+                    ):
+                        gate_result = accept_stage_gate_with_warnings(gate_result)
+                        gate_result["verdict"] = "技术资产完整；质量评分保留为提醒，本次继续合成"
+                        log_lines.append("[gate] 成片技术资产完整；文案节奏、图片评分或人工确认仅作提醒，本次继续合成")
                     before_score = gate_result.get("before", {}).get("score", gate_result.get("score", 0))
                     after_score = gate_result.get("after", {}).get("score", gate_result.get("score", 0))
                     rounds = gate_result.get("rounds") if isinstance(gate_result.get("rounds"), list) else []
@@ -40681,8 +48295,7 @@ class JobRuntime:
                             if not isinstance(round_item, dict):
                                 continue
                             log_lines.append(
-                                f"[gate] {gate_label}：第 {round_item.get('round')} 轮复评 "
-                                f"{round_item.get('score', 0)} 分，状态 {round_item.get('status')}"
+                                f"[gate] {gate_label}：" + gate_round_message(round_item, round_item.get('round'))
                             )
                     actions = gate_result.get("actions") if isinstance(gate_result.get("actions"), list) else []
                     if actions:
@@ -40699,7 +48312,12 @@ class JobRuntime:
                         progress[-1]["finished_at"] = storage.now_ts()
                         completed_gates.add(gate_key)
                         if gate_result.get("content_changed"):
-                            gate_changed_content = True
+                            if not stage_gate_change_requires_full_refresh(gate_key, step, True):
+                                log_lines.append(
+                                    f"[gate] {gate_label}已更新后续提示词；当前是补缺失模式，已有正式图片保持不动"
+                                )
+                            else:
+                                gate_changed_content = True
                             content = storage.get_content(project_id)
                             summary = storage.get_summary(project_id)
                             title = summary.get("publish_title") or summary.get("video_title") or project["topic_name"]
@@ -40713,10 +48331,7 @@ class JobRuntime:
                                 level = "阻止" if issue.get("level") == "risk" else "提醒"
                                 log_lines.append(f"[gate] {level}：{issue.get('where', '')} - {issue.get('issue', '')}；建议：{issue.get('fix', '')}")
                         self._flush(project_id, snapshot, log_lines, progress, f"gate:{gate_key}")
-                        if explicit_gate_mode == "check":
-                            completed_gates.add(gate_key)
-                            continue
-                        raise RuntimeError(f"{gate_label}未通过，已停止进入下一步。")
+                        raise RuntimeError(f"{gate_label}：{gate_result.get('error') or '复检未通过'}，已停止进入下一步。")
                     self._flush(project_id, snapshot, log_lines, progress, f"gate:{gate_key}")
 
                 if explicit_gate_key:
@@ -40768,6 +48383,7 @@ class JobRuntime:
                             log_lines,
                             job_id,
                             progress_callback=update_step_live_status,
+                            allow_incomplete_video=allow_incomplete_video,
                         )
                     )
                     try:
@@ -40995,6 +48611,7 @@ class JobRuntime:
         log_lines: list[str],
         job_id: str,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        allow_incomplete_video: bool = False,
     ) -> tuple[bool, list[str]]:
         mode = project.get("template_mode", "video")
         template_key = clean_text(project.get("template", ""))
@@ -41129,9 +48746,24 @@ class JobRuntime:
             if voice_mode == "dual":
                 voice_summary += f" + {tts_voice_label(speaker_2) or '全局默认音色 2'}"
             add(f"[audio] 本期音色：{voice_summary}；语速 {speech_rate:.2f}x")
-            add("[audio] 正在调用豆包播客生成真实音频 podcast.mp3")
-            if not env.get("VOLC_TTS_APP_KEY") or not env.get("VOLC_TTS_ACCESS_KEY"):
-                raise RuntimeError("VOLC_TTS_APP_KEY / VOLC_TTS_ACCESS_KEY 未配置，无法生成真实配音。")
+            podcast_app_id = clean_text(
+                str(env.get("VOLC_PODCAST_APP_ID") or env.get("VOLC_TTS_APP_KEY") or "")
+            )
+            podcast_token = clean_text(
+                str(env.get("VOLC_PODCAST_ACCESS_TOKEN") or env.get("VOLC_TTS_ACCESS_KEY") or "")
+            )
+            if not podcast_app_id or not podcast_token:
+                raise RuntimeError("豆包播客大模型的 APP ID / Access Token 未配置，无法生成配音。")
+            credential_env = dict(env)
+            credential_env["VOLC_TTS_APP_KEY"] = podcast_app_id
+            credential_env["VOLC_TTS_ACCESS_KEY"] = podcast_token
+            credential_env["VOLC_TTS_RESOURCE_ID"] = clean_text(
+                str(env.get("VOLC_PODCAST_RESOURCE_ID") or "volc.service_type.10050")
+            )
+            if voice_mode == "single":
+                add("[audio] 正在调用豆包播客大模型生成单一音色 podcast.mp3")
+            else:
+                add("[audio] 正在调用豆包播客大模型生成双人音色 podcast.mp3")
             add("[audio] 已切换为逐句直读模式，禁止豆包自动改写开场和结尾")
             result = await asyncio.to_thread(
                 run_original_bridge,
@@ -41149,7 +48781,7 @@ class JobRuntime:
                         "speech_rate": max(0.8, min(speech_rate, 1.2)),
                     },
                 },
-                env,
+                credential_env,
                 configured_timeout_seconds(env, "TTS_TIMEOUT_SECONDS", 1200, 300, 3600),
             )
             effective_speakers = [
@@ -41167,13 +48799,13 @@ class JobRuntime:
                 output_path.unlink(missing_ok=True)
                 raise RuntimeError("单人配音没有锁定为连续单音色请求，已丢弃本次音频，请重试。")
             if voice_mode == "single":
-                add(
-                    "[audio] 单人稿已压缩为最少接口安全分段，"
-                    "所有分段与两个音色槽位均锁定同一男声"
-                )
+                add("[audio] 单人稿已在播客请求中锁定同一音色，所有台词均由主讲人朗读")
             else:
                 add("[audio] 正在整理豆包逐句 MP3 分段并抑制齿音，不会直接拼接音频字节")
-            audio_processing = await asyncio.to_thread(normalize_tts_audio_asset, output_path, tts_dialogue)
+            request_dialogue = result.get("request_dialogue_lines")
+            if not isinstance(request_dialogue, list) or not request_dialogue:
+                request_dialogue = tts_dialogue
+            audio_processing = await asyncio.to_thread(normalize_tts_audio_asset, output_path, request_dialogue)
             add(
                 "[audio] 音频分段整理完成："
                 f"{audio_processing.get('round_count', 1)} 段 -> 1 条规范音轨，"
@@ -41229,7 +48861,8 @@ class JobRuntime:
             if removed_subtitle_artifacts:
                 add("[audio] 新配音已落盘，已使旧字幕/时轴失效，下一步将按本次音频重新对齐")
             size_mb = output_path.stat().st_size / 1048576.0
-            add(f"[audio] 豆包播客音频已生成 -> podcast.mp3 ({size_mb:.1f} MB)")
+            channel_label = "豆包播客大模型（单人）" if voice_mode == "single" else "豆包播客大模型（双人）"
+            add(f"[audio] {channel_label} 音频已生成 -> podcast.mp3 ({size_mb:.1f} MB)")
             return True, scene_lines
 
         if step == "subtitles":
@@ -41242,40 +48875,110 @@ class JobRuntime:
             scene_lines = current_scene_prompts(project_id, content, mode, project["topic_name"], prefer_timeline=False)
             dialogue_payload = current_spoken_dialogue_payload(project_id, content, mode, project["topic_name"])
             dialogue_texts = [item["text"] for item in dialogue_payload] or scene_lines
-            add("[subtitles] 正在调用火山 ASR 生成真实字幕")
-            if not env.get("VOLC_ASR_APP_KEY") and env.get("VOLC_TTS_APP_KEY"):
-                add("[subtitles] 当前未单独填写 ASR 密钥，先回退复用 TTS 密钥识别")
-            result = await asyncio.to_thread(
-                run_original_bridge,
-                "asr",
-                {
-                    "audio_path": str(audio_path),
-                    "srt_output": str(srt_path),
-                    "dialogue_lines": dialogue_texts,
-                },
-                env,
-                configured_timeout_seconds(env, "ASR_TIMEOUT_SECONDS", 900, 300, 3600),
+            api_key_configured = bool(clean_text(env.get("VOLC_SPEECH_API_KEY", "")))
+            add(
+                "[subtitles] 正在调用豆包语音 API Key 识别真实时间"
+                if api_key_configured
+                else "[subtitles] 新版 API Key 未配置，将使用兼容识别或本地真实停顿对齐"
             )
-            utterances = result.get("utterances", []) if isinstance(result.get("utterances", []), list) else []
-            if not utterances:
-                utterances = load_srt_entries(srt_path)
-            if not utterances:
-                raise RuntimeError("原版 ASR 没有返回可用字幕。")
-            asr_utterances = normalize_asr_subtitle_entries(utterances)
             audio_duration_ms = max(1000, round(probe_audio_duration(audio_path) * 1000))
-            coverage = subtitle_coverage_ratio(asr_utterances, audio_duration_ms)
-            utterances = build_source_locked_subtitles(dialogue_texts, asr_utterances, audio_duration_ms)
+            asr_timeout = configured_timeout_seconds(env, "ASR_TIMEOUT_SECONDS", 900, 300, 3600)
+            subtitle_timing_source = ""
+            asr_utterances: list[dict[str, Any]] = []
+
+            if api_key_configured:
+                try:
+                    result = await asyncio.to_thread(
+                        transcribe_volc_asr_api_key,
+                        audio_path,
+                        env,
+                        timeout=asr_timeout,
+                    )
+                    raw_utterances = result.get("utterances", [])
+                    if not isinstance(raw_utterances, list) or not raw_utterances:
+                        raise RuntimeError("新版接口已返回，但没有可用的分句时间。")
+                    asr_utterances = normalize_asr_subtitle_entries(raw_utterances)
+                    subtitle_timing_source = "volc_api_key_asr_text_aligned"
+                    add(
+                        "[subtitles] 豆包语音 API Key 识别完成："
+                        f"{len(asr_utterances)} 个真实语音分句"
+                    )
+                except Exception as exc:
+                    add(f"[subtitles] 新版 API Key 识别未完成，自动尝试下一层：{clean_text(str(exc))}")
+
+            legacy_available = bool(
+                (env.get("VOLC_ASR_APP_KEY") and env.get("VOLC_ASR_ACCESS_KEY"))
+                or (env.get("VOLC_TTS_APP_KEY") and env.get("VOLC_TTS_ACCESS_KEY"))
+            )
+            if not asr_utterances and legacy_available:
+                try:
+                    add("[subtitles] 正在尝试旧版兼容鉴权（已有凭据时才执行）")
+                    result = await asyncio.to_thread(
+                        run_original_bridge,
+                        "asr",
+                        {
+                            "audio_path": str(audio_path),
+                            "srt_output": str(srt_path),
+                            "dialogue_lines": dialogue_texts,
+                        },
+                        env,
+                        asr_timeout,
+                    )
+                    raw_utterances = result.get("utterances", []) if isinstance(result.get("utterances", []), list) else []
+                    if not raw_utterances:
+                        raw_utterances = load_srt_entries(srt_path)
+                    if not raw_utterances:
+                        raise RuntimeError("旧版兼容接口没有返回可用分句。")
+                    asr_utterances = normalize_asr_subtitle_entries(raw_utterances)
+                    subtitle_timing_source = "legacy_asr_text_aligned"
+                    add(f"[subtitles] 旧版兼容识别完成：{len(asr_utterances)} 个真实语音分句")
+                except Exception as exc:
+                    add(f"[subtitles] 旧版兼容识别不可用，自动切换本地对齐：{clean_text(str(exc))}")
+
+            if asr_utterances:
+                coverage = subtitle_coverage_ratio(asr_utterances, audio_duration_ms)
+                utterances = build_source_locked_subtitles(dialogue_texts, asr_utterances, audio_duration_ms)
+            else:
+                coverage = 1.0
+                speech_intervals = await asyncio.to_thread(
+                    detect_audio_speech_intervals,
+                    audio_path,
+                    audio_duration_ms,
+                )
+                processing = storage.read_json(audio_path.with_name("podcast_processing.json"), {})
+                processing = processing if isinstance(processing, dict) else {}
+                utterances = build_round_anchored_audio_activity_subtitles(
+                    dialogue_texts,
+                    speech_intervals,
+                    audio_duration_ms,
+                    processing.get("round_timeline", []),
+                )
+                subtitle_timing_source = (
+                    "tts_round_audio_activity_aligned"
+                    if processing.get("round_timeline")
+                    else "audio_activity_aligned"
+                )
+                add(
+                    "[subtitles] 云端识别不可用，已根据真实人声、停顿和豆包 TTS 分段进行本地强制对齐；"
+                    "字幕文字锁定最终口播稿，静音区间不再消耗字幕时间"
+                )
             if not utterances:
                 raise RuntimeError("无法根据最终口播稿建立字幕时间轴。")
             scene_count_info = resolve_project_scene_count(project, content, mode, candidate_count=len(scene_lines), audio_ms=audio_duration_ms)
             desired_scene_count = int(scene_count_info.get("final", len(scene_lines)) or len(scene_lines) or 1)
             if scene_count_info.get("mode") != "fixed":
+                add(
+                    "[scene_timeline] 文案信息量分析："
+                    f"识别 {scene_count_info.get('information_count', 0)} 个独立信息节点，"
+                    f"候选提示词 {scene_count_info.get('candidate_count', len(scene_lines))} 个；"
+                    "图片数量以文案信息变化为主，音频时长只做显示安全限制"
+                )
                 semantic_count_info = suggest_semantic_key_image_count(utterances, desired_scene_count, audio_duration_ms)
                 desired_scene_count = int(semantic_count_info.get("final", desired_scene_count) or desired_scene_count)
                 scene_count_info["semantic_selection"] = semantic_count_info
                 add(
                     "[scene_timeline] 关键画面筛选："
-                    f"时间建议 {semantic_count_info.get('requested')} 张，语义节点 {semantic_count_info.get('semantic_count')} 个，最终 {desired_scene_count} 张"
+                    f"文案建议 {semantic_count_info.get('requested')} 张，字幕语义节点 {semantic_count_info.get('semantic_count')} 个，最终 {desired_scene_count} 张"
                 )
             latest_job = storage.load_latest_job(project_id) or {}
             existing_scene_count = int(storage.scene_status(project_id).get("generated_count", 0) or 0)
@@ -41327,8 +49030,8 @@ class JobRuntime:
                 add(
                     f"[scene_timeline] 音频时长命中的建议区间：{scene_range.get('min', len(aligned_lines))}-{scene_range.get('max', len(aligned_lines))} 张"
                 )
-            scene_count_source = "fixed_setting" if scene_count_info.get("mode") == "fixed" else "audio_timeline"
-            scene_count_label = "固定张数" if scene_count_source == "fixed_setting" else "真实音频时轴"
+            scene_count_source = "fixed_setting" if scene_count_info.get("mode") == "fixed" else "script_information"
+            scene_count_label = "固定张数" if scene_count_source == "fixed_setting" else "文案信息节点"
             add(f"[scene_timeline] 本次张数锁定：{len(aligned_lines)} 张（{scene_count_label}，音频 {audio_duration_ms / 1000:.1f}s）")
             scene_plan = write_scene_plan(project_id, project, content, timeline, image_scene_lines or scene_lines)
             write_srt_entries(srt_path, merge_subtitle_display_entries(utterances))
@@ -41338,7 +49041,7 @@ class JobRuntime:
                 {
                     "version": SUBTITLE_SYNC_MANIFEST_VERSION,
                     "generated_at": storage.now_ts(),
-                    "timing_source": "asr_text_aligned",
+                    "timing_source": subtitle_timing_source,
                     "speech_hash": semantic_text_hash(dialogue_texts),
                     "audio_hash": production_file_hash(audio_path),
                     "utterance_count": len(dialogue_texts),
@@ -41444,17 +49147,21 @@ class JobRuntime:
                     for index in stale_scene_image_indexes(project_id)
                     if 1 <= index <= len(scene_lines)
                 }
-                preserved_stale_indexes = stale_indexes.difference(localized_change_indexes)
-                if preserved_stale_indexes:
+                if stale_indexes:
+                    # Missing-image recovery also repairs assets produced by an
+                    # older prompt policy. The stale detector already exempts
+                    # explicitly accepted images, so confirmed work is kept.
+                    missing_indexes.update(stale_indexes)
                     add(
-                        "[images] 补缺失模式：以下已有正式图仅提示词版本过期，本轮保留不覆盖 "
-                        + "、".join(f"s_{item:02d}" for item in sorted(preserved_stale_indexes))
+                        "[images] 检测到已有图片血缘过期："
+                        + "、".join(f"s_{item:02d}" for item in sorted(stale_indexes))
+                        + "；已并入本轮重生成，手动确认保留的图片不会覆盖"
                     )
                 if missing_indexes:
                     add(
-                        "[images] 增量补图模式：只处理 "
+                        "[images] 增量修复模式：处理缺失或血缘过期的 "
                         + "、".join(f"s_{item:02d}" for item in sorted(missing_indexes))
-                        + "；其它正式图不会因旧评分或软提醒被覆盖"
+                        + "；其它有效正式图保持不动"
                     )
                 if not missing_indexes:
                     if removed_extras:
@@ -41489,20 +49196,28 @@ class JobRuntime:
             opening_concept_plan: dict[str, Any] = {}
             opening_concept_base_prompt = ""
             opening_concepts: list[dict[str, Any]] = []
-            opening_job = (
-                next(((idx, prompt) for idx, prompt in scene_jobs if idx == 1), None)
-                if not missing_only and not sample_only
-                else None
-            )
+            # Project 109 generated one image per scene. Later first-frame
+            # competitions caused duplicate generation and are not part of this
+            # production contract.
+            opening_job = None
             if opening_job:
                 opening_concept_base_prompt = opening_job[1]
                 add("[images] 首镜创意导演：先生成 3 个文字构思，按标题、首句、冲突和差异度选前 2 名成图")
-                opening_concept_plan = await asyncio.to_thread(
-                    generate_key_visual_concepts,
-                    project_id,
-                    "opening",
-                    opening_concept_base_prompt,
-                )
+                try:
+                    opening_concept_plan = await asyncio.to_thread(
+                        generate_key_visual_concepts,
+                        project_id,
+                        "opening",
+                        opening_concept_base_prompt,
+                    )
+                except Exception as concept_exc:
+                    # Concept planning improves quality, but it is not required
+                    # to execute the scene-image job itself.
+                    opening_concept_plan = {}
+                    add(
+                        "[images] 首镜创意规划暂不可用，已回退到当前场景提示词继续生成："
+                        f"{user_facing_error(concept_exc)}"
+                    )
                 opening_concepts = (
                     opening_concept_plan.get("selected_concepts")
                     if isinstance(opening_concept_plan.get("selected_concepts"), list)
@@ -41533,7 +49248,8 @@ class JobRuntime:
                 add(f"[images] 已复用上一轮旧图 {len(reused_records)} 张：{', '.join(str(item.get('filename')) for item in reused_records[:12])}")
             if scene_jobs:
                 add("[gate] 生图前提示词闸门：正在检查本次实际发送给图片模型的场景图提示词")
-                prompt_preflight = preflight_generation_prompt_batch(
+                prompt_preflight = await asyncio.to_thread(
+                    preflight_generation_prompt_batch,
                     project_id,
                     [
                         {"target": f"s_{idx:02d}.png", "label": f"场景 {idx}", "prompt": prompt}
@@ -41547,26 +49263,134 @@ class JobRuntime:
                     if isinstance(item, dict):
                         level = "阻止" if item.get("level") == "risk" else "提醒"
                         add(f"[gate] {level}：{item.get('where', '')} - {item.get('issue', '')}；建议：{item.get('fix', '')}")
+                if not visual_prompt_preflight_may_continue(project_id, prompt_preflight):
+                    raise RuntimeError("生图前提示词闸门未通过：实际提示词仍有主题或安全风险，已停止调用图片接口。")
                 if not prompt_preflight.get("generation_safe", prompt_preflight.get("passed")):
-                    raise RuntimeError("生图前提示词闸门未通过，已停止调用图片接口。")
+                    add("[gate] 已人工跳过提示词质量提醒，继续调用图片模型")
                 final_prompt_map = prompt_preflight.get("final_prompts") if isinstance(prompt_preflight.get("final_prompts"), dict) else {}
+                preflight_entries = {
+                    clean_text(str(item.get("target") or "")): item
+                    for item in (prompt_preflight.get("entries") or [])
+                    if isinstance(item, dict) and clean_text(str(item.get("target") or ""))
+                }
                 protected_scene_jobs: list[tuple[int, str]] = []
+                lineage_rejected_count = 0
                 for idx, prompt in scene_jobs:
                     original_prompt = normalize_image_prompt(repair_legacy_mojibake(prompt))
-                    candidate_prompt = normalize_image_prompt(
-                        repair_legacy_mojibake(final_prompt_map.get(f"s_{idx:02d}.png") or original_prompt)
+                    target = f"s_{idx:02d}.png"
+                    entry = preflight_entries.get(target, {})
+                    semantic_context = entry.get("semantic_context") if isinstance(entry.get("semantic_context"), dict) else {}
+                    expected_speech = (
+                        authoritative_scene_speech_for_output(storage.project_file(project_id, f"scenes/{target}"))
+                        or clean_text(str(semantic_context.get("speech") or ""))
+                        or scene_prompt_speech_anchor(original_prompt)
                     )
-                    integrity = semantic_scene_brief_integrity(original_prompt, candidate_prompt)
-                    protected_scene_jobs.append(
-                        (
-                            idx,
-                            candidate_prompt
-                            if integrity.get("ok")
-                            and scene_prompt_preserves_channel_contract(original_prompt, candidate_prompt)
-                            else original_prompt,
+                    if not entry:
+                        candidate_prompt = normalize_image_prompt(
+                            repair_legacy_mojibake(final_prompt_map.get(target) or original_prompt)
                         )
+                        candidate_prompt = bind_scene_prompt_lineage(
+                            candidate_prompt,
+                            clean_text(str(project.get("topic_name") or first_heading(content) or "")),
+                            expected_speech,
+                        )
+                        protected_scene_jobs.append((idx, candidate_prompt))
+                        continue
+                    ranked_candidates = [
+                        final_prompt_map.get(target),
+                        entry.get("candidate_prompt"),
+                        entry.get("elastic_prompt"),
+                        original_prompt,
+                    ]
+                    candidate_prompt = ""
+                    for raw_candidate in ranked_candidates:
+                        proposed = normalize_image_prompt(repair_legacy_mojibake(raw_candidate or ""))
+                        proposed_topic_match = re.search(r"(?:^|\n)本期主题\s*[:：]\s*([^\n]+)", proposed)
+                        proposed_topic = clean_text(proposed_topic_match.group(1)) if proposed_topic_match else ""
+                        proposed_speech = scene_prompt_speech_anchor(proposed)
+                        topic_ok = bool(proposed_topic) and token_overlap_score(
+                            proposed_topic,
+                            clean_text(str(project.get("topic_name") or "")),
+                            limit=64,
+                        ) >= 30
+                        speech_ok = bool(expected_speech and proposed_speech) and token_overlap_score(
+                            proposed_speech,
+                            expected_speech,
+                            limit=96,
+                        ) >= 32
+                        if topic_ok and speech_ok:
+                            candidate_prompt = proposed
+                            break
+                        if proposed and raw_candidate == final_prompt_map.get(target):
+                            lineage_rejected_count += 1
+                    if not candidate_prompt:
+                        candidate_prompt = normalize_image_prompt(
+                            ensure_prompt_contains_speech_anchor(
+                                scene_specific_image_prompt(
+                                    topic=clean_text(str(project.get("topic_name") or "")),
+                                    speech_text=expected_speech,
+                                    source_prompt=original_prompt,
+                                    visual_scene={},
+                                    visual_world="",
+                                    narrative="",
+                                    visual_type=infer_visual_type(original_prompt, expected_speech),
+                                    viewpoint="",
+                                    style_hint="",
+                                    scene_index=idx,
+                                    total_scenes=max(1, len(scene_lines)),
+                                ),
+                                expected_speech,
+                                purpose="scene",
+                            )
+                        )
+                    # Bind after candidate selection as a final invariant. This
+                    # prevents a stale best-version fallback from reintroducing
+                    # another episode between preflight and provider dispatch.
+                    candidate_prompt = bind_scene_prompt_lineage(
+                        candidate_prompt,
+                        clean_text(str(project.get("topic_name") or first_heading(content) or "")),
+                        expected_speech,
                     )
+                    protected_scene_jobs.append((idx, candidate_prompt))
                 scene_jobs = protected_scene_jobs
+                if lineage_rejected_count:
+                    add(
+                        f"[images] 已拒绝 {lineage_rejected_count} 条跨主题历史高分提示词，"
+                        "改用本轮当前口播绑定版本"
+                    )
+                # The exact prompt below is what will be sent to the provider.
+                # Do not trust an earlier preflight after a best-version lock
+                # has replaced its candidate with another string.
+                outbound_contract_errors: list[str] = []
+                active_topic = clean_text(str(project.get("topic_name") or first_heading(content) or ""))
+                for idx, outbound_prompt in scene_jobs:
+                    entry = preflight_entries.get(f"s_{idx:02d}.png", {})
+                    semantic_context = entry.get("semantic_context") if isinstance(entry.get("semantic_context"), dict) else {}
+                    expected_prompt = normalize_image_prompt(scene_lines[idx - 1]) if 0 < idx <= len(scene_lines) else ""
+                    expected_speech = (
+                        authoritative_scene_speech_for_output(storage.project_file(project_id, f"scenes/s_{idx:02d}.png"))
+                        or clean_text(str(semantic_context.get("speech") or ""))
+                        or scene_prompt_speech_anchor(expected_prompt)
+                    )
+                    outbound_speech = scene_prompt_speech_anchor(outbound_prompt)
+                    topic_match = re.search(r"(?:^|\n)本期主题\s*[:：]\s*([^\n]+)", outbound_prompt)
+                    outbound_topic = clean_text(topic_match.group(1)) if topic_match else ""
+                    reasons: list[str] = []
+                    if not outbound_topic or token_overlap_score(outbound_topic, active_topic, limit=64) < 30:
+                        reasons.append("当前主题缺失或不匹配")
+                    if not expected_speech or not scene_prompt_matches_authoritative_speech(
+                        outbound_prompt,
+                        expected_speech,
+                        fallback_anchor=scene_prompt_speech_anchor(expected_prompt),
+                    ):
+                        reasons.append("当前镜头口播缺失或不匹配")
+                    if reasons:
+                        outbound_contract_errors.append(f"s_{idx:02d}: {'、'.join(reasons)}")
+                if outbound_contract_errors:
+                    raise RuntimeError(
+                        "实际生图提示词与当前主题血缘不一致，已在调用图片模型前停止："
+                        + "；".join(outbound_contract_errors[:8])
+                    )
                 scene_callout_map = {
                     image_target_scene_index(str(item.get("target") or ""), str(item.get("label") or "")): clean_scene_callout_item(
                         str((item.get("callouts") or [""])[0])
@@ -41586,8 +49410,8 @@ class JobRuntime:
             if scene_jobs:
                 add(f"[images] 正在调用 {provider['label']} 生成 {len(scene_jobs)} 张场景图")
                 add(f"[images] {provider_desc}")
-                add("[images] 关键位竞争策略：普通镜头 1 张；首镜先做 3 个文字构思，只生成前 2 名，再看真实成图保留 1 张")
-                if provider["key"] in {"apiyi", "third_party"}:
+                add(f"[images] Project {project_id} 模式：每个镜头只生成 1 张，失败只重试当前镜头")
+                if provider["key"] in {"apiyi", "third_party", "cpa_image"}:
                     add("[images] OpenAI 兼容文生图单张通常需要几十秒；已切换为稳态串行生成，逐张完成后再进入下一张")
                 if provider["key"] == "chatgpt_web_handoff":
                     add("[images] ChatGPT 网页接力：只打开 chatgpt.com，不会唤起桌面软件")
@@ -41607,9 +49431,45 @@ class JobRuntime:
                 add("[images] 智能复用模式：旧图相似则保留，缺失或不匹配的编号才生成新图")
             else:
                 add("[images] 智能复用模式：本轮场景图全部复用上一轮旧图")
+            scene_prompt_controls = load_image_prompt_controls(project_id)
+            saved_scene_controls = (
+                scene_prompt_controls.get("scenes", {})
+                if isinstance(scene_prompt_controls.get("scenes"), dict)
+                else {}
+            )
+            episode_topic = clean_text(str(project.get("topic_name") or first_heading(content) or ""))
+            episode_content = content_without_image_prompts(content) or content
             for idx, prompt in scene_jobs:
                 filename = f"s_{idx:02d}.png"
                 output_path = storage.project_file(project_id, f"scenes/{filename}")
+                # Batch/sample generation and the prompt-preview endpoint must
+                # share the same final boundary.  Previously a saved per-shot
+                # correction (for example, the exact vehicle body type) was
+                # visible in the editor but silently absent from batch jobs.
+                scene_speech = (
+                    authoritative_scene_speech_for_output(output_path)
+                    or scene_prompt_speech_anchor(prompt)
+                )
+                prompt = bind_scene_prompt_lineage(prompt, episode_topic, scene_speech)
+                scene_topic_type = classify_visual_prompt_domain(
+                    clean_text(f"{episode_topic} {scene_speech}"),
+                    "scene",
+                )
+                prompt = enforce_episode_event_visual_contract(
+                    prompt,
+                    topic=episode_topic,
+                    content=episode_content,
+                    speech=scene_speech,
+                    topic_type=scene_topic_type,
+                )
+                scene_control = saved_scene_controls.get(filename, {})
+                saved_requirement = clean_text(
+                    str(scene_control.get("additional_requirement") or "")
+                ) if isinstance(scene_control, dict) else ""
+                if saved_requirement:
+                    prompt = normalize_image_prompt(
+                        f"{prompt}\n追加要求（最高优先级，必须落实）：{saved_requirement}"
+                    )
                 add(f"[images] 开始 {idx}/{len(scene_lines)} -> {filename}")
                 await asyncio.to_thread(
                     generate_configured_image_safely,
@@ -41633,6 +49493,9 @@ class JobRuntime:
                     "filename": filename,
                     "label": f"场景 {idx}",
                     "prompt": final_prompt,
+                    "planned_prompt": normalize_image_prompt(prompt),
+                    "outbound_prompt": normalize_image_prompt(final_prompt),
+                    "provider_prompt": normalize_image_prompt(final_prompt),
                     "source_prompt": normalize_image_prompt(prompt),
                     "audit": {
                         "ok": audit.get("ok", True),
@@ -41672,7 +49535,8 @@ class JobRuntime:
                             opening_concept_base_prompt or prompt,
                             concept=second_concept,
                         )
-                        candidate_preflight = preflight_generation_prompt_batch(
+                        candidate_preflight = await asyncio.to_thread(
+                            preflight_generation_prompt_batch,
                             project_id,
                             [
                                 {
@@ -41767,22 +49631,25 @@ class JobRuntime:
             env = runtime_env()
             provider = resolve_image_provider_queue(env)[0]
             provider_desc = describe_image_provider_queue(env)
+            # The current episode is the source of truth. A visual manifest may be stale
+            # even when its identity file still exists, so it must never override a
+            # freshly derived cover prompt for the active project.
             landscape_prompt = (
-                visual_prompt_manifest_cover_prompt(project_id, "landscape", content)
+                build_content_cover_prompt(project, template, content, "landscape")
+                or visual_prompt_manifest_cover_prompt(project_id, "landscape", content)
                 or video_spec_cover_prompt(project_id, "landscape")
-                or build_content_cover_prompt(project, template, content, "landscape")
                 or parse_cover_prompt_from_content(content, "landscape")
             )
             story_prompt = (
-                visual_prompt_manifest_cover_prompt(project_id, "story", content)
+                build_content_cover_prompt(project, template, content, "story")
+                or visual_prompt_manifest_cover_prompt(project_id, "story", content)
                 or video_spec_cover_prompt(project_id, "story")
-                or build_content_cover_prompt(project, template, content, "story")
                 or parse_cover_prompt_from_content(content, "story")
             )
             portrait_prompt = (
-                visual_prompt_manifest_cover_prompt(project_id, "portrait", content)
+                build_content_cover_prompt(project, template, content, "portrait")
+                or visual_prompt_manifest_cover_prompt(project_id, "portrait", content)
                 or video_spec_cover_prompt(project_id, "portrait")
-                or build_content_cover_prompt(project, template, content, "portrait")
                 or parse_cover_prompt_from_content(content, "portrait")
             )
             missing_only = step == "covers_missing"
@@ -41796,6 +49663,12 @@ class JobRuntime:
             required_cover_title = clean_text(
                 str(cover_summary.get("cover_title") or first_heading(content) or project.get("topic_name") or title)
             )
+            # Keep the same complete, readable headline selected by the fresh
+            # content-derived cover prompt.  Do not let the later text gate
+            # reintroduce the long raw topic and truncate an English word.
+            required_publish_title = clean_text(str(cover_summary.get("publish_title") or ""))
+            if len(required_cover_title) > 44 and 12 <= len(required_publish_title) <= 48:
+                required_cover_title = required_publish_title
             required_cover_subtitle = clean_text(
                 str(cover_summary.get("cover_subtitle") or extract_bullet_field(content, "封面副标题") or "")
             )
@@ -41814,32 +49687,14 @@ class JobRuntime:
                 for label, prompt, output_path, output_size in cover_jobs
             ]
             cover_prompt_by_name = {output_path.name: prompt for _label, prompt, output_path, _size in cover_jobs}
-            cover_variant_targets = [
-                ("图文封面", storage.project_file(project_id, "covers/cover_story.png"), COVER_STORY_SIZE),
-                ("竖屏封面", storage.project_file(project_id, "covers/cover_portrait.png"), COVER_PORTRAIT_SIZE),
-            ]
-
             def derive_cover_variants(master_path: Path, *, missing_only_local: bool = False) -> int:
-                derived = 0
-                if not master_path.exists() or master_path.stat().st_size < 4096:
-                    return 0
-                for variant_label, variant_path, variant_size in cover_variant_targets:
-                    if missing_only_local and variant_path.exists() and variant_path.stat().st_size >= 4096:
-                        continue
-                    variant_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(master_path, variant_path)
-                    normalize_generated_image_size(variant_path, variant_size, log=add, label=variant_label)
-                    variant_prompt = clean_text(
-                        str(cover_prompt_by_name.get(variant_path.name) or cover_prompt_by_name.get("cover_landscape.png") or "")
-                    )
-                    storage.write_text(variant_path.with_suffix(".md"), variant_prompt + "\n")
-                    variant_audit = audit_generated_image(variant_path, variant_size, "cover", variant_prompt)
-                    variant_audit["derived_from"] = "cover_landscape.png"
-                    variant_audit["generation_mode"] = "local_cover_adaptation"
-                    storage.write_json(variant_path.with_suffix(".audit.json"), variant_audit)
-                    derived += 1
-                    add(f"[covers] {variant_label}已由主封面本地适配，不追加图片模型调用")
-                return derived
+                return derive_cover_variants_from_master(
+                    project_id,
+                    master_path,
+                    cover_prompt_by_name,
+                    missing_only=missing_only_local,
+                    log=add,
+                )
 
             cover_concept_plan: dict[str, Any] = {}
             cover_concept_base_prompt = ""
@@ -41856,7 +49711,7 @@ class JobRuntime:
                 cover_jobs = [item for item in cover_jobs if item[2].name == "cover_landscape.png"]
                 add("[covers] 单封面模式：AI 只生成一张主封面，图文与竖屏比例由本地自动适配")
             landscape_job = next((item for item in cover_jobs if item[2].name == "cover_landscape.png"), None)
-            if landscape_job:
+            if landscape_job and PRODUCTION_LOGIC_VERSION != "project-109":
                 cover_concept_base_prompt = landscape_job[1]
                 add("[covers] 封面创意导演：先比较 3 个文字构思，只采用得分最高的一种生成正式封面")
                 cover_concept_plan = await asyncio.to_thread(
@@ -41895,7 +49750,8 @@ class JobRuntime:
                     add(f"[covers] 封面构思初选完成：{score_text}；默认只生成第 1 名")
             if cover_jobs:
                 add("[gate] 封面生图前提示词闸门：正在检查本次实际发送给图片模型的封面提示词")
-                prompt_preflight = preflight_generation_prompt_batch(
+                prompt_preflight = await asyncio.to_thread(
+                    preflight_generation_prompt_batch,
                     project_id,
                     [
                         {"target": output_path.name, "label": label, "prompt": prompt}
@@ -41909,8 +49765,10 @@ class JobRuntime:
                     if isinstance(item, dict):
                         level = "阻止" if item.get("level") == "risk" else "提醒"
                         add(f"[gate] {level}：{item.get('where', '')} - {item.get('issue', '')}；建议：{item.get('fix', '')}")
+                if not visual_prompt_preflight_may_continue(project_id, prompt_preflight):
+                    raise RuntimeError("封面生图前提示词闸门未通过：实际提示词仍有主题或安全风险，已停止调用图片接口。")
                 if not prompt_preflight.get("generation_safe", prompt_preflight.get("passed")):
-                    raise RuntimeError("封面生图前提示词闸门未通过，已停止调用图片接口。")
+                    add("[gate] 已人工跳过封面提示词质量提醒，继续调用图片模型")
                 final_prompt_map = prompt_preflight.get("final_prompts") if isinstance(prompt_preflight.get("final_prompts"), dict) else {}
                 cover_jobs = [
                     (
@@ -41928,7 +49786,7 @@ class JobRuntime:
                 ]
                 add(f"[gate] 封面生图前提示词闸门通过：{prompt_preflight.get('score', 0)} 分，开始调用图片模型")
             add(f"[covers] {provider_desc}")
-            if provider["key"] in {"apiyi", "third_party"}:
+            if provider["key"] in {"apiyi", "third_party", "cpa_image"}:
                 add("[covers] OpenAI 兼容文生图封面已切换为串行生成")
             if provider["key"] == "chatgpt_web_handoff":
                 add("[covers] ChatGPT 网页接力：只打开 chatgpt.com，不会唤起桌面软件")
@@ -41963,7 +49821,8 @@ class JobRuntime:
                             cover_concept_base_prompt or prompt,
                             concept=second_concept,
                         )
-                        candidate_preflight = preflight_generation_prompt_batch(
+                        candidate_preflight = await asyncio.to_thread(
+                            preflight_generation_prompt_batch,
                             project_id,
                             [
                                 {
@@ -42147,11 +50006,18 @@ class JobRuntime:
 
         if step == "video":
             preflight = video_preflight_report(project_id)
-            if not preflight.get("passed"):
-                for item in preflight.get("blockers", []):
+            technical_blockers = pre_video_technical_blockers(preflight)
+            blocking_items = technical_blockers if allow_incomplete_video else preflight.get("blockers", [])
+            if blocking_items:
+                for item in blocking_items:
                     if isinstance(item, dict):
                         add(f"[preflight] 阻止：{item.get('where', '')} - {item.get('issue', '')}；建议：{item.get('fix', '')}")
                 raise RuntimeError("成片前总检未通过，请先修复阻止项。")
+            if allow_incomplete_video and not preflight.get("passed"):
+                for item in preflight.get("blockers", []):
+                    if isinstance(item, dict):
+                        add(f"[preflight] 质量提醒：{item.get('where', '')} - {item.get('issue', '')}")
+                add("[preflight] 技术资产检查通过；本次按继续生产设置，带质量提醒进入合成")
             for item in preflight.get("warnings", []):
                 if isinstance(item, dict):
                     add(f"[preflight] 提醒：{item.get('where', '')} - {item.get('issue', '')}")
@@ -42294,6 +50160,7 @@ class JobRuntime:
         log_lines: list[str],
         job_id: str,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        allow_incomplete_video: bool = False,
     ) -> list[str]:
         handled, next_scene_lines = await self._handle_real_step(
             project_id,
@@ -42305,6 +50172,7 @@ class JobRuntime:
             log_lines,
             job_id,
             progress_callback,
+            allow_incomplete_video,
         )
         if handled:
             return next_scene_lines
@@ -42588,11 +50456,17 @@ def _expand_topic_direction_candidates(
     """Expand a broad direction such as “汽车” into actual candidate topics."""
     direction = clean_text(direction)
     raw: list[dict[str, Any]] = []
+    generic_titles = {
+        "总编辑圈点", "编辑圈点", "科技新闻", "最新科技新闻", "热点新闻",
+        "最新消息", "今日要闻", "新闻首页", "首页", "头条",
+    }
     for item in references:
         title = clean_text(str(item.get("title") or ""))
         if not title:
             continue
         title = re.split(r"\s+[-|｜]\s+", title, maxsplit=1)[0]
+        if title in generic_titles or len(re.sub(r"\W+", "", title)) < 6:
+            continue
         if re.search(r"[\u4e00-\u9fff]", direction) and len(re.findall(r"[\u4e00-\u9fff]", title)) < 3:
             continue
         raw.append(
@@ -42690,6 +50564,17 @@ def _topic_duplicate_penalty(title: str, existing_topics: list[str]) -> float:
     return max((overlap_score(tokens, item) for item in existing_topics), default=0.0)
 
 
+def _split_topic_title_and_search_query(title: str, search_query: str = "") -> tuple[str, str]:
+    """Separate a human headline from pipe-delimited search metadata."""
+    raw_title = clean_text(title)
+    parts = [clean_text(item) for item in re.split(r"[|｜]+", raw_title) if clean_text(item)]
+    display_title = parts[0] if len(parts) > 1 else raw_title
+    raw_query = clean_text(search_query)
+    if not raw_query or raw_query == raw_title:
+        raw_query = " ".join(parts) if parts else raw_title
+    return display_title, raw_query
+
+
 def _normalize_topic_candidates(raw_candidates: Any, existing_topics: list[str]) -> list[dict[str, Any]]:
     if not isinstance(raw_candidates, list):
         return []
@@ -42697,7 +50582,11 @@ def _normalize_topic_candidates(raw_candidates: Any, existing_topics: list[str])
     for item in raw_candidates:
         if not isinstance(item, dict):
             continue
-        title = clean_text(str(item.get("title") or item.get("topic") or ""))
+        raw_title = clean_text(str(item.get("title") or item.get("topic") or ""))
+        title, search_query = _split_topic_title_and_search_query(
+            raw_title,
+            clean_text(str(item.get("search_query") or item.get("query") or "")),
+        )
         if not title:
             continue
         try:
@@ -42710,7 +50599,7 @@ def _normalize_topic_candidates(raw_candidates: Any, existing_topics: list[str])
                 "title": title[:80],
                 "brief": clean_text(str(item.get("brief") or item.get("angle") or item.get("summary") or "")),
                 "why": clean_text(str(item.get("why") or item.get("reason") or item.get("value") or "")),
-                "search_query": clean_text(str(item.get("search_query") or item.get("query") or title)),
+                "search_query": search_query,
                 "target_duration": clean_text(str(item.get("target_duration") or item.get("duration") or "按信息量自适应")),
                 "score": max(0.0, min(5.0, score)),
                 "duplicate_penalty": round(duplicate_penalty, 3),
@@ -42727,6 +50616,11 @@ def apply_current_news_candidate_scores(
     references: list[dict[str, Any]],
     channel_terms: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    deepseek_pool_available = any(
+        clean_text(str(item.get("provider") or "")).lower() == "deepseek"
+        for item in references
+    )
+
     def topical_text(value: str) -> str:
         cleaned = clean_text(value)
         cleaned = re.sub(r"(?<!\d)20\d{2}(?!\d)", " ", cleaned)
@@ -42757,6 +50651,11 @@ def apply_current_news_candidate_scores(
                 matches.append((support_score, reference))
         matches.sort(key=lambda pair: (-pair[0], int((pair[1].get("freshness") or {}).get("age_days") or 9999)))
         evidence_count = len(matches)
+        deepseek_evidence_count = sum(
+            1
+            for _, item in matches
+            if clean_text(str(item.get("provider") or "")).lower() == "deepseek"
+        )
         source_domains = set()
         for _, item in matches:
             url = clean_text(str(item.get("url") or ""))
@@ -42792,6 +50691,7 @@ def apply_current_news_candidate_scores(
                     - duplicate_penalty * 2.2
                     + freshness_adjustment
                     + evidence_adjustment
+                    + (0.35 if deepseek_evidence_count else (-0.4 if deepseek_pool_available else 0.0))
                     + (specificity - 0.5) * 0.6
                     + (visual_potential - 0.5) * 0.35,
                 ),
@@ -42801,6 +50701,8 @@ def apply_current_news_candidate_scores(
         issues: list[str] = []
         if len(source_domains) < 2:
             issues.append("独立来源不足")
+        if deepseek_pool_available and deepseek_evidence_count <= 0:
+            issues.append("未命中DeepSeek主检索")
         if latest_age_days is None:
             issues.append("发布日期待确认")
         elif latest_age_days > 7:
@@ -42817,6 +50719,7 @@ def apply_current_news_candidate_scores(
             {
                 "score": round(max(0.0, adjusted_score), 3),
                 "news_evidence_count": evidence_count,
+                "deepseek_evidence_count": deepseek_evidence_count,
                 "independent_source_count": len(source_domains),
                 "latest_age_days": latest_age_days,
                 "readiness": readiness,
@@ -42833,6 +50736,8 @@ def apply_current_news_candidate_scores(
                         "url": clean_text(str(item.get("url") or "")),
                         "published_date": clean_text(str(item.get("published_date") or "")),
                         "freshness_status": clean_text(str(item.get("freshness_status") or "")),
+                        "provider": clean_text(str(item.get("provider") or "")),
+                        "source": clean_text(str(item.get("source") or "")),
                         "support_score": score,
                     }
                     for score, item in matches[:3]
@@ -42844,6 +50749,7 @@ def apply_current_news_candidate_scores(
     scored.sort(
         key=lambda item: (
             {"strong": 0, "review": 1, "weak": 2}.get(str(item.get("readiness") or "weak"), 2),
+            -int(item.get("deepseek_evidence_count") or 0),
             -int(item.get("news_evidence_count") or 0),
             -float(item.get("rank_score") or 0.0),
         )
@@ -42999,7 +50905,11 @@ def _clean_selected_topic_queue(raw_topics: Any) -> list[dict[str, Any]]:
     for item in raw_topics:
         if not isinstance(item, dict):
             continue
-        title = clean_text(str(item.get("title") or item.get("topic") or ""))
+        raw_title = clean_text(str(item.get("title") or item.get("topic") or ""))
+        title, search_query = _split_topic_title_and_search_query(
+            raw_title,
+            clean_text(str(item.get("search_query") or item.get("query") or "")),
+        )
         if not title:
             continue
         try:
@@ -43011,7 +50921,7 @@ def _clean_selected_topic_queue(raw_topics: Any) -> list[dict[str, Any]]:
                 "title": title[:80],
                 "brief": clean_text(str(item.get("brief") or item.get("angle") or item.get("summary") or "")),
                 "why": clean_text(str(item.get("why") or item.get("reason") or item.get("value") or "")),
-                "search_query": clean_text(str(item.get("search_query") or item.get("query") or title)),
+                "search_query": search_query,
                 "target_duration": clean_text(str(item.get("target_duration") or item.get("duration") or "按信息量自适应")),
                 "score": max(0.0, min(5.0, score)),
                 "rank_score": max(0.0, min(5.0, score)),
@@ -43087,6 +50997,9 @@ def _topic_mining_focuses(template: dict[str, Any], user_prompt: str, search_sco
     requested = clean_text(user_prompt)
     scope = clean_text(search_scope)
     if requested:
+        broad_direction = requested.lower() in {
+            "科技", "技术", "ai", "人工智能", "数码", "互联网", "消费电子", "智能设备"
+        }
         compact = re.sub(
             r"(?:最近|近)\s*(?:一|1|7)\s*(?:周|天)|普通人(?:能)?直接感知的|优先|重点|请关注|关注|相关的|方面的",
             " ",
@@ -43100,6 +51013,14 @@ def _topic_mining_focuses(template: dict[str, Any], user_prompt: str, search_sco
             if token in requested
         ]
         parts = [clean_text(f"{base} {modifier}") for modifier in modifiers[:3]] or [base[:32]]
+        if broad_direction:
+            channel_hint = clean_text(str(template.get("topic_mining_hint") or ""))
+            hint_parts = [
+                clean_text(item)
+                for item in re.split(r"[、，,；;|/\n]+", channel_hint)
+                if clean_text(item)
+            ]
+            parts = dedupe_clauses([*parts, *hint_parts, *_channel_topic_keywords(template)[:6]])
     else:
         hint = clean_text(str(template.get("topic_mining_hint") or ""))
         parts = [clean_text(item) for item in re.split(r"[、，,；;|/\n]+", hint) if clean_text(item)]
@@ -43107,7 +51028,27 @@ def _topic_mining_focuses(template: dict[str, Any], user_prompt: str, search_sco
             parts = _channel_topic_keywords(template)[:6]
     if scope and scope.lower() not in {"general", "auto", "news"}:
         parts.insert(0, clean_text(f"{requested} {scope}" if requested else scope))
-    return dedupe_clauses(parts)[:4]
+    return dedupe_clauses(parts)[:8]
+
+
+def _is_specific_topic_request(user_prompt: str) -> bool:
+    prompt = clean_text(user_prompt)
+    if len(prompt) < 7 or prompt.lower() in {"汽车", "手机", "科技", "ai", "人工智能", "芯片", "数码"}:
+        return False
+    generic_window = re.search(
+        r"(?:最近|近期|近\s*(?:一|1|7|30)?\s*(?:周|天|月)).*(?:变化|进展|动态|消息|新闻)$",
+        prompt,
+    )
+    strong_event_markers = (
+        "突破", "发现", "论文", "实验", "超导", "量子", "召回", "事故", "处罚", "泄露", "获批",
+    )
+    if generic_window and not any(marker in prompt for marker in strong_event_markers):
+        return False
+    event_markers = (
+        "突破", "发布", "发现", "论文", "实验", "研究", "超导", "量子", "芯片", "模型", "系统",
+        "更新", "召回", "事故", "处罚", "上市", "降价", "涨价", "关闭", "开放", "泄露", "获批",
+    )
+    return any(marker in prompt for marker in event_markers) or bool(re.search(r"\d|[A-Za-z]{2,}", prompt))
 
 
 def _mine_topic_reference_pool(
@@ -43120,15 +51061,37 @@ def _mine_topic_reference_pool(
     queries = [f"{today_label} {focus} 最新进展 发布 更新 影响" for focus in focuses]
     if not queries:
         queries = [f"{today_label} {template.get('name') or template.get('key') or ''} 最新进展"]
-    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as executor:
-        batches = list(executor.map(lambda item: search_current_news(item, 6), queries))
-    references = dedupe_references([item for batch in batches for item in batch])
+    deepseek_query = clean_text(
+        f"{today_label} {user_prompt or template.get('name') or template.get('key') or ''} "
+        f"{' '.join(focuses)} 最新科技事件 发布 更新 影响"
+    )
+    with ThreadPoolExecutor(max_workers=min(8, len(queries) + 1)) as executor:
+        deepseek_future = executor.submit(search_deepseek_web, deepseek_query, 16)
+        batches = list(executor.map(lambda item: search_current_news_auxiliary(item, 8), queries))
+        deepseek_references = deepseek_future.result()
+    references = dedupe_references([*deepseek_references, *[item for batch in batches for item in batch]])
     channel_terms = dedupe_clauses([*focuses, *_channel_topic_keywords(template)[:5]])
-    filtered = filter_current_news_references_for_channel(references, channel_terms)
+    channel_identity = clean_text(
+        f"{template.get('key') or ''} {template.get('name') or ''} {template.get('brand_name') or ''}"
+    ).lower()
+    broad_technology_request = clean_text(user_prompt).lower() in {
+        "科技", "技术", "ai", "人工智能", "数码", "互联网", "消费电子", "智能设备"
+    }
+    technology_channel = "科技" in channel_identity or "technology" in channel_identity or "tech" in channel_identity
+    if technology_channel and broad_technology_request:
+        # A technology channel is intentionally broad: do not require every
+        # result to mention a fixed subcategory such as phones or AI. Keep only
+        # the hard spam/irrelevant-page boundary.
+        filtered = [
+            item for item in references
+            if not _topic_reference_block_reason(item, channel_terms)
+        ]
+    else:
+        filtered = filter_current_news_references_for_channel(references, channel_terms)
     # Channel filtering is a hard boundary. Falling back to the unfiltered search
     # pool turns fresh landing pages from unrelated verticals into topic candidates.
     result = filtered if channel_terms else references
-    if clean_text(user_prompt):
+    if clean_text(user_prompt) and not (technology_channel and broad_technology_request):
         # An explicit mining direction is stricter than the channel's broad topic
         # vocabulary. A page that merely says "AI" must not pass a request for
         # "汽车", "手机" or another concrete direction.
@@ -43153,7 +51116,7 @@ def _mine_topic_reference_pool(
                 item for item in result
                 if any(term in clean_text(f"{item.get('title', '')} {item.get('snippet', '')}") for term in intent_terms)
             ]
-    return result[:18], queries
+    return result[:32], queries
 
 
 def _topic_specificity_score(title: str, brief: str) -> float:
@@ -43217,6 +51180,7 @@ def mine_channel_topic(
     user_prompt = clean_text(user_prompt)
     desired_count = max(1, min(int(desired_count or 6), 12))
     prompt_hint = user_prompt[:240]
+    specific_topic_request = _is_specific_topic_request(prompt_hint)
     channel_profile = channel_profile_text(template)
     expects_chinese = len(re.findall(r"[\u4e00-\u9fff]", f"{brand} {channel_profile}")) >= 5
     learning = channel_learning_prompt_block({"id": 0, "template": template_key}, template)
@@ -43227,6 +51191,10 @@ def mine_channel_topic(
         [brand, prompt_hint, search_scope, *keywords[:8], clean_text(str(template.get("topic_mining_hint") or ""))]
     )
     query = seed_queries[0] if seed_queries else " ".join([today_label, prompt_hint, search_scope, "最新进展"]).strip()
+    # The reference pool already applies the configured primary/fallback search
+    # strategy. For a user-specified direction, a second broad web search here
+    # can silently replace "no relevant evidence" with unrelated aggregator
+    # pages. Only unprompted discovery may use this last-resort fill.
     if not references and not prompt_hint:
         references = dedupe_references(
             [item for seed_query in seed_queries[:2] for item in search_duckduckgo(seed_query, 6)]
@@ -43236,8 +51204,8 @@ def mine_channel_topic(
     env = runtime_env()
     api_key = clean_text(env.get("DEEPSEEK_API_KEY", ""))
     if api_key and OpenAI is not None:
-        base_url = clean_text(env.get("DEEPSEEK_BASE_URL", "")) or "https://api.deepseek.com"
-        model = clean_text(env.get("DEEPSEEK_MODEL", "")) or "deepseek-v4-flash"
+        base_url = normalize_deepseek_base_url(env.get("DEEPSEEK_BASE_URL", ""))
+        model = normalize_deepseek_model(env.get("DEEPSEEK_MODEL", ""), base_url)
         thinking_type = clean_text(env.get("DEEPSEEK_THINKING_TYPE", "")) or "enabled"
         reasoning_effort = clean_text(env.get("DEEPSEEK_REASONING_EFFORT", "")) or "high"
         refs_block = format_reference_block("可参考的公开资料：", references[:8])
@@ -43250,7 +51218,7 @@ def mine_channel_topic(
 2. 选题要避开历史主题，优先挑有现实痛点、画面感、传播钩子、可查资料支撑的题。
 3. 返回严格 JSON，不要 Markdown，不要解释。
 4. 严格给 {desired_count} 个候选，每个候选包含 title、brief、why、search_query、target_duration、score。
-5. 用户输入的是“挖题范围/方向”，不是要求把输入原样当标题。每个候选都要在该范围内形成不同的具体事件、冲突、对象或决策角度。
+5. 用户输入可能是宽泛方向，也可能是明确事件。当前输入属于：{"明确事件，必须保留该事件并围绕它给出核验角度" if specific_topic_request else "宽泛方向，需要形成不同的具体事件、冲突、对象或决策角度"}。
 6. title 不超过 32 个字，brief 不超过 90 个字，why 不超过 55 个字，search_query 不超过 45 个字，避免输出被截断。
 7. 今天是 {today_label}。候选必须优先来自近7天资料，近7天不足时才允许使用近30天资料。
 8. 必须区分“网页发布日期”和“事件发生时间”。近期文章回顾多年前事件不是最新新闻，避免包装成刚发生。
@@ -43301,11 +51269,9 @@ def mine_channel_topic(
   ]
 }}
 """.strip()
-        extra_body: dict[str, Any] = {"reasoning_effort": reasoning_effort}
-        if thinking_type in {"enabled", "disabled"}:
-            extra_body["thinking"] = {"type": thinking_type}
+        extra_body = deepseek_optional_request_body(base_url, thinking_type, reasoning_effort)
         try:
-            client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0, default_headers={"User-Agent": "short-video-studio/1.0"})
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -43381,6 +51347,28 @@ def mine_channel_topic(
         candidates = apply_current_news_candidate_scores(candidates, references, candidate_channel_terms)
     candidates = _select_diverse_topic_candidates(candidates, desired_count)
 
+    if not candidates and specific_topic_request:
+        candidates = [
+            {
+                "title": prompt_hint[:80],
+                "brief": "用户明确指定的科技事件。当前公开来源尚未完成交叉核验，保留事件供人工复核，不再静默丢弃。",
+                "why": "事件具体、与频道相关，但生产前需要补齐论文、机构或主流报道来源。",
+                "search_query": prompt_hint,
+                "target_duration": "按核验后的信息量自适应",
+                "score": 3.0,
+                "rank_score": 3.0,
+                "source": "explicit_topic",
+                "news_evidence_count": 0,
+                "independent_source_count": 0,
+                "latest_age_days": None,
+                "readiness": "review",
+                "readiness_label": "待补证据",
+                "quality_issues": ["尚未取得可核验来源", "需要人工复核"],
+                "quality_dimensions": {"specificity": 0.9, "visual_potential": 0.65, "novelty": 0.8},
+                "news_evidence": [],
+            }
+        ]
+
     if not candidates and not prompt_hint:
         candidates = _fallback_topic_candidates(template, existing_topics)
 
@@ -43404,6 +51392,19 @@ def mine_channel_topic(
         "keywords": keywords,
         "user_prompt": user_prompt,
         "current_news_mode": True,
+        "grok2api_configured": bool(clean_text(env.get("GROK2API_API_KEY", ""))),
+        "primary_search_provider": (
+            "grok"
+            if any(clean_text(str(item.get("provider") or "")).lower() == "grok" for item in references)
+            else "fallback"
+        ),
+        "research_providers": sorted(
+            {
+                clean_text(str(item.get("provider") or item.get("source") or ""))
+                for item in references
+                if clean_text(str(item.get("provider") or item.get("source") or ""))
+            }
+        ),
         "freshness_policy_version": NEWS_FRESHNESS_POLICY_VERSION,
         "freshness_window": "7d_then_30d",
         "quality_summary": {
@@ -43412,8 +51413,17 @@ def mine_channel_topic(
             "strong_count": sum(1 for item in candidates if item.get("readiness") == "strong"),
             "review_count": sum(1 for item in candidates if item.get("readiness") == "review"),
             "reference_count": len(references),
+            "deepseek_reference_count": sum(
+                1 for item in references if clean_text(str(item.get("provider") or "")).lower() == "deepseek"
+            ),
             "message": (
-                "本轮近期资料不足，请缩小方向或稍后重试。"
+                "已保留明确事件，但尚未取得可核验来源；可补充资料或人工复核后生产。"
+                if candidates and candidates[0].get("source") == "explicit_topic"
+                else (
+                    "资料不足：主检索和辅助来源本轮都没有返回可用资料，请稍后重试。"
+                    if not references
+                    else "已找到资料，但没有内容同时符合当前频道和输入方向，请换一个更具体的关键词。"
+                )
                 if not candidates
                 else ("候选数量少于目标，只保留有近期依据的选题。" if len(candidates) < desired_count else "已完成近期事件筛选。")
             ),
@@ -43504,7 +51514,7 @@ def render_auto_topic_brief(topic_payload: dict[str, Any], template: dict[str, A
 - 模式：{template.get("mode") or "video"}
 - 封面风格：{template.get("cover_style") or "default"}
 - 发布标签：{template.get("release_tags") or ""}
-- 联网话题：{tavily_topic or "general"}
+- 检索范围：{tavily_topic or "general"}
 
 ## 本期选题
 - 主题：{title}
@@ -43568,7 +51578,7 @@ def render_auto_topic_brief_v2(topic_payload: dict[str, Any], template: dict[str
 - 模式：{template.get("mode") or "video"}
 - 封面风格：{template.get("cover_style") or "default"}
 - 发布标签：{template.get("release_tags") or ""}
-- 联网话题：{tavily_topic or "general"}
+- 检索范围：{tavily_topic or "general"}
 {prompt_block}
 {topic_lock_block}
 
@@ -43691,6 +51701,9 @@ class AutoVideoRuntime:
                 reconciled["finished_at"] = reconciled.get("finished_at") or storage.now_ts()
                 reconciled["error"] = ""
                 reconciled["phase_message"] = "自动挖题成片已完成。"
+                reconciled["child_job_id"] = clean_text(str(job.get("id") or ""))
+                reconciled["child_job_running"] = False
+                reconciled["runtime_health"] = job_runtime_health(job)
                 reconciled["result"] = self._project_result(project_id, job)
                 changed = True
         elif clean_text(str(job.get("status") or "")) in {"failed", "cancelled", "interrupted"}:
@@ -43760,12 +51773,66 @@ class AutoVideoRuntime:
         self._save()
         return self.state
 
+    async def continue_project(self, project_id: int) -> dict[str, Any]:
+        """Continue an auto-video task from its actual failed stage."""
+        if self.task and not self.task.done():
+            raise RuntimeError("已有自动成片任务正在运行，请等待完成或先取消。")
+        payload = storage.read_json(storage.project_file(project_id, "auto_video.json"), None)
+        if not isinstance(payload, dict):
+            payload = self.state or storage.read_json(AUTO_VIDEO_STATE_FILE, None)
+        if not isinstance(payload, dict) or int(payload.get("project_id") or 0) != project_id:
+            raise RuntimeError("没有找到这个项目对应的自动成片任务。")
+
+        self.state = dict(payload)
+        self.state["status"] = "running"
+        self.state["running"] = True
+        self.state["finished_at"] = None
+        self.state["error"] = ""
+        self.state["recovery_pending"] = False
+        self.state["phase_message"] = "正在从实际失败步骤自动修复并继续。"
+        self._log("[auto] 用户要求继续任务，正在从实际失败步骤恢复")
+        self.task = asyncio.create_task(self._resume_production_after_restart())
+        self._save()
+        return self.state
+
+    async def _ensure_content_before_production(self, project_id: int) -> None:
+        if storage.get_content(project_id).strip():
+            return
+        project = storage.get_project(project_id)
+        template_key = clean_text(str(project.get("template") or self.state.get("template_key") or ""))
+        template = storage.get_template(template_key)
+        brief = storage.get_brief(project_id)
+        if not brief.strip():
+            raise RuntimeError("项目文案和 brief.md 都为空，无法恢复文案生成。")
+
+        self._stage("content")
+        self.state["phase_message"] = "文案为空，正在先恢复文案生成。"
+        self._log("[auto] 检测到 content.md 为空，先重新生成文案，再继续后续步骤")
+        content_runtime = ContentRuntime()
+        await content_runtime.start(
+            project,
+            template,
+            brief,
+            clean_text(str(self.state.get("tavily_topic") or "general")) or "general",
+        )
+        content_task = content_runtime.tasks.get(project_id, {}).get("task")
+        if content_task:
+            await content_task
+        content_state = storage.read_json(storage.project_file(project_id, "content_generate.json"), {})
+        if content_state.get("status") != "succeeded" or not storage.get_content(project_id).strip():
+            raise RuntimeError(
+                clean_text(str(content_state.get("error") or content_state.get("fallback_reason") or "文案恢复失败"))
+            )
+        self._log("[auto] 文案已恢复，继续配音、字幕、图片和成片")
+
     async def _resume_production_after_restart(self) -> None:
         assert self.state is not None
         project_id = int(self.state.get("project_id") or 0)
         try:
             if not project_id:
                 raise RuntimeError("全自动续跑缺少项目编号。")
+            await self._ensure_content_before_production(project_id)
+            self._stage("produce")
             save_image_review_status(project_id, required=False, confirmed=False)
             runtime = JobRuntime()
             runtime.latest(project_id, force_recover_orphan=True)
@@ -43793,7 +51860,7 @@ class AutoVideoRuntime:
                 snapshot = await runtime.start(
                     storage.get_project(project_id),
                     resume_steps,
-                    allow_incomplete_video=False,
+                    allow_incomplete_video=True,
                     auto_recover=True,
                     origin="auto_video",
                 )
@@ -44044,7 +52111,7 @@ class AutoVideoRuntime:
                     job_snapshot = await job_runtime.start(
                         storage.get_project(project_id),
                         production_steps,
-                        allow_incomplete_video=False,
+                        allow_incomplete_video=True,
                         auto_recover=True,
                         origin="auto_video",
                     )

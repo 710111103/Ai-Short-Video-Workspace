@@ -42,10 +42,21 @@ dist/
 _analysis/
 _manual_api_test/
 _manual_apiyi_official_test/
+verification/
+.stitch/
 tmp*
 verify-*
 *-verify.*
 volc_tts_doc*.html
+/s_*.md
+/s_*.audit.json
+/.test-feedback-project-id
+/data/cpa-*-test.*
+/data/cpa-*-request.json
+/data/cpa-*-result*.json
+/data/job*-debug.json
+/data/job*-start.json
+/data/scene-prompt-*-verified.json
 
 # Logs and process files
 logs/
@@ -64,3 +75,11 @@ blob-report/
 Thumbs.db
 .idea/
 .vscode/
+
+
+# Privacy / desensitized publishing
+_references/
+data/learning/
+data/release_queue.json
+data/cpa-*.json
+*.before-*

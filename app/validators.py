@@ -150,15 +150,16 @@ def _write_test_wave(path: Path, duration_sec: float = 1.6, sample_rate: int = 1
 
 def validate_deepseek(values: dict[str, str]) -> dict[str, Any]:
     api_key = values.get("DEEPSEEK_API_KEY", "").strip()
-    model = values.get("DEEPSEEK_MODEL", "").strip()
-    base_url = (values.get("DEEPSEEK_BASE_URL", "") or "https://api.deepseek.com").rstrip("/")
+    base_url = _services().normalize_deepseek_base_url(values.get("DEEPSEEK_BASE_URL", ""))
+    configured_model = values.get("DEEPSEEK_MODEL", "").strip()
+    model = _services().normalize_deepseek_model(configured_model, base_url)
     if not api_key:
         return _result("deepseek", "unconfigured", "还没有填写 DeepSeek API Key。")
 
     response = _request_json(
         "GET",
         f"{base_url}/models",
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json", "User-Agent": "short-video-studio/1.0"},
     )
     if response["status"] == 200:
         payload = _parse_json(response["text"])
@@ -170,11 +171,12 @@ def validate_deepseek(values: dict[str, str]) -> dict[str, Any]:
                 f"DeepSeek 鉴权通过，但当前模型 {model} 不在官方返回列表里。",
                 {"models": models[:20]},
             )
+        alias_note = f"（已从 {configured_model} 自动适配）" if configured_model and configured_model != model else ""
         return _result(
             "deepseek",
             "success",
-            f"DeepSeek 校验通过，当前模型 {model or '未指定'} 可以使用。",
-            {"models": models[:20]},
+            f"DeepSeek 校验通过，当前模型 {model or '未指定'} 可以使用{alias_note}。",
+            {"models": models[:20], "resolved_model": model},
         )
     if response["status"] in {401, 403}:
         return _result("deepseek", "error", "DeepSeek API Key 无效，官方接口返回了鉴权失败。")
@@ -205,6 +207,52 @@ def validate_tavily(values: dict[str, str]) -> dict[str, Any]:
         "tavily",
         "error",
         f"Tavily 校验失败：HTTP {response['status'] or 'ERR'}。",
+        {"body": response.get("text", "")[:300], "error": response.get("error", "")},
+    )
+
+
+def validate_grok_research(values: dict[str, str]) -> dict[str, Any]:
+    api_key = values.get("GROK2API_API_KEY", "").strip()
+    base_url = (values.get("GROK2API_BASE_URL", "") or "http://127.0.0.1:8000").rstrip("/")
+    model = values.get("GROK2API_MODEL", "").strip() or "grok-chat-fast"
+    if not api_key:
+        health_url = f"{base_url}/healthz" if not base_url.endswith("/v1") else f"{base_url[:-3]}/healthz"
+        health = _request_json("GET", health_url, headers={"Accept": "application/json"})
+        if health["status"] == 200:
+            return _result(
+                "grok_research",
+                "unconfigured",
+                "Grok2API 服务在线，但还没有填写客户端 Key；请在 Grok2API 的“密钥”页面创建后粘贴。",
+            )
+        return _result("grok_research", "unconfigured", "还没有填写 Grok2API 客户端 Key。")
+    models_url = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+    response = _request_json(
+        "GET",
+        models_url,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    if response["status"] == 200:
+        payload = _parse_json(response["text"])
+        models = [str(item.get("id") or "") for item in payload.get("data", []) if isinstance(item, dict)]
+        if model and models and model not in models:
+            return _result(
+                "grok_research",
+                "warning",
+                f"Grok2API 鉴权通过，但模型 {model} 不在当前可用列表中，请从模型路由页复制名称。",
+                {"models": models[:30]},
+            )
+        return _result(
+            "grok_research",
+            "success",
+            f"Grok2API 校验通过，Grok 联网研究可用；当前模型：{model}。",
+            {"models": models[:30]},
+        )
+    if response["status"] in {401, 403}:
+        return _result("grok_research", "error", "Grok2API 客户端 Key 无效或无权访问模型。")
+    return _result(
+        "grok_research",
+        "error",
+        f"Grok2API 校验失败：HTTP {response['status'] or 'ERR'}。",
         {"body": response.get("text", "")[:300], "error": response.get("error", "")},
     )
 
@@ -247,6 +295,46 @@ def validate_ark_image(values: dict[str, str]) -> dict[str, Any]:
         f"火山方舟校验失败：HTTP {response['status'] or 'ERR'}。",
         {"body": response.get("text", "")[:300], "error": response.get("error", "")},
     )
+
+
+def validate_capsule_media(values: dict[str, str]) -> dict[str, Any]:
+    env = _merged_env(values)
+    video_provider = str(env.get("VIDEO_PROVIDER") or "off").strip().lower()
+    image_provider = str(env.get("IMAGE_PROVIDER") or "auto").strip().lower()
+    if video_provider in {"", "off", "disabled", "none"} and image_provider != "agnes":
+        return _result(
+            "capsule_media",
+            "success",
+            "动态镜头 API 当前关闭；成片继续使用场景原图和轻量镜头运动。",
+        )
+    if video_provider in {"auto", "seedance", "ark"}:
+        api_key = str(env.get("ARK_API_KEY") or "").strip()
+        if not api_key:
+            return _result("capsule_media", "unconfigured", "Seedance 动态镜头需要火山方舟 API 密钥。")
+        base_url = str(env.get("ARK_BASE_URL") or "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+        response = _request_json(
+            "GET",
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+        if response["status"] == 200:
+            return _result(
+                "capsule_media",
+                "success",
+                f"Seedance 鉴权通过，动态镜头模型 {env.get('ARK_VIDEO_MODEL')} 已就绪。",
+            )
+        if response["status"] in {401, 403}:
+            return _result("capsule_media", "error", "Seedance 所用火山方舟 API 密钥鉴权失败。")
+        return _result(
+            "capsule_media",
+            "warning",
+            f"Seedance 配置已保存，连通检查返回 HTTP {response['status'] or 'ERR'}。",
+        )
+    if image_provider == "agnes":
+        if not str(env.get("AGNES_API_KEY") or "").strip():
+            return _result("capsule_media", "unconfigured", "Agnes 图片入口需要填写 Agnes API Key。")
+        return _result("capsule_media", "success", "Agnes 图片 API 配置已保存，生成图片时按实际请求校验。")
+    return _result("capsule_media", "warning", f"动态镜头供应商 {video_provider} 尚未启用。")
 
 
 def _validate_openai_compatible_image(
@@ -341,12 +429,15 @@ def validate_third_party_image(values: dict[str, str]) -> dict[str, Any]:
 
 
 def validate_volc_tts(values: dict[str, str]) -> dict[str, Any]:
-    app_key = values.get("VOLC_TTS_APP_KEY", "").strip()
-    access_key = values.get("VOLC_TTS_ACCESS_KEY", "").strip()
+    app_key = (values.get("VOLC_PODCAST_APP_ID") or values.get("VOLC_TTS_APP_KEY") or "").strip()
+    access_key = (values.get("VOLC_PODCAST_ACCESS_TOKEN") or values.get("VOLC_TTS_ACCESS_KEY") or "").strip()
     if not app_key or not access_key:
-        return _result("doubao_tts", "unconfigured", "豆包 TTS 的 APP Key / Access Key 还没有填完整。")
+        return _result("doubao_tts", "unconfigured", "豆包语音播客大模型的 APP ID / Access Token 还没有填完整。")
 
     env = _merged_env(values)
+    env["VOLC_TTS_APP_KEY"] = app_key
+    env["VOLC_TTS_ACCESS_KEY"] = access_key
+    env["VOLC_TTS_RESOURCE_ID"] = values.get("VOLC_PODCAST_RESOURCE_ID", "").strip() or "volc.service_type.10050"
     services = _services()
     try:
         with tempfile.TemporaryDirectory(prefix="svs-tts-validate-") as temp_dir:
@@ -410,39 +501,56 @@ def _prepare_asr_sample(env: dict[str, str], temp_dir: Path) -> tuple[Path, str]
 def validate_volc_asr(values: dict[str, str]) -> dict[str, Any]:
     env = _merged_env(values)
     services = _services()
+    api_key = env.get("VOLC_SPEECH_API_KEY", "").strip()
     app_key = env.get("VOLC_ASR_APP_KEY", "").strip()
     access_key = env.get("VOLC_ASR_ACCESS_KEY", "").strip()
     reused_tts = not values.get("VOLC_ASR_APP_KEY", "").strip() and not values.get("VOLC_ASR_ACCESS_KEY", "").strip()
-    if not app_key or not access_key:
-        return _result("volc_asr", "unconfigured", "火山 ASR 的 APP Key / Access Key 还没有配置。")
+    if not api_key and (not app_key or not access_key):
+        return _result(
+            "volc_asr",
+            "warning",
+            "豆包语音 API Key 尚未配置；生产仍可使用本地 TTS 分段与真实停顿对齐，但建议填写新版 API Key 获得更精确时间。",
+            {"provider": "local_round_alignment"},
+        )
 
     try:
         with tempfile.TemporaryDirectory(prefix="svs-asr-validate-") as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             audio_path, source = _prepare_asr_sample(env, temp_dir)
-            srt_path = temp_dir / "asr-validate.srt"
-            result = services.run_original_bridge(
-                "asr",
-                {
-                    "audio_path": str(audio_path),
-                    "srt_output": str(srt_path),
-                    "dialogue_lines": ["你好，我们正在校验语音转字幕接口。"],
-                },
-                env,
-                timeout=300,
-            )
+            if api_key:
+                result = services.transcribe_volc_asr_api_key(audio_path, env, timeout=300)
+                provider = "volc_api_key"
+                prefix = "豆包语音 API Key 校验通过"
+                mode = env.get("VOLC_ASR_API_KEY_MODE", "submit")
+                resource_id = env.get("VOLC_ASR_API_KEY_RESOURCE_ID", "volc.seedasr.auc")
+            else:
+                srt_path = temp_dir / "asr-validate.srt"
+                result = services.run_original_bridge(
+                    "asr",
+                    {
+                        "audio_path": str(audio_path),
+                        "srt_output": str(srt_path),
+                        "dialogue_lines": ["你好，我们正在校验语音转字幕接口。"],
+                    },
+                    env,
+                    timeout=300,
+                )
+                provider = "legacy_app_access"
+                prefix = "旧版 App ID / Access Token 校验通过"
+                if reused_tts:
+                    prefix += "（当前复用了 TTS 凭据）"
+                mode = env.get("VOLC_ASR_MODE", "")
+                resource_id = env.get("VOLC_ASR_RESOURCE_ID", "")
             utterances = result.get("utterances", []) if isinstance(result.get("utterances"), list) else []
-            prefix = "火山 ASR 校验通过"
-            if reused_tts:
-                prefix += "（当前复用了 TTS 密钥）"
             if utterances:
                 return _result(
                     "volc_asr",
                     "success",
                     f"{prefix}，已成功返回 {len(utterances)} 条识别结果。",
                     {
-                        "mode": env.get("VOLC_ASR_MODE", ""),
-                        "resource_id": env.get("VOLC_ASR_RESOURCE_ID", ""),
+                        "provider": provider,
+                        "mode": mode,
+                        "resource_id": resource_id,
                         "sample_source": source,
                         "utterance_count": len(utterances),
                     },
@@ -452,14 +560,16 @@ def validate_volc_asr(values: dict[str, str]) -> dict[str, Any]:
                 "success",
                 f"{prefix}，接口已经打通，只是这次测试音频没有识别出可用文本。",
                 {
-                    "mode": env.get("VOLC_ASR_MODE", ""),
-                    "resource_id": env.get("VOLC_ASR_RESOURCE_ID", ""),
+                    "provider": provider,
+                    "mode": mode,
+                    "resource_id": resource_id,
                     "sample_source": source,
                     "utterance_count": 0,
                 },
             )
     except Exception as exc:
-        return _bridge_error_result("volc_asr", "火山 ASR", exc)
+        label = "豆包语音 API Key" if api_key else "旧版豆包 ASR"
+        return _bridge_error_result("volc_asr", label, exc)
 
 
 def validate_social_auto_upload(values: dict[str, str]) -> dict[str, Any]:
@@ -478,7 +588,9 @@ def validate_social_auto_upload(values: dict[str, str]) -> dict[str, Any]:
 SECTION_VALIDATORS = {
     "deepseek": validate_deepseek,
     "tavily": validate_tavily,
+    "grok_research": validate_grok_research,
     "ark_image": validate_ark_image,
+    "capsule_media": validate_capsule_media,
     "apiyi_image": validate_apiyi_image,
     "third_party_image": validate_third_party_image,
     "doubao_tts": validate_volc_tts,

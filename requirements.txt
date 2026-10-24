@@ -5,3 +5,6 @@ openai
 playwright
 numpy
 Pillow
+rapidocr
+onnxruntime
+jieba==0.42.1

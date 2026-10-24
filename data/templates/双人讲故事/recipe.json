@@ -1,0 +1,1363 @@
+{
+  "version": "channel-capsule-v1",
+  "key": "双人讲故事",
+  "name": "双人讲故事",
+  "identity": {
+    "brand_name": "双人讲故事",
+    "mode": "video",
+    "target_audience": "喜欢一问一答、反常识知识故事、愿意点赞收藏的中文短视频用户",
+    "channel_voice": "两个人像朋友聊天，一人追问惊讶，一人解释拆解，每轮都留下下一层好奇",
+    "interaction_goal": "结尾让观众补充自己还想听哪类冷知识或哪一步最反常识",
+    "release_tags": "#知识科普 #冷知识 #涨知识"
+  },
+  "content_recipe": {
+    "topic_mining_hint": "",
+    "prompt": "# 双人讲故事 · 模块化短视频模板\n\n你是「双人讲故事」频道的内容导演。目标不是堆百科，而是把知识讲成一段让人愿意听完的双人对话：两个人都像真实朋友一样理解、补充和纠正对方，不设置只会惊讶追问的工具人。\n\n## 资料规则\n\n- 只使用 brief、参考资料和可核验常识。\n- 如果事实来源不足以支撑结论，停止写完整脚本，输出 `# 资料不足`、`## 需要补充的资料`、`## 建议检索方向`。\n- 不虚构史料、论文、数据、人物对话、官方说法。\n- 优先引用 Wikipedia、百科、官方资料、主流媒体、论文、Nature、Science、新华社、人民日报等可靠来源。\n\n## 内容生成模块\n\n- 开头 3-8 秒必须有钩子：反常识、隐藏真相、具体数字、熟悉事物里的陌生点，任选一种。\n- 第一句由【女】提出，最好 10-24 字，不用“今天我们来聊”。\n- 中段沿着当前事实的因果关系自然推进，不套固定起承转合。\n- 两个角色都可以提出事实、解释原因、补充例子或指出边界；问题只在真的需要澄清时出现。\n- 每轮都要带来新事实、新解释、新例子、新后果或新判断，不能用惊讶、追问和转折词代替内容。\n- 结尾由最适合的角色给出明确判断或行动，自然结束；互动问题可有可无。\n\n## 图片生成模块\n\n频道统一视觉：电影级知识纪录片质感，真实摄影或真实摄影混合轻量图解，主体突出，高对比光影，有前后景层次；不再默认手账、旧纸、胶带、档案卡。\n\n封面：5-8 字大标题 + 一句短副标题；画面优先一个强主体或强情绪瞬间，不堆字，不放免责声明、二维码、水印。\n\n场景图：每张只服务对应口播段落。只有新事实、新数字、新案例、新后果、新方法或新结论才单独配图，纯过渡句沿用上一张。单张提示词只写：主体、构图、动作、情绪、空间关系、字幕安全区。公共风格不要每张重复 600 字。普通场景不内嵌文字；关键节点最多保留 1 个直接呼应口播的上半区信息牌。长段文字、脚注和复杂界面仍用无字界面、图标、色块、光线和物件关系表达。\n\n## 视频剪辑模块\n\n- 场景图数量跟随语音时长：90 秒约 4-6 张，2 分钟约 6-8 张，3-4 分钟约 7-9 张，5-6 分钟约 10-14 张；纯过渡句不单独配图。\n- 只给新事实、新数字、新案例、新后果、新方法或新结论配新图；纯过渡口播沿用上一张图。\n- 前三秒用最强视觉钩子；中段画面跟着信息推进换主体、视角或空间；结尾回到现实生活场景。\n- 字幕短句优先，单屏不挤字；不使用花哨转场。\n\n## 发布模块\n\n- 发布标题保留钩子，但不标题党。\n- 简介第一句复述本期最有用的反常识点，第二句抛评论问题。\n- 标签使用频道标签，并根据主题补 1-3 个具体标签。\n\n## content.md 输出结构\n\n只输出最终 Markdown，不解释。\n\n# [5-12 字封面主标题]\n\n## Meta\n- 封面副标题: [一句短副标题]\n- 核心观点: [观众看完只记住一句话]\n- 时长: [按本期信息量自适应，以实际配音为准]\n- 推荐发布标题: [完整发布标题]\n- 钩子: [第一句或前三句钩子]\n- 互动钩子: [可选，没有自然讨论点时留空]\n- 免责声明:\n\n## 原始材料简述\n- 主体:\n- 核心知识点:\n- 反常识点:\n- 现实连接:\n\n## 对话脚本\n\n【女】...\n\n【男】...\n\n## 重点字幕\n1. ...\n\n## 图片提示词\n\n### 横屏封面图 (4:3)\n[一段不超过 300 字的封面提示词]\n\n### 竖屏封面图 (3:4)\n[一段不超过 300 字的封面提示词]\n\n### 场景图\n1. [不超过 300 字，绑定第 1 段口播]\n2. [不超过 300 字，绑定第 2 段口播]\n\n## 参考资料\n- [标题](链接) - 摘要\n\n\n\n## 叙事结构与违禁空话约束\n\n1. **叙事结构必须严格落地【具体冲突 Hook → 现实代价 Cost → 底层机制 Mechanism → 实用判断 Action】**：\n   - Hook：直接抛出具体事实、差价、反常识变化或冲突，不讲套话。\n   - Cost：讲清普通人付出的时间、金钱、效率或使用代价。\n   - Mechanism：说透两套规则或技术原理为什么冲突，用白话讲清底层因果。\n   - Action：给出 2—3 个可落地的核验动作或判断依据。\n\n2. **违禁空话黑名单（严禁出现）**：\n   - 严禁出现：“表面看是一个问题，真正关键其实藏在另一层”、“很多时候表面现象看着已经很明显了”、“真正决定结果的往往是被忽略的小动作”、“你自己最容易在哪一步想当然”、“你平时最容易在哪一步被带偏”、“这种题最容易写成解释文”、“所以中间一定得拆两步”、“把它放进一个真实场景里”等虚空套话。\n   - 每一句话都必须带来新的具体事实或因果增量，不得用假深沉、假设问凑字数。\n",
+    "episode_content_isolation": true,
+    "reuse": [
+      "人设",
+      "叙事结构",
+      "节奏方法",
+      "质量规则",
+      "视觉语法",
+      "声音策略"
+    ],
+    "never_reuse": [
+      "当期事实",
+      "当期数字",
+      "当期案例",
+      "临时素材",
+      "上一期图片提示词"
+    ]
+  },
+  "visual_recipe": {
+    "strategy": "电影级知识纪录片质感，真实摄影或真实摄影混合轻量图解，主体突出，高对比光影，有前后景层次；封面 5-8 字大标题，普通场景优先无字，必要时最多 1 个短词或数字钩子",
+    "style_prompt": "",
+    "negative_prompt": "",
+    "cover_style": "cinematic",
+    "generate_cover_landscape": true,
+    "generate_cover_portrait": true,
+    "rules": [
+      "先审分镜，再生成代表镜头",
+      "关键镜头允许候选竞争，普通镜头保持单图",
+      "只返工失败镜头，不覆盖已确认素材",
+      "图片信息必须来自当前口播与来源证据"
+    ]
+  },
+  "voice_recipe": {
+    "mode": "dual",
+    "speaker_1": "zh_male_dayixiansheng_v2_saturn_bigtts",
+    "speaker_2": "zh_female_mizaitongxue_v2_saturn_bigtts",
+    "random_order": false,
+    "speech_rate": 1.0
+  },
+  "quality_contract": {
+    "forbidden_rules": "不要固定成手账、旧纸、邮票、档案拼贴；不要输出 HKR、评分、叙事原型等分析字段；资料不足时停止生成",
+    "required_gates": [
+      "来源时效与事实一致",
+      "文案无重复且画面提示不进入口播",
+      "配音角色与字幕逐句一致",
+      "图片与当前口播语义一致",
+      "封面标题完整可读",
+      "成片画幅、黑帧、静帧、响度、字幕安全区通过"
+    ],
+    "repair_scope": {
+      "cta_change": [
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "fact_change": [
+        "affected_scenes",
+        "voice",
+        "subtitles",
+        "video"
+      ],
+      "topic_change": [
+        "all"
+      ],
+      "single_visual_issue": [
+        "affected_scene",
+        "video"
+      ]
+    }
+  },
+  "research_policy": {
+    "version": "multi-source-research-v2-grok-primary",
+    "topic": "双人讲故事",
+    "current_news_mode": false,
+    "routes": [
+      {
+        "priority": 1,
+        "provider": "grok",
+        "label": "Grok",
+        "reason": "主检索：发现实时动态、事件进展和海外讨论",
+        "strengths": [
+          "实时动态",
+          "海外社交",
+          "热点讨论"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 2,
+        "provider": "tavily",
+        "label": "Tavily",
+        "reason": "辅助核验：补充公开网页、发布日期和可追溯链接",
+        "strengths": [
+          "公开网页",
+          "新闻发现",
+          "来源链接"
+        ],
+        "mode": "api"
+      },
+      {
+        "priority": 3,
+        "provider": "yuanbao",
+        "label": "元宝",
+        "reason": "补充微信生态和中文来源交叉验证",
+        "strengths": [
+          "公众号",
+          "微信生态",
+          "中文信源补充"
+        ],
+        "mode": "browser_or_api"
+      },
+      {
+        "priority": 4,
+        "provider": "kimi",
+        "label": "Kimi",
+        "reason": "负责长文整理、来源归纳和冲突信息比对",
+        "strengths": [
+          "长文阅读",
+          "文档理解",
+          "研究资料整理"
+        ],
+        "mode": "browser_or_api"
+      }
+    ],
+    "query_variants": [
+      "双人讲故事",
+      "双人讲故事 最新进展 事件发生时间 官方来源",
+      "双人讲故事 核心数据 原始报告 反方证据",
+      "双人讲故事 普通用户真实影响 使用场景"
+    ],
+    "evidence_contract": {
+      "required_fields": [
+        "claim",
+        "source_title",
+        "source_url",
+        "published_at",
+        "event_at",
+        "source_type",
+        "confidence",
+        "scene_usage"
+      ],
+      "rules": [
+        "区分网页发布时间和事件发生时间",
+        "数字进入口播或图片前至少绑定一个来源",
+        "重大结论保留支持证据与反方证据",
+        "来源图片只作为证据素材，不把无关网图当装饰"
+      ]
+    },
+    "generated_at": 1791735973.97618
+  },
+  "learning_policy": {
+    "capture_candidate_pairs": true,
+    "capture_manual_edits": true,
+    "capture_release_metrics": true,
+    "ranking_targets": [
+      "topic",
+      "hook",
+      "visual",
+      "pacing"
+    ],
+    "minimum_samples": {
+      "recipe_retrieval": 1,
+      "heuristic_ranking": 20,
+      "statistical_ranking": 200,
+      "preference_model": 1000
+    }
+  },
+  "validated_experience": {
+    "sample_count": 2,
+    "top_projects": [
+      {
+        "project_id": 129,
+        "topic": "封了9.8万个账号，然后呢？",
+        "score": 46.27,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 752,
+          "likes": 4,
+          "comments": 0,
+          "shares": 1,
+          "favorites": 1,
+          "follows": 0,
+          "two_second_retention_rate": 73.09,
+          "five_second_retention_rate": 55.11,
+          "average_watch_seconds": 25.58,
+          "completion_rate": 3.1,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1790065268.0788105,
+          "updated_at": 1790065268.0788105
+        },
+        "content_strategy": {
+          "generated_at": 1790004369.0619702,
+          "topic": "封了9.8万个账号，然后呢？",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 17,
+          "reference_titles": [
+            "闲鱼涉黄被曝 9.8万账号被封后问题仍未解决",
+            "闲鱼封了9.8万个涉黄账号",
+            "闲鱼封了9.8万个账号，色情引流为何杀不死？ - 网易",
+            "9.8万个账号被封之后，为什么“擦边”还在“日抛”？",
+            "闲鱼回应涉黄，年内封了9.8万个账号 - 财经- 凤凰网"
+          ],
+          "topic_score": {
+            "topic": "封了9.8万个账号，然后呢？",
+            "brief_excerpt": "一句话选题：闲鱼因暗藏涉黄产业链、牵涉 14 岁未成年少女被曝光后公开致歉，公布年内已封禁 9.8 万个账号——但封禁数字早在被曝光前两天就已发布，而\"饱和式封号\"这个词，三年前就在报道里出现过。 目标受众：日常使用二手平台的普通人；家里有",
+            "total_score": 4.9,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 1.0,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 1.0,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 1.0,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 1.0,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.9,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "这件事会怎样改变普通人的时间、钱、选择或安全感",
+            "honest_disagreement": "一边看重眼前的好处，另一边更在意被忽略的长期代价",
+            "emotional_moment": "观众从旁观变成意识到自己也可能遇到的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "平台用\"我在治理\"回答了它答得起的问题，而公众真正在问的是\"那件事到底有没有发生\"——这是两个不同的命题。",
+            "counter_intuition": "旧理解和真实机制之间的反差",
+            "audience_pain": "这件事会怎样改变普通人的时间、钱、选择或安全感",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "数字冲击",
+            "opening_hook": "一个十四岁的女孩在二手平台上被明码标价，而平台给出的核心数字是九万八千个已封账号。",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你更想追问哪一环——审核机制、把交易导向站外的设计，还是每次都要靠一次曝光才能推动的治理节奏？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1790004888.7181666,
+          "source_hash": "ba8d32fd4391e6f4",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "封了9.8万个账号，然后呢？",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "rule-fallback",
+          "image_direction": {
+            "topic_type": "science_mechanism",
+            "topic_type_label": "科普机制/冷知识",
+            "visual_world": "频道媒介保持成熟编辑线稿卡通，但本期题材语言必须变化：实验、剖面、结构透视和动作触发构成机制现场，把抽象原理变成可见结果；纸张纹理只保留为频道识别，不得覆盖本期主体、动作和空间",
+            "subject_pool": [
+              "实验装置",
+              "结构剖面",
+              "触发动作",
+              "对比样本",
+              "光线/流体路径"
+            ],
+            "action_pool": [
+              "触发实验",
+              "结构显露",
+              "路径分流",
+              "结果出现",
+              "前后对比"
+            ],
+            "attention_hooks": [
+              "反常识结果",
+              "机制显影",
+              "实验一秒",
+              "结构剖面"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台, 霓虹蓝光, 蓝色数据网格, 全息屏幕, 赛博朋克, 机器人, 机械手, AI大脑, 脑图, 放大镜, 发光科技球, 品牌Logo, 商标, 水印, 二维码, 平台UI截图, 聊天截图, 网页截图, 乱码文字, 错别字, 虚假数据, 虚假新闻, 日系萌系, 儿童绘本, 廉价剪贴画, 表情包, 过度饱和, 低清晰度, 畸形人物, 多余手指, 肢体错误, 漂浮物体",
+              "不要做纯流程图或教科书插图",
+              "不要把上一个主题的具体物件、场景和流程带入本期",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "这件事会怎样改变普通人的时间、钱、选择或安全感",
+              "honest_disagreement": "一边看重眼前的好处，另一边更在意被忽略的长期代价",
+              "emotional_moment": "观众从旁观变成意识到自己也可能遇到的那一刻",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "fast_warning",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 10,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 5.5,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 10,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.2,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "business_pulse",
+            "bgm_label": "商业脉冲",
+            "bgm_reason": "主题信号「财经、商业」更适合商业脉冲",
+            "bgm_signals": [
+              "财经",
+              "商业"
+            ],
+            "bgm_confidence_score": 21.2,
+            "bgm_keywords": [
+              "稳定低频",
+              "城市感电子",
+              "数据压力",
+              "干净节拍"
+            ],
+            "bgm_volume": 0.17,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头有压迫感",
+              "数据段稳定推进",
+              "结论段轻微抬升"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      },
+      {
+        "project_id": 130,
+        "topic": "换机，不是售后良心，是品控兜底算盘",
+        "score": 41.98,
+        "platform": "抖音",
+        "metrics": {
+          "impressions": 0,
+          "click_through_rate": 0,
+          "views": 1090,
+          "likes": 11,
+          "comments": 0,
+          "shares": 2,
+          "favorites": 1,
+          "follows": 0,
+          "two_second_retention_rate": 63.99,
+          "five_second_retention_rate": 39.49,
+          "average_watch_seconds": 26.55,
+          "completion_rate": 2.85,
+          "notes": "",
+          "source": "omnipost_douyin_content_stats",
+          "synced_at": 1791210326.8266644,
+          "updated_at": 1791210326.8266644
+        },
+        "content_strategy": {
+          "generated_at": 1791125261.6996772,
+          "topic": "换机，不是售后良心，是品控兜底算盘",
+          "template": "科技情报站",
+          "platform_profile": {
+            "platform": "抖音/视频号",
+            "format": "单人口播横屏短视频",
+            "voice": "朋友式讲清事实、用具体例子解释、自然收束",
+            "success_signals": [
+              "开头价值明确",
+              "中段持续增加有效信息",
+              "结尾给出判断或行动"
+            ]
+          },
+          "tavily_topic": "general",
+          "reference_count": 0,
+          "reference_titles": [],
+          "topic_score": {
+            "topic": "换机，不是售后良心，是品控兜底算盘",
+            "brief_excerpt": "流量第一爆点：苹果确认 iPhone 18 Pro Max 断网“只能换机 表面看是苹果爽快给换新机，反着读是：当手机卖到一万二，用户其实已经在给厂商承担首发批次的“带薪公测成本”。换机成本早就被预先算进了那离谱的硬件溢价里——你以为你赚了",
+            "total_score": 3.9,
+            "scorecard": [
+              {
+                "name": "熟悉度",
+                "score": 1.0,
+                "reason": "主题是否能让普通观众一眼明白在讲什么。"
+              },
+              {
+                "name": "大众共鸣",
+                "score": 1.0,
+                "reason": "是否连接多数观众熟悉的处境、选择或现实代价。"
+              },
+              {
+                "name": "观点张力",
+                "score": 0.55,
+                "reason": "是否存在资料支持的两种真实判断，而不是人为挑衅。"
+              },
+              {
+                "name": "观看收获",
+                "score": 0.65,
+                "reason": "能否给观众讲清原因，并留下可复述的判断或行动。"
+              },
+              {
+                "name": "可视化",
+                "score": 0.7,
+                "reason": "能否拆成多张有明确信息点的场景图。"
+              }
+            ],
+            "verdict": "分数达标时适合进入脚本生成；分数偏低时应先换角度或缩短篇幅。"
+          },
+          "audience_resonance_contract": {
+            "shared_stake": "工具替人省时间之后，人还能不能掌握结果",
+            "honest_disagreement": "一边只看效率提升，另一边更在意错误、失控和人的判断是否被替代",
+            "emotional_moment": "结果瞬间出来很兴奋，真正核对时却发现代价被藏在后面的那一刻",
+            "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+            "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+            "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+          },
+          "insights": {
+            "core_viewpoint": "高溢价旗舰机用“爽快换新”代替维修，本质不是福利，而是高集成度下厂商的止损精算与用户自负的误工代价。",
+            "counter_intuition": "用户以为是网络问题，真正关键可能在底层连接方式",
+            "audience_pain": "工具替人省时间之后，人还能不能掌握结果",
+            "knowledge_payload": "围绕一个结论组织事实证据、原因解释、现实影响和判断方法",
+            "story_engine": "具体结果 -> 可靠证据 -> 大白话原因 -> 现实影响 -> 可执行判断",
+            "persuasion_strategy": "先让观众在真实处境里认出自己，再把双方合理处讲清，用证据形成判断，最后给普通人一个可用结论",
+            "title_strategy": "疑问钩子",
+            "opening_hook": "花了一万多买旗舰，断网后官方爽快给你换一台新机，你真以为自己赚到了？",
+            "golden_three_seconds": "",
+            "emotion_curve": [
+              "立刻知道结果",
+              "看到证据",
+              "理解原因",
+              "知道影响",
+              "会判断或会行动"
+            ],
+            "interaction_hook": "你在首发买数码产品踩过什么硬件坑？售后换机真的解决你的问题了吗？"
+          },
+          "output_contract": {
+            "content_md": "标题、Meta、脚本/正文、重点字幕、参考资料",
+            "visual_prompt_manifest": "频道、本期、场景和内容哈希绑定的独立图片提示词清单",
+            "content_audit": "平台适配、AI味、事实风险、标题策略、前三秒钩子",
+            "scene_plan": "每镜的叙事状态、视觉锚点、生图提示词、运动和转场建议"
+          }
+        },
+        "visual_director": {
+          "generated_at": 1791126324.590606,
+          "source_hash": "cd259eb87a619a30",
+          "prompt_policy_version": "semantic-concepts-v24-grounded-resonance",
+          "topic": "换机，不是售后良心，是品控兜底算盘",
+          "channel": "科技情报站",
+          "mode": "video",
+          "provider": "deepseek-visual-director",
+          "image_direction": {
+            "topic_type": "consumer_product",
+            "topic_type_label": "消费产品/体验判断",
+            "visual_world": "冷灰色与警示橙调的编辑线稿插画：售后服务台塑封整机、显微镜下密闭双层堆叠主板微距、定价拆解账本与失联用户的断网焦虑交织，用精密机械剖面与商业账单揭开以换代修背后的冷血算盘。",
+            "subject_pool": [
+              "官方售后服务柜台与塑封全新裸机盒",
+              "显微镜与热风枪下的双层堆叠主板",
+              "断网无信号标示与灰色未送达工作消息",
+              "高端手机售价拆解结构图与返修准备金账本",
+              "流水线整机周转箱与备用功能机"
+            ],
+            "action_pool": [
+              "柜台前推过来一台未激活的塑封新机",
+              "镊子与热风枪在微米级芯片点胶边缘试探悬停",
+              "账单色块分层切割出高额售后准备金",
+              "双手机数据迁移进度条意外卡死在中断状态",
+              "在日历上划掉两个月的首发观望期并给备用机插卡"
+            ],
+            "attention_hooks": [
+              "只换不修？",
+              "自费公测",
+              "堆叠主板",
+              "售后准备金",
+              "换机最优解",
+              "数据清空",
+              "误工成本"
+            ],
+            "forbidden": [
+              "频道禁止元素：写实摄影, 照片质感, 3D渲染, 塑料公仔, 暗色赛博办公室, 发光控制台,...",
+              "不要出现带特定品牌Logo的手机（如苹果、华为具体标志）",
+              "禁止把维修现场画成赛博黑客修机械姬或未来科幻实验室",
+              "禁止复用上一期机器人家居测试或车辆机械的场景道具",
+              "禁止人物使用捂脸抱头、张嘴大叫等廉价摆拍表情",
+              "不要复制历史项目的具体场景、道具、短词和流程",
+              "不要所有场景复用同一构图、同一背景或同一个主体姿势"
+            ],
+            "audience_resonance_contract": {
+              "shared_stake": "花上万元首发买来当作生产力支柱的旗舰手机突然故障，换新后生活与工作数据彻底脱节的巨大断层",
+              "honest_disagreement": "换新确实规避了现场手工拆修的二次暗病隐患，但厂商省下的维修人工实际上转嫁成了用户不可逆的误工与数据代价",
+              "emotional_moment": "站在柜台前拿到崭新冰冷出厂界面的手机，突然意识到几个月的工作记录和未备份验证码全没了的那一秒",
+              "plain_language_goal": "像给不懂行业的朋友解释：先说发生了什么，再说为什么，最后给出可用判断",
+              "comment_trigger": "先把双方各自合理的一点讲清，再基于事实表明判断；只问一个具体选择，不煽动、不编造对立",
+              "share_trigger": "说出观众已经感受到却没能讲清的话，并给出一条值得转给家人或同事的判断"
+            }
+          },
+          "edit_direction": {
+            "overall_pace": "fast_warning",
+            "transition_policy": "少转场、硬切为主，只在结尾轻淡出；避免花哨转场抢口播",
+            "opening_policy": "前三秒必须先给痛点、反差或结果，不要铺垫",
+            "scene_count": 10,
+            "scenes": [
+              {
+                "index": 1,
+                "narrative_state": "前三秒钩子/痛点",
+                "pace": "fast_hook",
+                "target_hold_seconds": 3.0,
+                "motion": "quick_push_in",
+                "transition": "hard_cut_from_cover",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "hook"
+              },
+              {
+                "index": 2,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 3,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "gentle_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 4,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 5,
+                "narrative_state": "机制拆解/证据",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 6,
+                "narrative_state": "背景铺垫",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_push_in",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 7,
+                "narrative_state": "冲突或误区",
+                "pace": "medium_push",
+                "target_hold_seconds": 5.5,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 8,
+                "narrative_state": "应用场景",
+                "pace": "medium",
+                "target_hold_seconds": 5.5,
+                "motion": "ken_burns_subtle",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 9,
+                "narrative_state": "应用场景",
+                "pace": "slow_explain",
+                "target_hold_seconds": 7.0,
+                "motion": "slow_pan_left_to_right",
+                "transition": "hard_cut",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "normal"
+              },
+              {
+                "index": 10,
+                "narrative_state": "结论回扣/互动",
+                "pace": "hold_for_comment",
+                "target_hold_seconds": 5.0,
+                "motion": "micro_zoom_then_hold",
+                "transition": "soft_fade_to_end",
+                "cut_reason": "按口播信息转折切镜，避免平均 PPT 式停留",
+                "subtitle_priority": "interaction"
+              }
+            ]
+          },
+          "sound_direction": {
+            "bgm_policy_version": "theme-aware-v6-channel-rotation",
+            "bgm_mood": "business_pulse",
+            "bgm_label": "商业脉冲",
+            "bgm_reason": "主题信号「成本、价格、商业、市场」更适合商业脉冲",
+            "bgm_signals": [
+              "成本",
+              "价格",
+              "商业",
+              "市场"
+            ],
+            "bgm_confidence_score": 31.8,
+            "bgm_keywords": [
+              "稳定低频",
+              "城市感电子",
+              "数据压力",
+              "干净节拍"
+            ],
+            "bgm_volume": 0.17,
+            "ducking": "口播优先；BGM 只做情绪底，不盖过人声",
+            "energy_curve": [
+              "开头有压迫感",
+              "数据段稳定推进",
+              "结论段轻微抬升"
+            ],
+            "sound_effects": [
+              "开头钩子可用极轻提示音",
+              "关键反转处可用低频轻顿点",
+              "不要在每次切图都加音效"
+            ]
+          },
+          "quality_targets": {
+            "image_semantic_min": 68,
+            "image_appeal_min": 70,
+            "subtitle_coverage_min": 0.96,
+            "avoid_prompt_meta": [
+              "16:9",
+              "4:3",
+              "3:4",
+              "第几张",
+              "画幅要求",
+              "视觉导演调试字段"
+            ]
+          }
+        }
+      }
+    ],
+    "learned_rules": [
+      "只从真实发布表现较好的项目提炼方法",
+      "保留结构、节奏和视觉策略，不复制当期事实与素材",
+      "每次新增表现数据后重新排序，旧经验保留版本指纹"
+    ],
+    "memory_fingerprint": "c268b22bda08fa98"
+  },
+  "performance_memory": {
+    "version": "channel-performance-memory-v5",
+    "template_key": "双人讲故事",
+    "sample_count": 2,
+    "samples": [
+      {
+        "sample_id": "project-129-release-19",
+        "project_id": 129,
+        "release_id": 19,
+        "platform": "抖音",
+        "topic": "封了9.8万个账号，然后呢？",
+        "title": "闲鱼封了9.8万个账号，为什么那件事还在发生？",
+        "hook_text": "一个十四岁的女孩，在二手平台上被明码标价。",
+        "metrics": {
+          "impressions": 0,
+          "views": 752,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 73.09,
+          "five_second_retention_rate": 55.11,
+          "average_watch_seconds": 25.58,
+          "completion_rate": 3.1,
+          "likes": 4,
+          "comments": 0,
+          "shares": 1,
+          "favorites": 1,
+          "follows": 0
+        },
+        "observed_at": 1790065268.0788105,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 752,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 25.58,
+            "completion_rate": 3.1,
+            "duration_seconds": 825.16,
+            "watch_ratio": 3.1,
+            "interaction_rate": 0.8,
+            "comment_rate": 0.0,
+            "like_rate": 0.53,
+            "share_save_rate": 0.27,
+            "likes": 4,
+            "comments": 0,
+            "shares": 1,
+            "favorites": 1,
+            "follows": 0
+          },
+          "confidence": 0.719,
+          "recency_weight": 0.898,
+          "sample_weight": 0.646,
+          "dimension_scores": {
+            "play_potential": 57.5,
+            "completion_potential": 3.1,
+            "comment_potential": 3.8
+          },
+          "strengths": [
+            {
+              "id": "retain_share_value",
+              "rule": "保留可转发的核查价值和实用判断标准。",
+              "reason": "产生 1 次分享，说明信息具有转发价值。",
+              "weight": 0.485
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 3.1% 显示中后段流失。",
+              "weight": 0.775
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 825 秒且完播率 3.1%。",
+              "weight": 0.646
+            },
+            {
+              "id": "repair_interaction",
+              "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+              "reason": "每百次播放互动仅 0.8 次。",
+              "weight": 0.581
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.743
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.485
+            }
+          ]
+        }
+      },
+      {
+        "sample_id": "project-130-release-20",
+        "project_id": 130,
+        "release_id": 20,
+        "platform": "抖音",
+        "topic": "换机，不是售后良心，是品控兜底算盘",
+        "title": "旗舰机断网只换不修？别以为赚了新机，溢价早把公测成本算进去了",
+        "hook_text": "花了一万多买台顶级旗舰，突然断网失联，去售后检测完",
+        "metrics": {
+          "impressions": 0,
+          "views": 1090,
+          "click_through_rate": 0.0,
+          "two_second_retention_rate": 63.99,
+          "five_second_retention_rate": 39.49,
+          "average_watch_seconds": 26.55,
+          "completion_rate": 2.85,
+          "likes": 11,
+          "comments": 0,
+          "shares": 2,
+          "favorites": 1,
+          "follows": 0
+        },
+        "observed_at": 1791210326.8266644,
+        "source": "omnipost_douyin_content_stats",
+        "diagnosis": {
+          "metrics": {
+            "impressions": 0,
+            "views": 1090,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 26.55,
+            "completion_rate": 2.85,
+            "duration_seconds": 931.58,
+            "watch_ratio": 2.85,
+            "interaction_rate": 1.28,
+            "comment_rate": 0.0,
+            "like_rate": 1.01,
+            "share_save_rate": 0.28,
+            "likes": 11,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          },
+          "confidence": 0.759,
+          "recency_weight": 0.967,
+          "sample_weight": 0.734,
+          "dimension_scores": {
+            "play_potential": 60.8,
+            "completion_potential": 2.9,
+            "comment_potential": 4.8
+          },
+          "strengths": [
+            {
+              "id": "retain_share_value",
+              "rule": "保留可转发的核查价值和实用判断标准。",
+              "reason": "产生 2 次分享，说明信息具有转发价值。",
+              "weight": 0.55
+            }
+          ],
+          "weaknesses": [
+            {
+              "id": "repair_retention",
+              "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+              "reason": "完播率 2.85% 显示中后段流失。",
+              "weight": 0.881
+            },
+            {
+              "id": "one_answer_per_episode",
+              "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+              "reason": "推算片长约 931 秒且完播率 2.85%。",
+              "weight": 0.734
+            },
+            {
+              "id": "low_friction_cta",
+              "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+              "reason": "评论为 0。",
+              "weight": 0.844
+            },
+            {
+              "id": "follow_payoff",
+              "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+              "reason": "关注转化为 0。",
+              "weight": 0.55
+            }
+          ]
+        }
+      }
+    ],
+    "active_rules": [
+      {
+        "id": "repair_retention",
+        "kind": "weaknesses",
+        "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+        "weight": 1.656,
+        "evidence": [
+          "完播率 3.1% 显示中后段流失。",
+          "完播率 2.85% 显示中后段流失。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "low_friction_cta",
+        "kind": "weaknesses",
+        "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+        "weight": 1.587,
+        "evidence": [
+          "评论为 0。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "one_answer_per_episode",
+        "kind": "weaknesses",
+        "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+        "weight": 1.38,
+        "evidence": [
+          "推算片长约 825 秒且完播率 3.1%。",
+          "推算片长约 931 秒且完播率 2.85%。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "retain_share_value",
+        "kind": "strengths",
+        "rule": "保留可转发的核查价值和实用判断标准。",
+        "weight": 1.035,
+        "evidence": [
+          "产生 1 次分享，说明信息具有转发价值。",
+          "产生 2 次分享，说明信息具有转发价值。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "follow_payoff",
+        "kind": "weaknesses",
+        "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+        "weight": 1.035,
+        "evidence": [
+          "关注转化为 0。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "repair_interaction",
+        "kind": "weaknesses",
+        "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+        "weight": 0.581,
+        "evidence": [
+          "每百次播放互动仅 0.8 次。"
+        ],
+        "sample_count": 1
+      }
+    ],
+    "positive_rules": [
+      {
+        "id": "retain_share_value",
+        "kind": "strengths",
+        "rule": "保留可转发的核查价值和实用判断标准。",
+        "weight": 1.035,
+        "evidence": [
+          "产生 1 次分享，说明信息具有转发价值。",
+          "产生 2 次分享，说明信息具有转发价值。"
+        ],
+        "sample_count": 2
+      }
+    ],
+    "repair_rules": [
+      {
+        "id": "repair_retention",
+        "kind": "weaknesses",
+        "rule": "删除重复解释；围绕核心结论补足缺失的证据、原因、现实后果或可执行判断。不要按固定句距插入反问、转折或动作。",
+        "weight": 1.656,
+        "evidence": [
+          "完播率 3.1% 显示中后段流失。",
+          "完播率 2.85% 显示中后段流失。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "low_friction_cta",
+        "kind": "weaknesses",
+        "rule": "禁止让观众替创作者找资料、交作业或补证据。评论为零不能单独证明缺少 CTA，优先提升内容的新鲜事实、明确判断和现实用途。",
+        "weight": 1.587,
+        "evidence": [
+          "评论为 0。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "one_answer_per_episode",
+        "kind": "weaknesses",
+        "rule": "一期只解决一个核心问题；时长由证据量决定，长内容拆成连续单结论选题。",
+        "weight": 1.38,
+        "evidence": [
+          "推算片长约 825 秒且完播率 3.1%。",
+          "推算片长约 931 秒且完播率 2.85%。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "follow_payoff",
+        "kind": "weaknesses",
+        "rule": "本期先完整解决当前问题；只有确有后续调查时才说明下一期内容，不用关注口号或悬空预告。",
+        "weight": 1.035,
+        "evidence": [
+          "关注转化为 0。"
+        ],
+        "sample_count": 2
+      },
+      {
+        "id": "repair_interaction",
+        "kind": "weaknesses",
+        "rule": "先检查选题价值和正文是否交付完整；只有正文自然留下分歧或经历时才加一个承接结论的问题，禁止固定 CTA。",
+        "weight": 0.581,
+        "evidence": [
+          "每百次播放互动仅 0.8 次。"
+        ],
+        "sample_count": 1
+      }
+    ],
+    "dimension_leaders": {
+      "play_potential": [
+        {
+          "sample_id": "project-130-release-20",
+          "project_id": 130,
+          "topic": "换机，不是售后良心，是品控兜底算盘",
+          "hook_text": "花了一万多买台顶级旗舰，突然断网失联，去售后检测完",
+          "score": 60.8,
+          "label": "播放潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 1090,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 26.55,
+            "completion_rate": 2.85,
+            "duration_seconds": 931.58,
+            "watch_ratio": 2.85,
+            "interaction_rate": 1.28,
+            "comment_rate": 0.0,
+            "like_rate": 1.01,
+            "share_save_rate": 0.28,
+            "likes": 11,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-129-release-19",
+          "project_id": 129,
+          "topic": "封了9.8万个账号，然后呢？",
+          "hook_text": "一个十四岁的女孩，在二手平台上被明码标价。",
+          "score": 57.5,
+          "label": "播放潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 752,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 25.58,
+            "completion_rate": 3.1,
+            "duration_seconds": 825.16,
+            "watch_ratio": 3.1,
+            "interaction_rate": 0.8,
+            "comment_rate": 0.0,
+            "like_rate": 0.53,
+            "share_save_rate": 0.27,
+            "likes": 4,
+            "comments": 0,
+            "shares": 1,
+            "favorites": 1,
+            "follows": 0
+          }
+        }
+      ],
+      "completion_potential": [
+        {
+          "sample_id": "project-130-release-20",
+          "project_id": 130,
+          "topic": "换机，不是售后良心，是品控兜底算盘",
+          "hook_text": "花了一万多买台顶级旗舰，突然断网失联，去售后检测完",
+          "score": 2.9,
+          "label": "完播潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 1090,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 26.55,
+            "completion_rate": 2.85,
+            "duration_seconds": 931.58,
+            "watch_ratio": 2.85,
+            "interaction_rate": 1.28,
+            "comment_rate": 0.0,
+            "like_rate": 1.01,
+            "share_save_rate": 0.28,
+            "likes": 11,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-129-release-19",
+          "project_id": 129,
+          "topic": "封了9.8万个账号，然后呢？",
+          "hook_text": "一个十四岁的女孩，在二手平台上被明码标价。",
+          "score": 3.1,
+          "label": "完播潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 752,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 25.58,
+            "completion_rate": 3.1,
+            "duration_seconds": 825.16,
+            "watch_ratio": 3.1,
+            "interaction_rate": 0.8,
+            "comment_rate": 0.0,
+            "like_rate": 0.53,
+            "share_save_rate": 0.27,
+            "likes": 4,
+            "comments": 0,
+            "shares": 1,
+            "favorites": 1,
+            "follows": 0
+          }
+        }
+      ],
+      "comment_potential": [
+        {
+          "sample_id": "project-130-release-20",
+          "project_id": 130,
+          "topic": "换机，不是售后良心，是品控兜底算盘",
+          "hook_text": "花了一万多买台顶级旗舰，突然断网失联，去售后检测完",
+          "score": 4.8,
+          "label": "评论潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 1090,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 26.55,
+            "completion_rate": 2.85,
+            "duration_seconds": 931.58,
+            "watch_ratio": 2.85,
+            "interaction_rate": 1.28,
+            "comment_rate": 0.0,
+            "like_rate": 1.01,
+            "share_save_rate": 0.28,
+            "likes": 11,
+            "comments": 0,
+            "shares": 2,
+            "favorites": 1,
+            "follows": 0
+          }
+        },
+        {
+          "sample_id": "project-129-release-19",
+          "project_id": 129,
+          "topic": "封了9.8万个账号，然后呢？",
+          "hook_text": "一个十四岁的女孩，在二手平台上被明码标价。",
+          "score": 3.8,
+          "label": "评论潜力",
+          "metrics": {
+            "impressions": 0,
+            "views": 752,
+            "click_through_rate": 0.0,
+            "average_watch_seconds": 25.58,
+            "completion_rate": 3.1,
+            "duration_seconds": 825.16,
+            "watch_ratio": 3.1,
+            "interaction_rate": 0.8,
+            "comment_rate": 0.0,
+            "like_rate": 0.53,
+            "share_save_rate": 0.27,
+            "likes": 4,
+            "comments": 0,
+            "shares": 1,
+            "favorites": 1,
+            "follows": 0
+          }
+        }
+      ]
+    },
+    "policy": {
+      "method": "带样本置信度与时间衰减的增量频道记忆",
+      "rule_activation_threshold": 0.25,
+      "max_prompt_rules": 8,
+      "note": "单期表现只形成带权证据，不会永久写死频道；后续样本会继续增强、削弱或替换规则。"
+    },
+    "updated_at": 1791735973.9721801,
+    "production_guidance": {
+      "sample_count": 2,
+      "current_problem": "标题或选题能把人带进来，但正文没有持续交付新信息，观众在中后段离开。",
+      "proven_strength": "核查价值和实用判断具备转发空间",
+      "next_experiment": "主结论完整交付：开头先给结果，随后按“证据→原因→影响→怎么做”推进；时长由必要信息决定，不为追求短而删掉关键解释。",
+      "observation_metrics": [
+        "2 秒留存",
+        "5 秒留存",
+        "完播率"
+      ],
+      "script_constraints": [
+        "开头 2 秒直接兑现标题中的对象、结果或冲突，不先讲背景。",
+        "8 秒内交付第一条事实、数字、动作或可观察结果。",
+        "一期围绕一个主结论展开，但允许用事实、原因、影响和行动建议把结论讲完整；只有无关支线才另立选题。",
+        "每一段至少新增证据、原因、后果或判断中的一种，禁止换句话重复。",
+        "术语后立刻用生活场景或动作解释，始终使用大白话。",
+        "只有资料存在真实分歧时，才讲清双方最强理由并给出本期判断。",
+        "先完整交付结论，再决定是否提一个承接结论的问题。",
+        "不使用固定 CTA，不让观众替创作者找资料或补证据。",
+        "时长由有效证据量决定，不凑时长，也不为压时长删掉必要证据。",
+        "当前完播实验优先控制在 60–100 秒；超过该范围必须说明新增了哪些不可删除的证据节点。"
+      ],
+      "evidence": [
+        "2/2 个有效样本完播低于 22%，中位完播 3.0%。",
+        "有效样本中位时长约 878 秒。",
+        "完播率 3.1% 显示中后段流失。",
+        "评论为 0。",
+        "推算片长约 825 秒且完播率 3.1%。"
+      ],
+      "generation_reasons": [
+        {
+          "title": "本期开头直接给结果",
+          "reason": "历史数据表明包装或选题能带来播放，但低完播说明正文兑现太慢。"
+        },
+        {
+          "title": "本期围绕一个主结论展开",
+          "reason": "过去的问题不是信息太多，而是信息没有围绕同一主结论形成推进；本期保留完整证据链，删除无关支线。"
+        },
+        {
+          "title": "每段必须推进新信息",
+          "reason": "下一期重点删除同义复述，用证据、原因、后果和判断持续兑现标题。"
+        },
+        {
+          "title": "保留可转发判断",
+          "reason": "历史分享信号说明实用核查标准值得继续保留。"
+        }
+      ],
+      "median_completion_rate": 3.0,
+      "median_duration_seconds": 878.4,
+      "low_completion_count": 2
+    },
+    "fingerprint": "be5acf22bbbf13ce"
+  },
+  "generated_at": 1791735973.97618,
+  "fingerprint": "65edfe518d2dc13d"
+}

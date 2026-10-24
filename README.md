@@ -96,3 +96,7 @@ git status --ignored --short
 特别鸣谢
 谢谢！
 <a href="https://linux.do/" >LINUX DO</a>
+
+## 交流群
+
+点击链接加入群聊【GPT佬友汇】：https://qm.qq.com/q/3PXbRh01mM

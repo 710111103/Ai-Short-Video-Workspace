@@ -3,43 +3,61 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "ROOT=%~dp0"
-set "PYTHON=%ROOT%..\.venv\Scripts\python.exe"
+set "PYTHON="
+set "PYTHONW="
+set "CODEX_PYTHON=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+set "CODEX_PYTHONW=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+set "LEGACY_PYTHON=%ROOT%..\.venv\Scripts\python.exe"
+set "LEGACY_PYTHONW=%ROOT%..\.venv\Scripts\pythonw.exe"
 set "HEALTH_URL=http://127.0.0.1:8765/"
 set "APP_URL=http://127.0.0.1:8765/studio/"
 set "OUT_LOG=%ROOT%logs\server.out.log"
 set "ERR_LOG=%ROOT%logs\server.err.log"
 set "PID_FILE=%ROOT%logs\server.pid"
 
-if not exist "%PYTHON%" (
-  echo [ERROR] Python virtual environment not found:
-  echo %PYTHON%
+if exist "%CODEX_PYTHON%" (
+  set "PYTHON=%CODEX_PYTHON%"
+  if exist "%CODEX_PYTHONW%" set "PYTHONW=%CODEX_PYTHONW%"
+)
+if not defined PYTHON if exist "%LEGACY_PYTHON%" (
+  "%LEGACY_PYTHON%" -c "import sys" >nul 2>nul
+  if not errorlevel 1 (
+    set "PYTHON=%LEGACY_PYTHON%"
+    if exist "%LEGACY_PYTHONW%" set "PYTHONW=%LEGACY_PYTHONW%"
+  )
+)
+
+if not defined PYTHONW set "PYTHONW=%PYTHON%"
+
+if not defined PYTHON (
+  echo [ERROR] No working Python runtime was found.
+  echo Checked:
+  echo %CODEX_PYTHON%
+  echo %LEGACY_PYTHON%
   echo.
   echo Please create .venv first.
-  pause
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [void](Invoke-WebRequest -Uri '%HEALTH_URL%' -UseBasicParsing -TimeoutSec 2); exit 0 } catch { exit 1 }"
+curl.exe --silent --show-error --fail --max-time 2 "%HEALTH_URL%" >nul 2>nul
 if %errorlevel%==0 (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($p) { Set-Content -Encoding ascii '%PID_FILE%' $p }"
   echo Backend is already running. Opening the app...
   explorer "%APP_URL%" >nul 2>nul
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
   exit /b 0
 )
 
 echo Starting Short Video Studio backend...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath '%PYTHON%' -ArgumentList '-m','uvicorn','app.main:app','--host','127.0.0.1','--port','8765' -WorkingDirectory '%ROOT%' -WindowStyle Hidden -RedirectStandardOutput '%OUT_LOG%' -RedirectStandardError '%ERR_LOG%' -PassThru; Set-Content -Encoding ascii '%PID_FILE%' $p.Id"
+"%PYTHON%" "launch_server_runtime.py" "%PYTHONW%" "%OUT_LOG%" "%ERR_LOG%" "%PID_FILE%"
 if errorlevel 1 (
-  echo [ERROR] Failed to spawn backend process.
-  pause
+  echo [ERROR] Failed to launch the detached backend process.
   exit /b 1
 )
+echo Waiting for backend to become ready...
 
 for /l %%i in (1,1,20) do (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [void](Invoke-WebRequest -Uri '%HEALTH_URL%' -UseBasicParsing -TimeoutSec 2); exit 0 } catch { exit 1 }"
+  curl.exe --silent --show-error --fail --max-time 2 "%HEALTH_URL%" >nul 2>nul
   if not errorlevel 1 goto open_app
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
+  ping 127.0.0.1 -n 2 >nul
 )
 
 echo [ERROR] Backend did not become ready.
@@ -53,12 +71,9 @@ if exist "%OUT_LOG%" (
   echo ---- server.out.log ----
   type "%OUT_LOG%"
 )
-pause
 exit /b 1
 
 :open_app
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($p) { Set-Content -Encoding ascii '%PID_FILE%' $p }"
 echo Backend is ready. Opening the app...
 explorer "%APP_URL%" >nul 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
 exit /b 0
